@@ -7,9 +7,11 @@ on:
 permissions:
   contents: read
 
+# One group per ref, so a run never cancels another ref's runs. Only PR runs are cancelled when superseded;
+# pushes to develop/main always finish (their macOS test would otherwise be cancelled by the next push).
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -93,6 +95,9 @@ jobs:
         run: pnpm e2e
 
   test-macos:
+    # macOS runners queue for a long time and PR runs were cancelled before starting; the Linux `test` job is the
+    # PR test gate, so macOS (the owner's platform, compiles the Keychain store) runs only after merge on develop/main.
+    if: github.event_name == 'push'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
