@@ -54,6 +54,17 @@ Owner area: Cargo.toml, crates/{core,server,cli,...stubs}, config/, fixtures/con
 - TS-22-3: replace TestApp temp dist dirs with `tempfile::TempDir` so they are removed (`tests/common/mod.rs`).
 - SEC-22-1: done in slice 7 (`web_dist` fixed const).
 - SEC-22-2: done for now in slice 7; keep `/healthz` data-free as status fields grow.
+- SEC-24-1 (owner decision, keep): `BAZAAR_PORT` env fallback stays next to `serve --port` (priority flag > env > default); the host is not configurable and `ensure_loopback` still forces 127.0.0.1. This deviates from the written security rule (port via `--port` only); the rule text should be updated to match.
+- SEC-24-2: `BAZAAR_CONFIG_DIR` redirects config loading; treat as dev/test, and confirm the loader still enforces `hard_limits` and refuses `execution_mode = live` without the opt-in (verify in the F1 T2 pass).
+- SEC-24-3 (accepted): the launch URL with its one-time token is printed and passed to `open`/`xdg-open`, visible in `ps` briefly; low risk, one-time token.
+- SEC-24-4: confirm no TraceLayer logs the URI query so `/auth?token=` never reaches logs (check in the slice 9 / T2 review).
+- TS-24-1: add an assert_cmd test that runs `bazaar-server openapi` as a process and parses stdout.
+- TS-24-2: non-loopback refusal is tested only via `ensure_loopback` in security.rs; low value, no action unless `bind_addr` takes a host.
+- CR-25-1: `unwrap` in `web/src/api/client.ts` throws on an empty 2xx body; check `response.ok` and `error === undefined` before the first non-GET route.
+- CR-25-2, SEC-25-1: any 401 fires session-ended but `onSessionEnded` is not wired; `statusQuery` keeps polling after the session ends. Wire it to the `authMe` query cache or add an `enabled` flag, or drop the listener.
+- SEC-25-2: `onSessionEnded` is a single module-level slot (last registration wins); use a Set if a second consumer appears.
+- TS-25-1: test CSRF header injection in `client.ts` `onRequest` (non-GET gets `X-CSRF-Token`; no token throws) with a temporary msw POST handler, at the latest in the first mutating slice.
+- TS-25-2 (optional): assert PAPER vs non-paper differ by class or data attribute, not only text and `data-mode`.
 
 ## History
 - 2026-11-18: slice 0 scaffold.
