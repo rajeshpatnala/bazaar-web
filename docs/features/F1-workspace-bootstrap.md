@@ -36,6 +36,7 @@ Owner area: Cargo.toml, crates/{core,server,cli,...stubs}, config/, fixtures/con
 
 ## Deferred
 - CR-F1-1: slice 9 reverts the workspace cargo lint allows `unused_dependencies` and `unused_workspace_dependencies` (Cargo.toml `[workspace.lints.cargo]`).
+- CR-F1-S5-1: slice 6 adds a router-level test: every OpenAPI path returns 401 without a cookie (exempt: `/healthz`, `/auth`, Kite callback). Slice 6 also wires layers with `security_headers` outermost, then `host_guard`, `origin_guard`, `problem_backstop` (see `security.rs` module doc).
 
 ## History
 - 2026-11-18: slice 0 scaffold.

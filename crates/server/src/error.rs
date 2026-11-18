@@ -61,6 +61,8 @@ pub enum ApiError {
     ForbiddenOrigin,
     /// 403 CSRF header missing or wrong.
     CsrfInvalid,
+    /// 403 any other refusal (not a guard); generic.
+    Forbidden,
     /// 404 unknown API path.
     NotFound,
     /// 405.
@@ -86,7 +88,8 @@ impl ApiError {
         match self {
             Self::BadRequest => StatusCode::BAD_REQUEST,
             Self::Unauthenticated => StatusCode::UNAUTHORIZED,
-            Self::LaunchTokenInvalid
+            Self::Forbidden
+            | Self::LaunchTokenInvalid
             | Self::ForbiddenHost
             | Self::ForbiddenOrigin
             | Self::CsrfInvalid => StatusCode::FORBIDDEN,
@@ -111,6 +114,7 @@ impl ApiError {
             Self::ForbiddenHost => "forbidden_host",
             Self::ForbiddenOrigin => "forbidden_origin",
             Self::CsrfInvalid => "csrf_invalid",
+            Self::Forbidden => "forbidden",
             Self::NotFound => "not_found",
             Self::MethodNotAllowed => "method_not_allowed",
             Self::RequestTimeout => "request_timeout",
@@ -130,6 +134,7 @@ impl ApiError {
             Self::ForbiddenHost => "Host not allowed",
             Self::ForbiddenOrigin => "Origin not allowed",
             Self::CsrfInvalid => "CSRF token invalid",
+            Self::Forbidden => "Forbidden",
             Self::NotFound => "Not found",
             Self::MethodNotAllowed => "Method not allowed",
             Self::RequestTimeout => "Request timed out",
@@ -149,6 +154,7 @@ impl ApiError {
             Self::ForbiddenHost => "This Host header is not allowed.",
             Self::ForbiddenOrigin => "This Origin is not allowed.",
             Self::CsrfInvalid => "The CSRF token is missing or wrong.",
+            Self::Forbidden => "This request is not allowed.",
             Self::NotFound => "No such API route.",
             Self::MethodNotAllowed => "This method is not allowed on this route.",
             Self::RequestTimeout => "The request took too long.",
@@ -189,7 +195,7 @@ impl ApiError {
             StatusCode::UNSUPPORTED_MEDIA_TYPE => Self::UnsupportedMediaType,
             StatusCode::UNPROCESSABLE_ENTITY => Self::Validation(Vec::new()),
             StatusCode::TOO_MANY_REQUESTS => Self::RateLimited,
-            StatusCode::FORBIDDEN => Self::ForbiddenOrigin,
+            StatusCode::FORBIDDEN => Self::Forbidden,
             s if s.is_client_error() => Self::BadRequest,
             _ => Self::Internal,
         }
@@ -353,9 +359,9 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let (s, ct, j) = run(req).await;
-        assert!(s.is_client_error());
+        assert_eq!(s, StatusCode::BAD_REQUEST);
         assert_eq!(ct, PROBLEM_JSON);
-        assert!(j["code"].is_string());
+        assert_eq!(j["code"], "bad_request");
     }
 
     #[tokio::test]
@@ -389,6 +395,7 @@ mod tests {
             ApiError::LaunchTokenInvalid,
             ApiError::ForbiddenHost,
             ApiError::ForbiddenOrigin,
+            ApiError::Forbidden,
             ApiError::CsrfInvalid,
             ApiError::NotFound,
             ApiError::MethodNotAllowed,
@@ -411,13 +418,66 @@ mod tests {
             assert_eq!(p.status, e.status().as_u16());
             assert_eq!(p.type_, format!("urn:bazaar:problem:{}", p.code));
         }
-        assert_eq!(all[11].problem().errors.len(), 1);
+        assert_eq!(all[12].problem().errors.len(), 1);
     }
 
     #[tokio::test]
     async fn unknown_api_is_404_problem() {
         let res = unknown_api().await.into_response();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        assert_eq!(res.headers()[header::CONTENT_TYPE], PROBLEM_JSON);
+        let b = res.into_body().collect().await.unwrap().to_bytes();
+        let j: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(j["code"], "not_found");
+    }
+
+    async fn by_id(ApiPath(id): ApiPath<u32>) -> String {
+        id.to_string()
+    }
+
+    #[tokio::test]
+    async fn api_path_rejection_is_problem() {
+        let app = Router::new().route("/item/{id}", axum::routing::get(by_id));
+        let ok = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/item/7")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        let bad = app
+            .oneshot(
+                Request::builder()
+                    .uri("/item/abc")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(bad.headers()[header::CONTENT_TYPE], PROBLEM_JSON);
+        let b = bad.into_body().collect().await.unwrap().to_bytes();
+        let j: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(j["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn backstop_bare_403_is_generic_forbidden() {
+        let app = Router::new()
+            .route("/x", axum::routing::get(|| async { StatusCode::FORBIDDEN }))
+            .layer(axum::middleware::from_fn(problem_backstop));
+        let res = app
+            .oneshot(Request::builder().uri("/x").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let b = res.into_body().collect().await.unwrap().to_bytes();
+        let j: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(j["code"], "forbidden");
     }
 
     #[test]
