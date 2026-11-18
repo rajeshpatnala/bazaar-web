@@ -1,3 +1,87 @@
+# TEST ONLY: obviously fake round numbers; never real rates. Real rates are owner-supplied in config/charges.toml.
 schema_version = 1
-placeholder = true
-source = "synthetic fixture: placeholder file"
+verified_on = "2026-01-05"
+source = "synthetic fixture: dummy values"
+
+[meta]
+broker = "testbroker"
+currency = "INR"
+max_age_days = 90
+history_policy = "effective_dated"
+
+[gst]
+rate_pct = "10"
+verified_on = "2026-01-05"
+source = "synthetic fixture"
+
+[dp]
+per_scrip_total = "10"
+includes_gst = false
+verified_on = "2026-01-05"
+source = "synthetic fixture"
+
+[option_exercise]
+stt_pct = "0.5"
+verified_on = "2026-01-05"
+source = "synthetic fixture"
+
+# Two eras for NSE equity_intraday buy: the later one supersedes from 2025-04-01.
+[[rate_set]]
+exchange = "NSE"
+segment = "equity_intraday"
+side = "buy"
+effective_from = "2024-01-01"
+verified_on = "2026-01-05"
+source = "synthetic fixture"
+turnover_basis = "notional"
+brokerage = { kind = "flat_or_pct_lower", flat = "20", pct = "0.1" }
+stt_ctt_pct = "0"
+exchange_txn_pct = "0.01"
+sebi_per_crore = "10"
+ipft_pct = "0"
+stamp_pct = "0.01"
+
+[[rate_set]]
+exchange = "NSE"
+segment = "equity_intraday"
+side = "buy"
+effective_from = "2025-04-01"
+verified_on = "2026-01-05"
+source = "synthetic fixture"
+turnover_basis = "notional"
+brokerage = { kind = "flat_or_pct_lower", flat = "20", pct = "0.1" }
+stt_ctt_pct = "0"
+exchange_txn_pct = "0.02"
+sebi_per_crore = "10"
+ipft_pct = "0"
+stamp_pct = "0.01"
+
+[[rate_set]]
+exchange = "NSE"
+segment = "equity_delivery"
+side = "sell"
+effective_from = "2024-01-01"
+verified_on = "2026-01-05"
+source = "synthetic fixture"
+turnover_basis = "notional"
+brokerage = { kind = "zero" }
+stt_ctt_pct = "0.1"
+exchange_txn_pct = "0.01"
+sebi_per_crore = "10"
+ipft_pct = "0"
+stamp_pct = "0"
+
+[[rate_set]]
+exchange = "NSE"
+segment = "equity_options"
+side = "sell"
+effective_from = "2024-01-01"
+verified_on = "2026-01-05"
+source = "synthetic fixture"
+turnover_basis = "premium"
+brokerage = { kind = "flat", flat = "20" }
+stt_ctt_pct = "0.1"
+exchange_txn_pct = "0.03"
+sebi_per_crore = "10"
+ipft_pct = "0.001"
+stamp_pct = "0"

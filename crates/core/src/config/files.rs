@@ -1,6 +1,6 @@
 //! Typed structs for the six files that carry little or no data in F1.
 //!
-//! `charges`, `strategies`, `data` and `compliance` are header-only; a later feature replaces
+//! `strategies`, `data` and `compliance` are header-only; a later feature replaces
 //! each struct with its real tables (and `deny_unknown_fields` makes a premature table fail).
 
 use chrono::NaiveDate;
@@ -44,11 +44,6 @@ macro_rules! header_only {
     };
 }
 
-header_only!(
-    /// `charges.toml`: rate sets arrive with F2 (owner: `bz-backtest-risk`).
-    ChargesConfig,
-    "charges.toml"
-);
 header_only!(
     /// `strategies.toml`: enabled strategies and params (owner: `bz-quant`).
     StrategiesConfig,
@@ -215,11 +210,9 @@ mod tests {
     #[test]
     fn header_only_files_reject_tables() {
         let text = format!("{HEAD}[rates]\nstt = \"1\"\n");
-        assert!(parse_str::<ChargesConfig>(&text).is_err());
         assert!(parse_str::<StrategiesConfig>(&text).is_err());
         assert!(parse_str::<DataConfig>(&text).is_err());
         assert!(parse_str::<ComplianceConfig>(&text).is_err());
-        assert!(parse_str::<ChargesConfig>(HEAD).is_ok());
     }
 
     #[test]
