@@ -125,9 +125,10 @@ jobs:
       - if: hashFiles('Cargo.lock') != ''
         uses: EmbarkStudios/cargo-deny-action@v2
 
-  # Permanent guard (not a bypass): the job activates itself once the generated
-  # API schema (web/src/api/schema.d.ts) is committed, i.e. once the server
-  # `openapi` subcommand and the web `gen:api` script exist.
+  # Permanent guard (not a bypass): the steps run only once the generated API
+  # schema (web/src/api/schema.d.ts) is committed. The guard checks that file
+  # only; it is committed alongside the server `openapi` command and the web
+  # `gen:api` script (F1 slice 7), so the job self-activates then.
   openapi-drift:
     runs-on: ubuntu-latest
     steps:
