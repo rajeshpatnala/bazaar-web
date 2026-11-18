@@ -2,11 +2,13 @@
 
 //! Headless composition root (clap): check-connections, imports, backtest.
 //!
-//! F1 ships the argument shape only; subcommands arrive with the features that own them.
+//! F2 adds the two offline subcommands `import-instruments` and `check-connections`.
+
+pub mod commands;
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 /// Command line of `bazaar-cli`.
 #[derive(Debug, Parser)]
@@ -22,6 +24,22 @@ pub struct Cli {
     /// Directory for runtime data (SQLite, Parquet); defaults to `data`.
     #[arg(long, global = true, default_value = "data")]
     pub data_dir: PathBuf,
+    /// What to run; with none, only the shared arguments are parsed.
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+/// Subcommands.
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Check the SQLite store and the freshness of the instrument master.
+    CheckConnections,
+    /// Import a Kite-format instruments CSV file into the store (no network).
+    ImportInstruments {
+        /// Path of the CSV file.
+        #[arg(long)]
+        file: PathBuf,
+    },
 }
 
 #[cfg(test)]
@@ -47,6 +65,16 @@ mod tests {
         .unwrap();
         assert_eq!(cli.config_dir, PathBuf::from("fixtures/config"));
         assert_eq!(cli.data_dir, PathBuf::from("/tmp/x"));
+    }
+
+    #[test]
+    fn parses_subcommands() {
+        let c = Cli::try_parse_from(["bazaar-cli", "check-connections"]).unwrap();
+        assert!(matches!(c.command, Some(Command::CheckConnections)));
+        let c =
+            Cli::try_parse_from(["bazaar-cli", "import-instruments", "--file", "a.csv"]).unwrap();
+        assert!(matches!(c.command, Some(Command::ImportInstruments { .. })));
+        assert!(Cli::try_parse_from(["bazaar-cli", "import-instruments"]).is_err());
     }
 
     #[test]

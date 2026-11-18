@@ -37,4 +37,5 @@ Owner area: `config/{calendar,charges}.toml`, `crates/{data,store}`, `core/src/{
 
 ## History
 - Slice 3: instrument master parser (`bazaar_data::instruments`), bounded, dedupes, counts rejects.
+- Slice 5: `bazaar-cli import-instruments --file` and `check-connections` (bounded read, 0700 data dir, freshness vs calendar; placeholder calendar never fresh); cargo deny check: advisories, bans, licenses, sources ok.
 -
