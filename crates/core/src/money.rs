@@ -103,6 +103,8 @@ impl Neg for Money {
 }
 
 /// Non-negative price on an instrument, a multiple of that instrument's tick.
+///
+/// Deliberately has no `Deserialize`: a price must pass `snap_to_tick` (parse, do not validate).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct Price(#[serde(with = "rust_decimal::serde::str")] Decimal);
 
@@ -110,13 +112,13 @@ impl Price {
     /// Snap `raw` to the nearest multiple of `tick` (the tick comes from the instrument master).
     ///
     /// # Errors
-    /// `InvalidTick` if `tick <= 0`; `NegativeQuantity` if `raw < 0`; `Overflow` on overflow.
+    /// `InvalidTick` if `tick <= 0`; `NegativePrice` if `raw < 0`; `Overflow` on overflow.
     pub fn snap_to_tick(raw: Decimal, tick: Decimal) -> Result<Self, DomainError> {
         if tick <= Decimal::ZERO {
             return Err(DomainError::InvalidTick);
         }
         if raw < Decimal::ZERO {
-            return Err(DomainError::NegativeQuantity);
+            return Err(DomainError::NegativePrice);
         }
         let steps = raw
             .checked_div(tick)
@@ -223,7 +225,7 @@ mod tests {
         );
         assert_eq!(
             Price::snap_to_tick(d("-1"), d("0.05")),
-            Err(DomainError::NegativeQuantity)
+            Err(DomainError::NegativePrice)
         );
     }
 

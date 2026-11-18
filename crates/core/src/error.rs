@@ -11,7 +11,10 @@ pub enum DomainError {
     /// Lot size was zero.
     #[error("lot size must be positive")]
     InvalidLotSize,
-    /// A quantity or price was negative.
+    /// A price was negative.
+    #[error("negative price")]
+    NegativePrice,
+    /// A quantity was negative.
     #[error("negative quantity or price")]
     NegativeQuantity,
     /// A timestamp fell outside the trading session.
