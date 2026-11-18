@@ -30,6 +30,7 @@ Owner area: `config/{calendar,charges}.toml`, `crates/{data,store}`, `core/src/{
 
 ## Deferred
 - TS-21-1..4, TS-21-6 and CR-21-3 (moved from F1): done in slice 1 (calendar tests and a comment in `next/prev_trading_day`).
+- Delisting/prune policy for the SQLite instrument master (CR-34-4): F2 does not prune rows absent from a newer import; snapshots keep history and expired rows are filtered by `on_or_after`. Revisit in F3.
 
 ## History
 -

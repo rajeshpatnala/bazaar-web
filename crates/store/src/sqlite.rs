@@ -1,5 +1,10 @@
 //! SQLite implementation of [`InstrumentRepo`]: one writer pool, forward-only migrations,
 //! runtime queries with explicit columns. Errors are mapped to safe categories only.
+//!
+//! Key normalisation: `tradingsymbol` is trimmed and ASCII-upper-cased on write and in `get`;
+//! `exchange` is stored as its canonical code; `name` is stored verbatim and matched with
+//! `UPPER(TRIM(name))` in queries. An import dated before the latest import is rejected
+//! (`RepoError::Other`) so older data never overwrites newer rows.
 
 use std::borrow::Cow;
 use std::path::Path;
@@ -88,7 +93,7 @@ fn bind_row<'q>(
     Ok(sqlx::query(sql)
         .bind(to_i64(r.instrument_token)?)
         .bind(to_i64(r.exchange_token)?)
-        .bind(r.tradingsymbol.clone())
+        .bind(norm(&r.tradingsymbol))
         .bind(r.name.clone())
         .bind(r.exchange.as_str().to_owned())
         .bind(r.instrument_type.as_str().to_owned())
@@ -136,6 +141,24 @@ pub struct SqliteStore {
     pool: SqlitePool,
 }
 
+/// Best effort: owner-only access to the database and its WAL/SHM files (unix).
+fn restrict_permissions(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for suffix in ["", "-wal", "-shm"] {
+            let mut p = path.as_os_str().to_owned();
+            p.push(suffix);
+            let _ = std::fs::set_permissions(
+                std::path::PathBuf::from(p),
+                std::fs::Permissions::from_mode(0o600),
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
 impl SqliteStore {
     /// Open (creating if missing) the database at `path` and run migrations.
     pub async fn open(path: &Path) -> Result<Self, RepoError> {
@@ -145,7 +168,9 @@ impl SqliteStore {
             .journal_mode(SqliteJournalMode::Wal)
             .foreign_keys(true)
             .busy_timeout(Duration::from_secs(5));
-        Self::connect(opts).await
+        let store = Self::connect(opts).await?;
+        restrict_permissions(path);
+        Ok(store)
     }
 
     /// Open a private in-memory database (tests, dry runs) and run migrations.
@@ -159,6 +184,9 @@ impl SqliteStore {
     async fn connect(opts: SqliteConnectOptions) -> Result<Self, RepoError> {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
+            // The single connection must never be recycled: an in-memory DB would vanish.
+            .idle_timeout(None)
+            .max_lifetime(None)
             .acquire_timeout(Duration::from_secs(10))
             .connect_with(opts)
             .await
@@ -176,6 +204,15 @@ impl InstrumentRepo for SqliteStore {
     ) -> Result<UpsertSummary, RepoError> {
         let day = fmt_date(fetched_on);
         let mut tx = self.pool.begin().await.map_err(|e| map_err(&e))?;
+        let latest: Option<String> =
+            sqlx::query("SELECT MAX(fetched_on) AS latest FROM instrument_imports")
+                .fetch_one(&mut *tx)
+                .await
+                .and_then(|r| r.try_get("latest"))
+                .map_err(|e| map_err(&e))?;
+        if latest.as_deref().is_some_and(|l| l > day.as_str()) {
+            return Err(RepoError::Other); // stale import: never overwrite newer rows
+        }
         let mut written = 0_u64;
         for r in rows {
             bind_row(UPSERT_INSTRUMENT, r, &day)?
@@ -209,7 +246,7 @@ impl InstrumentRepo for SqliteStore {
     ) -> Result<Option<Instrument>, RepoError> {
         let row = sqlx::query(GET_INSTRUMENT)
             .bind(exchange.as_str().to_owned())
-            .bind(tradingsymbol.to_owned())
+            .bind(norm(tradingsymbol))
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| map_err(&e))?;
@@ -641,5 +678,68 @@ mod tests {
         let s = store().await;
         s.pool.close().await;
         assert_eq!(s.ping().await.expect_err("e"), RepoError::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn older_import_is_rejected_and_changes_nothing() {
+        let s = store().await;
+        let mut r = inst("X", "X", Exchange::Nse, InstrumentType::Equity, None);
+        s.upsert_instruments(std::slice::from_ref(&r), d(2026, 1, 6))
+            .await
+            .expect("new");
+        r.lot_size = 99;
+        let e = s
+            .upsert_instruments(&[r], d(2026, 1, 5))
+            .await
+            .expect_err("old");
+        assert_eq!(e, RepoError::Other);
+        let got = s.get(&Exchange::Nse, "X").await.expect("g").expect("some");
+        assert_eq!(got.lot_size, 25);
+        assert_eq!(s.last_fetched_on().await.expect("l"), Some(d(2026, 1, 6)));
+        assert_eq!(count(&s, "snapshots").await, 1);
+    }
+
+    #[tokio::test]
+    async fn tradingsymbol_key_is_trimmed_and_case_normalised() {
+        let s = store().await;
+        let r = inst(
+            " reliance ",
+            "RELIANCE",
+            Exchange::Nse,
+            InstrumentType::Equity,
+            None,
+        );
+        s.upsert_instruments(&[r], d(2026, 1, 5)).await.expect("up");
+        let got = s
+            .get(&Exchange::Nse, "Reliance")
+            .await
+            .expect("g")
+            .expect("some");
+        assert_eq!(got.tradingsymbol, "RELIANCE");
+        assert!(
+            s.get(&Exchange::Nse, " RELIANCE ")
+                .await
+                .expect("g")
+                .is_some()
+        );
+        assert_eq!(count(&s, "instruments").await, 1);
+    }
+
+    #[tokio::test]
+    async fn pool_never_recycles_its_connection() {
+        let s = store().await;
+        assert_eq!(s.pool.options().get_idle_timeout(), None);
+        assert_eq!(s.pool.options().get_max_lifetime(), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn database_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("p.db");
+        let _s = SqliteStore::open(&path).await.expect("open");
+        let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 }

@@ -92,3 +92,4 @@ storybook-static/
 *.tsbuildinfo
 .env.local
 .env.*.local
+*-E
