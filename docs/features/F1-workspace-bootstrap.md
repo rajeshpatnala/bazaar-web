@@ -10,7 +10,7 @@ Owner area: Cargo.toml, crates/{core,server,cli,...stubs}, config/, fixtures/con
 - Given a clean checkout, when `just gate` runs, then fmt, clippy `-D warnings`, nextest and web typecheck/lint/vitest pass.
 - Given `cargo metadata`, then every crate edge is within the `bz-architecture` table, no domain crate depends on `bazaar-server`, and `live-trading` is in no `default` feature.
 - Given `config/`, then it holds exactly the eight files, each with `schema_version`, `verified_on`, `source`; loaders reject unknown keys and float money; `risk.toml` has `execution_mode = "paper"` and enforced `[hard_limits]`.
-- Given the fixture calendar, then `MarketCalendar` answers weekend/holiday/special session/out-of-range/expiry shift/session boundary with no hour, date or weekday literal in source.
+- Given the fixture calendar, then `MarketCalendar` answers weekend/holiday/special session/out-of-range/expiry shift/session boundary with no hour or date literal in non-test source (Sat/Sun weekend is the only structural weekday fact).
 - Given `bazaar-server` with test fakes, then it binds only loopback and `/healthz` answers without a session.
 - Given no session cookie, then `/api/v1/**` returns 401 problem+json; wrong Host, Origin or CSRF return 403 with the stable codes; unknown `/api/*` is 404 problem+json.
 - Given the launch URL, then `/auth?token=` gives 303 + `bz_session` once; reuse, wrong or expired token gives 403 `launch_token_invalid`.
@@ -23,7 +23,11 @@ Owner area: Cargo.toml, crates/{core,server,cli,...stubs}, config/, fixtures/con
 - Cargo feature `live-trading`: declared in `bazaar-broker`, forwarded (optional dependency) by `bazaar-cli` and `bazaar-server`, in no default.
 - Config keys: none yet (`BAZAAR_PORT`/`BAZAAR_CONFIG_DIR`/`BAZAAR_DATA_DIR` names stay in `.env.example`).
 
+- Slice 3 (core-calendar, PR 21): `core::calendar::MarketCalendar` built from `calendar.toml`: `is_trading_day`, `session_at`, `close_time`, `next/prev_trading_day`, `shift_to_prior_trading_day` (expiry shift). Semantics: a mock session never makes a day tradable; a clearing holiday does not close trading; a year outside the file's covered years is `CalendarError::OutOfRange` (never "open"); special sessions (e.g. Saturday muhurat) override the weekend; instants are UTC and converted to IST inside; no wall-clock reads.
+
 ## Decisions
+- AC4 wording: the Sat/Sun weekend is a structural fact in `calendar.rs`, not market data, so it stays a literal (documented in the module doc); hours, holidays, sessions and covered years all come from config (CR-21-1, owner not needed).
+- Calendar loader (`config/calendar.rs`) already enforces `start < end` for regular and special sessions and rejects overlapping regular sessions; special-vs-regular overlap is resolved by precedence (SEC-21-1).
 - Toolchain pinned to Rust 1.100.0 (owner, 2026-11-18).
 - 15 crates (not 14): the `bz-repo-structure` list is authoritative (owner).
 - Crate edges are declared up front in the manifests; the cargo lints `unused_dependencies` and `unused_workspace_dependencies` are set to `allow` in the workspace until F1 ends (reverting is a slice 9 task).
@@ -38,6 +42,9 @@ Owner area: Cargo.toml, crates/{core,server,cli,...stubs}, config/, fixtures/con
 - CR-F1-3 / SEC-F1-1: `[hard_limits]` live in the owner-editable `config/risk.toml` (owner decision: file-only). The DecisionGate feature adds an enforced check so a raised ceiling cannot slip through.
 - CR-F1-1: slice 9 reverts the workspace cargo lint allows `unused_dependencies` and `unused_workspace_dependencies` (Cargo.toml `[workspace.lints.cargo]`).
 - CR-F1-S5-1: slice 6 adds a router-level test: every OpenAPI path returns 401 without a cookie (exempt: `/healthz`, `/auth`, Kite callback). Slice 6 also wires layers with `security_headers` outermost, then `host_guard`, `origin_guard`, `problem_backstop` (see `security.rs` module doc).
+
+- TS-21-1..4, TS-21-6 (tests, F2 calendar-data slice): strengthen the calendar proptest (shift idempotent and never later, lands on a trading day, `session_at` Closed on non-trading days, all segments, `prev(next(x)) == x`); add Saturday-Closed, special-session edges (18:00:00 inclusive, 18:59:59), UTC/IST boundary (2026-01-05T18:29:59Z vs 18:30:00Z) and 2026-12-31T18:30Z OutOfRange, OutOfRange for `close_time`/`shift_to_prior_trading_day`.
+- CR-21-3: add a one-line comment in `next/prev_trading_day` that termination relies on the finite covered years (OutOfRange).
 
 ## History
 - 2026-11-18: slice 0 scaffold.
