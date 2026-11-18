@@ -25,6 +25,7 @@ Owner area: Cargo.toml, crates/{core,server,cli,...stubs}, config/, fixtures/con
 
 - Slice 3 (core-calendar, PR 21): `core::calendar::MarketCalendar` built from `calendar.toml`: `is_trading_day`, `session_at`, `close_time`, `next/prev_trading_day`, `shift_to_prior_trading_day` (expiry shift). Semantics: a mock session never makes a day tradable; a clearing holiday does not close trading; a year outside the file's covered years is `CalendarError::OutOfRange` (never "open"); special sessions (e.g. Saturday muhurat) override the weekend; instants are UTC and converted to IST inside; no wall-clock reads.
 - Slice 6 (server-app, PR 22): `bazaar-server` axum app (`app::build`) with `AppState`, OpenAPI document (`openapi` subcommand), `/healthz` (public, data-free), `/auth` (launch token to `bz_session`), `/api/v1/status`, unknown `/api/*` as 404 problem+json, static UI fallback from `web_dist` when `index.html` exists. Layers outermost first: `security_headers`, trace, `host_guard`, `origin_guard`, `problem_backstop`, timeout (30 s), body limit (1 MiB); session guard before CSRF guard. DTOs are separate from domain types; `live_enabled` comes from `cfg!`. No order route. In-process router tests in `crates/server/tests/app.rs`.
+- Slice 7 (server-startup, PR 24): `bazaar-server serve` loads `config/*.toml`, starts tracing (`RUST_LOG`, default info), binds `127.0.0.1` only (`ensure_loopback` assert; no host flag), prints the one-time launch URL to stdout via `writeln!` (never tracing), opens it best effort, and shuts down gracefully on Ctrl-C and SIGTERM. Port: `--port`, else `BAZAAR_PORT`, else 8787 (0 rejected). `BAZAAR_CONFIG_DIR` (default `config`) is a dev/test override of the config dir; the loader still enforces `[hard_limits]` and the mode rules. `BAZAAR_DATA_DIR` is not read yet. The launch URL is also an argument of `open`/`xdg-open` (briefly visible in `ps`; one-time, short-lived token: accepted). TraceLayer logs the path only (`path_only_span`), so `/auth?token=` is never logged. SEC-22-1 done (`web_dist` is the const `web/dist`), SEC-22-2 done (`/healthz` untouched). `deny.toml` reconciled, `cargo deny check` green.
 
 ## Decisions
 - AC4 wording: the Sat/Sun weekend is a structural fact in `calendar.rs`, not market data, so it stays a literal (documented in the module doc); hours, holidays, sessions and covered years all come from config (CR-21-1, owner not needed).
@@ -51,8 +52,8 @@ Owner area: Cargo.toml, crates/{core,server,cli,...stubs}, config/, fixtures/con
 - CR-22-2: done in this record (slice 6 entry above; the slice 3 and PR 21 text is correct, kept).
 - TS-22-2: assert money-typed schemas are strings and the `schema.d.ts` no-diff once the first Decimal DTO lands (`just openapi` no-diff is T2).
 - TS-22-3: replace TestApp temp dist dirs with `tempfile::TempDir` so they are removed (`tests/common/mod.rs`).
-- SEC-22-1 (slice 7): `web_dist` stays fixed config, never user input; verify in the slice 7 review of `main.rs` wiring.
-- SEC-22-2: keep `/healthz` data-free as status fields grow.
+- SEC-22-1: done in slice 7 (`web_dist` fixed const).
+- SEC-22-2: done for now in slice 7; keep `/healthz` data-free as status fields grow.
 
 ## History
 - 2026-11-18: slice 0 scaffold.

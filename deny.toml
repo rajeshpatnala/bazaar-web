@@ -1,4 +1,5 @@
-# cargo-deny config for Bazaar. Run `cargo deny check` once on the first full build and adjust with an owner note.
+# cargo-deny config for Bazaar. Reconciled 2026-11-19 (F1 s7): `cargo deny check` is green on the F1 tree.
+# "license-not-encountered" warnings are expected: the allow-list is kept ahead of later features' deps.
 [advisories]
 version = 2
 yanked = "deny"
