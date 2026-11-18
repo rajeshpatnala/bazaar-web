@@ -1,0 +1,4 @@
+# events.toml: no [[event]] rows yet (an unknown event is "unknown", never "none").
+schema_version = 1
+verified_on = "2026-11-18"
+source = "owner: placeholder, holds no market data yet; F2 fills it from official sources"

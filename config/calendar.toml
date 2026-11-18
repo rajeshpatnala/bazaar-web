@@ -1,0 +1,6 @@
+# calendar.toml: no sessions or holidays yet. With covered_years empty every date is out of range,
+# so MarketCalendar refuses to answer until F2 fills this file from official NSE circulars.
+schema_version = 1
+verified_on = "2026-11-18"
+source = "owner: placeholder, holds no market data yet; F2 fills it from official sources"
+covered_years = []

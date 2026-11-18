@@ -1,0 +1,22 @@
+# risk.toml: owner-set thresholds (profile decision recorded 2026-11-18 in the F1 plan).
+# Percentages and rupee amounts are strings (never TOML floats). The mode is edited here only:
+# there is no env var, CLI flag or HTTP route for it.
+schema_version = 1
+verified_on = "2026-11-18"
+source = "owner"
+
+[mode]
+execution_mode = "paper"
+
+[limits]
+max_risk_per_trade_pct = "1"
+max_daily_loss_pct = "3"
+
+# Ceilings the loader enforces: a [limits] value above its ceiling is a startup error.
+# Moving a ceiling needs an ADR in DECISIONS.md and the owner's explicit approval.
+[hard_limits]
+max_risk_per_trade_pct = "1"
+max_daily_loss_pct = "3"
+
+[execution]
+paper_starting_cash_inr = "100000"

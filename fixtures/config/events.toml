@@ -1,0 +1,10 @@
+schema_version = 1
+verified_on = "2026-01-05"
+source = "synthetic fixture, fictional values, not a market fact"
+
+[[event]]
+date = "2026-03-20"
+kind = "rbi_policy"
+symbol = ""
+note = "fictional market-wide event"
+source = "synthetic fixture"

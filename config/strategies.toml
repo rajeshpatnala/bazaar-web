@@ -1,0 +1,4 @@
+# strategies.toml: header only in F1. A later feature replaces the typed struct and adds the tables.
+schema_version = 1
+verified_on = "2026-11-18"
+source = "owner: placeholder, holds no market data yet; F2 fills it from official sources"
