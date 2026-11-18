@@ -1,6 +1,6 @@
 //! The one `Clock` trait. All time-dependent code takes `&dyn Clock`; no wall-clock reads elsewhere.
 //!
-//! `SystemClock` and the test-only `FakeClock` are added by F1 slice 1.
+//! `SystemClock` is the production clock; the test-only `FakeClock` is in `testutil` (feature `test-util`).
 
 use chrono::DateTime;
 use chrono_tz::Tz;
@@ -9,6 +9,17 @@ use chrono_tz::Tz;
 pub trait Clock: Send + Sync {
     /// Current instant in Asia/Kolkata.
     fn now_ist(&self) -> DateTime<Tz>;
+}
+
+/// Production clock: the single wall-clock read in the workspace.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    #[allow(clippy::disallowed_methods)]
+    fn now_ist(&self) -> DateTime<Tz> {
+        chrono::Utc::now().with_timezone(&chrono_tz::Asia::Kolkata)
+    }
 }
 
 #[cfg(test)]
@@ -31,5 +42,11 @@ mod tests {
         let clock: &dyn Clock = &Fixed(t);
         assert_eq!(clock.now_ist(), t);
         assert_eq!(clock.now_ist().timezone(), Kolkata);
+    }
+
+    #[test]
+    fn system_clock_reports_ist() {
+        let c: &dyn Clock = &SystemClock;
+        assert_eq!(c.now_ist().timezone(), Kolkata);
     }
 }
