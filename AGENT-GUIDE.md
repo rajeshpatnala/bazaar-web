@@ -20,13 +20,14 @@ The manager asks the tech lead to plan it, launches the right developers, has th
   not just the place you named.
 - **Checks are tiered.** Each piece of work is checked quickly as it's built; the full test matrix runs once per feature.
 - **Every report says where to look**: which page, route or command shows the change, so you can see it yourself.
+- **Small changes are reviewed by envelope**: one short Claude call checks everything a small PR needs instead of several reviewer agents, which is much cheaper; bigger changes still get the full reviewers.
 - **Usage is measured, not guessed**: `just budget` and `just budget-report <id>` show real numbers per agent and for the manager.
 
 ## Asking for a specific agent
 
 If you want a particular agent, name it in your request. The manager still coordinates it (budget, reviews, merge rules).
 
-> "Have **dev-ui** do this: ..."
+> "Have **dev-data** do this: ..."
 > "Ask the **security-reviewer** to look at PR 12"
 > "Get the **architect** to design ..."
 
@@ -46,19 +47,20 @@ If you want a particular agent, name it in your request. The manager still coord
 
 | Agent | Main skill | Typical work |
 |---|---|---|
-| dev-ui | `fe-design-system` | tokens, components, Storybook, CSS |
-| dev-auth | `fe-auth-realtime` | auth, sessions, guards, real-time |
-| dev-perf | `fe-performance` | budgets, RUM, bundle, images, fonts |
-| dev-a11y | `fe-a11y-i18n` | a11y, i18n, focus, translations |
-| dev-platform | `fe-cicd-observability` | runtime config, flags, Sentry, deploy scripts |
-| dev-app | `fe-app-architecture` | features, pages, data, forms, foundation, general |
+| dev-data | `bz-market-data` | broker adapters, WebSocket client, bhavcopy, instrument master, corporate actions, storage |
+| dev-quant | `bz-quant` | indicators, options math, regime, strategies, scanner and scoring |
+| dev-backtest | `bz-backtest-risk` | backtester, cost model, slippage, metrics, walk-forward, sizing, DecisionGate rules |
+| dev-execution | `bz-execution` | order pipeline, approvals, paper account and fills, kill switch, rate limits, audit log, broker crate |
+| dev-api | `bz-web-api` | endpoints, WebSocket, auth and sessions, OpenAPI, error mapping, static UI serving |
+| dev-ui | `bz-web-ui` | screens, charts, Why panels, approval dialog, settings, API client |
+| dev-core | `bz-repo-structure` | core types, IST calendar, config, cli, wiring, refactors, general |
 | cicd | `ci-cd` | CI workflows, Docker, release automation, Dependabot |
 
 Example requests:
 
-> "Add a **dev-ui** task: ..."
+> "Add a **dev-data** task: ..."
 > "Fix the failing build in CI" (goes to **cicd**)
-> "Refactor the error handling" (goes to **dev-app**, the general developer)
+> "Refactor the error handling" (goes to **dev-core**, the general developer)
 
 ### Reviewers and testers
 
@@ -71,21 +73,15 @@ Example requests:
 
 You don't need to ask for reviews: every PR gets a code review automatically, and a security review and tester when it's large or touches sensitive files (`just review-plan <pr>` shows which).
 
-### Auditor
+### Domain agents (Bazaar)
 
 | Agent | Ask it for | Example request |
 |---|---|---|
-| fe-auditor | A full or scoped audit of the front end: security, payments, architecture, quality, accessibility, performance, testing, playbook gaps. Writes a report to `docs/audits/` | "Audit the whole front end" / "Audit the checkout flow for security" |
+| market-strategist | A trader's view before building: which strategies fit a regime, the evidence a strategy needs, options structure choice, Why-panel wording, strategy specs in `docs/strategy/` | "Should we add an iron condor screener? What evidence would it need?" |
+| risk-guardian | A veto review of anything touching risk limits, the DecisionGate, approvals, paper/live execution or automation | "Have risk-guardian check the paper trading PR" |
+| quant-reviewer | A correctness review of indicators, options math, backtests, costs and recommendations | "Ask quant-reviewer to check the RSI(2) strategy PR for look-ahead" |
 
-Fixes from an audit go through the normal flow: the tech lead triages the findings and developers fix them.
-
-### Prototyper (look-and-feel requests)
-
-| Agent | Ask it for | Example request |
-|---|---|---|
-| prototyper | Up to three clickable demo pages of different directions, before anything is built. You open `previews/<id>/index.html`, pick one, and say what to keep or drop | "Make the homepage feel more premium" / "Show me a few options for the product cards" |
-
-You don't need to name it: the manager uses it automatically for "make it look/feel ..." requests.
+The app decides by rules (`config/risk.toml`), never by feeling: overrides need a typed reason and are logged. Paper trading uses the same pipeline as live; you approve every order. Bazaar is a local web app: `just run` starts it on your Mac at http://127.0.0.1:8787 (loopback only) and opens your browser with a one-time login link. Closing the tab does not stop the server; scans, paper trading and the kill switch run in the server.
 
 ## Common requests
 
@@ -120,7 +116,7 @@ Started using the kit on a project that already had features? Say "backfill the 
 To work with a single agent without the manager, start Claude Code with it as the main session:
 
 ```bash
-claude --agent dev-ui
+claude --agent dev-data
 ```
 
 Its safety hooks (secrets, branch guards, the developer gate) still apply, but the manager's coordination doesn't: no budget tracking, no automatic reviews, no board updates. Use it for quick one-off work; for anything that should be reviewed and merged, go through the manager.

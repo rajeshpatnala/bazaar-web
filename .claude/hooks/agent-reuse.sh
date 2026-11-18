@@ -48,8 +48,9 @@ with ledger.open() as f:
             continue
         if (now - when).total_seconds() <= window * 60:
             prev = r
-if prev and task_now and prev.get("task") and prev["task"] not in (task_now, "untracked"):
-    sys.exit(0)  # a different feature/task: a fresh agent is right
+feat = lambda t: (re.match(r"^([A-Za-z]+\d+)", t or "") or [None, t or ""])[1]  # F1-s3 and F1-s6 are both feature F1
+if prev and task_now and prev.get("task") and prev["task"] != "untracked" and feat(prev["task"]) != feat(task_now):
+    sys.exit(0)  # a different feature: a fresh agent is right
 if prev and int(prev.get("tokens") or 0) > max_ctx:
     sys.exit(0)  # the warm agent's context is already large; continuing it costs more than a fresh start
 if not prev:

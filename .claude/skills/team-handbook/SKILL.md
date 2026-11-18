@@ -58,7 +58,7 @@ just changelog     # offline changelog (release-please does it on GitHub)
 just base          # integration branch; just new-branch <name> creates a work branch from it
 just review-pack N # one-shot review context; just review-plan N = which reviews are needed
 just merge-check N # can PR N merge? (target, title, CI, reviewer verdicts) - the only source for "green"
-just ship N        # tech lead only: wait for CI, merge-check, merge, update branch + codemap (just pr-wait N = only wait)
+just ship N        # manager, once approved: wait for CI, merge-check, merge, update branch + codemap (just pr-wait N = only wait)
 just promote N     # release branch, asks the user
 just status        # one-shot status: checkout, budget, board, open PRs + CI, bugs
 just envelope N    # small PR: all required reviews in one tool-free call (exit 3 = launch reviewers)
@@ -72,7 +72,7 @@ just bugs          # open bugs; just bug-new "<title>" --feature F7 --severity h
 
 1. **Secrets:** never read, grep, print, copy or edit `.env*` (except `.env.example`), key files, `secrets/`, or environment dumps. Use `just db-check` for connectivity. Hooks enforce this.
 2. **Mocks only:** tests use fakes/mocks, mock servers, or ephemeral test databases started by the test. No agent touches real or shared data stores.
-3. **Git:** work branches come from the integration branch (`just base`, default `develop`) and PRs target it, with Conventional Commit titles. Reviews happen on the PR; the tech lead merges with `just ship <pr>` (waits for CI in the script, then merge-check, merge, update) - never poll CI turn by turn. The release branch (`main`) moves only through `just promote`, which the user approves. Nobody pushes to protected branches. Report PR status only from `just merge-check`.
+3. **Git:** work branches come from the integration branch (`just base`, default `develop`) and PRs target it, with Conventional Commit titles. Reviews happen on the PR; a PR merges once it is approved (by `just triage` when nothing needs judgment, else by the tech lead with `just approve <pr>`) and the manager runs `just ship <pr>` (waits for CI in the script, then merge-check, merge, update) - never poll CI turn by turn; no agent is launched just to merge. The release branch (`main`) moves only through `just promote`, which the user approves. Nobody pushes to protected branches. Report PR status only from `just merge-check`.
 4. **Reviewers don't change source.** Findings go to the exact paths `just review-pack` prints (`.agents/reviews/<feature-id>/<pr-N|branch>/`); the tech lead triages; developers fix.
 5. **Stay in scope:** do your slice/task only; report anything else.
 6. **Ask, don't guess** on API contracts, data semantics, security behaviour: return a question in your handoff.

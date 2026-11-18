@@ -1,13 +1,13 @@
 ---
 paths:
+  - "**/tests/**"
   - "**/*.test.ts"
   - "**/*.test.tsx"
-  - "**/*.spec.ts"
-  - "e2e/**"
-  - "**/*.stories.tsx"
+  - "fixtures/**"
+  - "web/e2e/**"
+  - "web/src/mocks/**"
 ---
 # Test files
 
-- Follow `fe-testing`: user-centric Testing Library queries, network mocked with MSW, factories for data, no fixed waits.
-- Never point tests at production or real backends; E2E runs against previews, staging or a local server with mocks.
-- No secrets or personal data in fixtures.
+- Follow `bz-testing`. Deterministic: `FakeClock`, no sleeps, no wall clock, no real network or broker API.
+- Recorded fixtures in `fixtures/` (anonymised, no account ids or tokens), wiremock for Kite REST, a local fake WebSocket server, in-process axum router tests, MSW for the UI, in-memory SQLite and temp dirs.

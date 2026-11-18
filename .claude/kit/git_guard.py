@@ -24,7 +24,7 @@ GIT_OPTS_WITH_ARG = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--e
 JUST_OPTS_WITH_ARG = {"-f", "--justfile", "-d", "--working-directory", "--set", "--dotenv-path", "--dotenv-filename",
                       "--shell", "--shell-arg", "--chooser", "--color", "--dump-format", "--list-heading", "--list-prefix",
                       "--command", "-c", "--unstable"}
-LEAD_ONLY = {"merge", "ship", "promote", "setup-branches", "protect-branches"}
+LEAD_ONLY = {"merge", "ship", "promote", "approve", "setup-branches", "protect-branches"}
 
 
 class Blocked(Exception):
@@ -200,8 +200,8 @@ class Guard:
                 if i + 1 < len(args) and short(args[i + 1]) in self.prot:
                     self.wipe()
         if sub in ("commit", "merge", "rebase", "cherry-pick", "am", "revert", "reset"):
-            if sub == "merge" and any(f in ("--abort", "--quit") for f in flags):
-                return
+            if sub == "merge" and any(f in ("--abort", "--quit", "--ff-only") for f in flags):
+                return  # --ff-only only moves the branch to commits that are already on origin: no new commits
             if sub == "rebase" and any(f in ("--abort", "--quit") for f in flags):
                 return
             cur = self.branch_in(cwd)
@@ -337,7 +337,7 @@ def main(argv: list) -> int:
             if r.returncode:
                 raise Blocked(f"merge-check failed for PR #{pr}:\n{(r.stdout + r.stderr).strip()}")
     except Blocked as e:
-        tail = " Push your own branch and open a PR; only the tech lead merges." if mode == "dev" else ""
+        tail = " Push your own branch and open a PR; merges run through `just ship` once a PR is approved." if mode == "dev" else ""
         print(f"Blocked by {label}: {e}.{tail}", file=sys.stderr)
         return 2
     return 0

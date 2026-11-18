@@ -30,12 +30,6 @@ New agents you hire get their rows here automatically.
 | quant-reviewer | claude-sonnet-5-5 | high | 40 | 200,000 |
 | prototyper | claude-sonnet-5-5 | medium | 30 | 150,000 |
 | combined-reviewer | claude-sonnet-5-5 | medium | 6 | 80,000 |
-| dev-auth | claude-sonnet-5-5 | medium | 80 | 400,000 |
-| dev-perf | claude-sonnet-5-5 | medium | 80 | 400,000 |
-| dev-a11y | claude-sonnet-5-5 | medium | 80 | 400,000 |
-| dev-platform | claude-sonnet-5-5 | medium | 80 | 400,000 |
-| dev-app | claude-sonnet-5-5 | medium | 80 | 400,000 |
-| fe-auditor | claude-sonnet-5-5 | high | 80 | 1,500,000 |
 
 - `model`: sonnet, opus, haiku, fable, a full model id (e.g. claude-sonnet-5-5), or inherit.
 - `effort`: low | medium | high | xhigh | max - how hard the agent thinks per step.
@@ -68,12 +62,6 @@ New agents you hire get their rows here automatically.
 | quant-reviewer | - | - | none | - |
 | prototyper | - | - | none | - |
 | combined-reviewer | - | - | none | - |
-| dev-auth | - | - | project | - |
-| dev-perf | - | - | project | - |
-| dev-a11y | - | - | project | - |
-| dev-platform | - | - | project | - |
-| dev-app | - | - | project | - |
-| fe-auditor | - | - | project | - |
 
 - `context_window`: 100,000-1,000,000 tokens; the conversation is summarised when it reaches this size.
   Smaller = cheaper turns on long tasks. Needs Claude Code 2.1.296+.
@@ -125,6 +113,7 @@ then there is no fixed cap on developers - the budget is the governor.
 | reuse_roles | tech-lead, architect, market-strategist, code-reviewer, security-reviewer, risk-guardian, quant-reviewer, combined-reviewer |
 | reuse_window_minutes | 90 |
 | reuse_max_context | 100,000 |
+| efficiency_review | yes |
 - `work_mode`: `worktrees` (developers in parallel, each in its own git worktree) or `in-place` (one developer at a
   time in this checkout, for repos where worktrees fail). `just preflight` recommends one; `just work-mode <mode>` switches.
 - `small_max_files`: work touching at most this many files in one area is size S (no plan, one developer, gate only).
@@ -192,6 +181,7 @@ passes (reviewers' verdicts, CI checks, target branch). The release branch only 
 | require_ci_checks | yes |
 | delete_merged_branches | no |
 
+| require_merge_approval | yes |
 ## Approvals (manager asks the user before)
 
 | checkpoint | required |

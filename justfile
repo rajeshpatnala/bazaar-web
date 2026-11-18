@@ -11,7 +11,7 @@ doctor:
 doctor-fix:
     @python3 .claude/kit/doctor.py --fix
 
-# typecheck + lint + format + tests + build (= pnpm verify) with compact output (required before any handoff)
+# cargo fmt + clippy -D warnings + nextest; web typecheck + lint + vitest with compact output (required before any handoff)
 gate:
     @python3 .claude/kit/kit.py gate
 
@@ -23,7 +23,7 @@ dev-gate: gate
 test:
     @python3 .claude/kit/kit.py test
 
-# full local CI: gate + dependency audit
+# full local CI: gate + doc tests + cargo deny + pnpm audit
 check:
     @python3 .claude/kit/kit.py check
 
@@ -64,6 +64,70 @@ review-plan pr *args:
 review-pack pr *args:
     @python3 .claude/kit/kit.py review-pack {{pr}} {{args}}
 
+# small PRs: all required reviews in one tool-free Claude call (exit 3 = launch the reviewers, 4 = can't run here: one combined-reviewer)
+envelope pr *args:
+    @python3 .claude/kit/kit.py envelope {{pr}} {{args}}
+
+# test the envelope path once (find Claude Code, version, one tiny call) and say what to fix
+envelope-check:
+    @python3 .claude/kit/kit.py envelope-check
+
+# what an agent reads before it starts working, and how big each part is (no agent = summary of all)
+start-report *agent:
+    @python3 .claude/kit/kit.py start-report {{agent}}
+
+# the library: one section of the skills/handbooks on request (e.g. just docs money; --list shows topics)
+docs *topic:
+    @python3 .claude/kit/kit.py docs {{topic}}
+
+# copy review files that agents wrote inside their worktrees into this checkout (merge-check and triage do it too)
+collect-reviews:
+    @python3 .claude/kit/kit.py collect-reviews
+
+# zip only the kit (agents, skills, hooks, .agents notes, records, CI) for feedback or upgrades; shows size and contents
+export-kit *args:
+    @python3 .claude/kit/kit.py export-kit {{args}}
+
+# apply the default triage decisions to a PR's findings; lists only what needs the tech lead
+triage feature *args:
+    @python3 .claude/kit/kit.py triage {{feature}} {{args}}
+
+# a feature plan, or one slice's brief (works inside agent worktrees): just plan F3 --slice 2
+plan id *args:
+    @python3 .claude/kit/kit.py plan {{id}} {{args}}
+
+# close a milestone: rewrite the board's Resume note, archive finished rows, then start a fresh session (/clear)
+milestone *text:
+    @python3 .claude/kit/kit.py milestone {{text}}
+
+# one-shot status for the manager: checkout, work mode, budget, board, open PRs with CI, bugs
+status:
+    @python3 .claude/kit/kit.py status
+
+# wait for a PR's CI inside the script (free); exit 0 passed, 1 failed, 2 still running
+pr-wait pr *args:
+    @python3 .claude/kit/kit.py pr-wait {{pr}} {{args}}
+
+# tech lead, after deciding a PR's open questions: it may merge once merge-check passes (triage approves by itself when nothing needs judgment)
+approve pr *args:
+    @python3 .claude/kit/kit.py approve {{pr}} {{args}}
+
+# efficiency review from the kit's own records (no agent): the current feature, F<n>, --session (this session) or --all
+efficiency *args:
+    @python3 .claude/kit/kit.py efficiency {{args}}
+
+# remove leftover agent worktrees that hold nothing unsaved (branches are kept); --dry-run lists them
+worktree-clean *args:
+    @python3 .claude/kit/kit.py worktree-clean {{args}}
+
+# fast-forward your local integration branch to origin (ship does this after every merge)
+sync-base:
+    @python3 .claude/kit/kit.py sync-base
+
+# merge in one command (run by the manager once the PR is approved): wait for CI, merge-check, merge, update the integration branch, refresh codemap
+ship pr *args:
+    @python3 .claude/kit/kit.py ship {{pr}} {{args}}
+
 # tech lead: merge-check, then squash-merge a feature PR into the integration branch
 merge pr *args:
     @python3 .claude/kit/kit.py merge {{pr}} {{args}}
@@ -102,7 +166,7 @@ bugs *args:
 board-archive:
     @python3 .claude/kit/kit.py board-archive
 
-# token budget (runs are measured automatically): manual row with --estimate if unmeasured, status, or check planned launches (e.g. just budget-check F12 dev-ui:4 code-reviewer:4)
+# token budget (runs are measured automatically): manual row with --estimate if unmeasured, status, or check planned launches (e.g. just budget-check F12 dev-data:4 code-reviewer:4)
 budget-add task agent tokens *note:
     @python3 .claude/kit/budget.py add {{task}} {{agent}} {{tokens}} {{note}}
 
@@ -112,6 +176,10 @@ budget task="":
 # set the task that measured agent runs are booked against (the manager does this when work starts)
 budget-task task:
     @python3 .claude/kit/budget.py task {{task}}
+
+# typical cold-start size per agent type (what every fresh launch pays before working)
+budget-starts:
+    @python3 .claude/kit/budget.py starts
 
 # per-agent breakdown of a task's measured usage (for reports and retrospectives)
 budget-report task="":
@@ -140,14 +208,94 @@ new-agent name kind description skills="":
 changelog:
     @git cliff --output CHANGELOG.md && echo "CHANGELOG.md updated"
 
-# run the dev server
-dev:
-    pnpm dev
+# install UI dependencies (first run)
+setup:
+    pnpm -C web install --frozen-lockfile
 
-# end-to-end tests (needs Playwright browsers)
-e2e:
-    pnpm e2e
+# format Rust and UI code
+fmt:
+    cargo fmt --all
+    pnpm -C web format
 
-# Storybook
-storybook:
-    pnpm storybook
+# HUMAN-ONLY: build the UI and run the server on 127.0.0.1:8787 against your data/ and Keychain; opens the browser with a one-time login link
+run:
+    pnpm -C web build
+    cargo run --release -p bazaar-server
+
+# HUMAN-ONLY: debug server + UI with hot reload on :5173 (stop `just run` first); open the printed http://localhost:5173/auth?token=... link once Vite is up
+ui-dev:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build -q -p bazaar-server
+    target/debug/bazaar-server --no-open &
+    server=$!
+    trap 'kill $server 2>/dev/null' EXIT
+    pnpm -C web dev
+
+# UI only in the browser with mocked API (MSW) - previews, screenshots, Playwright
+app-dev:
+    pnpm -C web dev:mock
+
+# one screenshot of a route for T1 evidence (agents may run it): starts its own dev server on a spare port, waits,
+# saves {{out}}, stops the server. e.g. just ui-shot /settings 360
+ui-shot route="/" width="1440" out="web/.shots/shot.png":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+    mkdir -p "$(dirname "{{out}}")"
+    VITE_MOCK_API=1 pnpm -C web exec vite --port "$port" --strictPort --host 127.0.0.1 >"$(dirname "{{out}}")/ui-shot.log" 2>&1 &
+    server=$!
+    trap 'kill $server 2>/dev/null || true' EXIT
+    for _ in $(seq 1 60); do curl -sf "http://127.0.0.1:$port/" >/dev/null && break; sleep 1; done
+    pnpm -C web exec playwright screenshot --viewport-size="{{width}},900" --wait-for-timeout=1500 "http://127.0.0.1:$port{{route}}" "{{out}}"
+    echo "saved {{out}} ({{width}} wide) - open it with Read and say what you saw"
+
+# build the UI and a release server binary
+build:
+    pnpm -C web build
+    cargo build --release -p bazaar-server
+
+# regenerate UI types from the server's OpenAPI document
+openapi:
+    cargo run -q -p bazaar-server -- openapi > web/openapi.json
+    pnpm -C web gen:api
+
+# HUMAN-ONLY: store a secret in the macOS Keychain (prompts without echo), e.g. just set-secret kite_api_secret
+set-secret name:
+    cargo run -q -p bazaar-cli -- set-secret {{name}}
+
+# HUMAN-ONLY: import an official bhavcopy for a trading date (YYYY-MM-DD) into data/
+import-bhavcopy date:
+    cargo run -q -p bazaar-cli -- import-bhavcopy --date {{date}}
+
+# HUMAN-ONLY: refresh the instrument master (lot/tick sizes, expiries) from the live broker API
+refresh-instruments:
+    cargo run -q -p bazaar-cli -- refresh-instruments
+
+# HUMAN-ONLY: headless backtest on your data/, e.g. just backtest ema-cross 2022-01-01 2025-12-31
+backtest strategy from to:
+    cargo run -q --release -p bazaar-cli -- backtest --strategy {{strategy}} --from {{from}} --to {{to}}
+
+# look-ahead suite (tests named lookahead_*); fails if none ran
+lookahead:
+    cargo nextest run --workspace -E 'test(/lookahead_/)' --no-tests=fail
+
+# agent-safe CLI run on fixtures and a temp data dir, e.g. just cli-fixture backtest --strategy ema-cross --from 2024-01-01 --to 2024-03-31
+cli-fixture *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    cargo run -q -p bazaar-cli -- --config-dir fixtures/config --data-dir "$tmp" {{args}}
+
+# golden backtest regression against committed baselines
+golden:
+    cargo test -q -p bazaar-backtest --test golden
+
+# benchmarks (indicators, scanner, backtest loop)
+bench:
+    cargo bench --workspace
+
+# coverage report (HTML)
+cov:
+    cargo llvm-cov nextest --workspace --html
