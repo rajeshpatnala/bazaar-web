@@ -1,0 +1,15 @@
+[package]
+name = "bazaar-paper"
+description = "PaperExecutor and PaperAccount (virtual rupee cash)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bazaar-core.workspace = true
+bazaar-execution.workspace = true

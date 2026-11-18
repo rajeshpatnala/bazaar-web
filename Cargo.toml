@@ -1,0 +1,92 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.100"
+license = "Proprietary"
+publish = false
+version = "0.1.0"
+
+[workspace.dependencies]
+# internal: one entry per crate, features enabled by the consumer
+bazaar-core = { path = "crates/core" }
+bazaar-data = { path = "crates/data" }
+bazaar-store = { path = "crates/store" }
+bazaar-indicators = { path = "crates/indicators" }
+bazaar-options = { path = "crates/options" }
+bazaar-regime = { path = "crates/regime" }
+bazaar-strategies = { path = "crates/strategies" }
+bazaar-scanner = { path = "crates/scanner" }
+bazaar-backtest = { path = "crates/backtest" }
+bazaar-risk = { path = "crates/risk" }
+bazaar-execution = { path = "crates/execution" }
+bazaar-paper = { path = "crates/paper" }
+bazaar-broker = { path = "crates/broker" }
+
+# external: versions live ONLY here (F1 set approved by the owner on 2026-11-18)
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
+tokio-util = "0.7"
+rust_decimal = { version = "1.43", features = ["serde-with-str", "maths"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }
+chrono-tz = { version = "0.10", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+thiserror = "2"
+anyhow = "1"                         # binaries only
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+dotenvy = "0.15"                     # bins only
+
+# web server (consumed only by crates/server)
+axum = { version = "0.8", features = ["macros"] }
+axum-extra = { version = "0.12", features = ["cookie", "typed-header"] }
+tower = "0.5"
+tower-http = { version = "0.7", default-features = false, features = ["trace", "compression-gzip", "timeout", "fs", "set-header"] }   # never "cors"
+utoipa = { version = "6", features = ["chrono", "decimal"] }
+utoipa-axum = "0.3"
+subtle = "2.6"
+getrandom = "0.4"
+http-body-util = "0.1"
+
+# dev only
+proptest = "1.12"
+insta = { version = "1.49", features = ["json", "redactions"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+# Scaffold: edges and dependencies are declared up front (F1 slice 0) and used as slices land.
+# Remove both lines once F1 is done so unused dependencies are flagged again.
+[workspace.lints.cargo]
+unused_dependencies = "allow"
+unused_workspace_dependencies = "allow"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+float_cmp = "deny"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
+
+[profile.dev.package."*"]
+opt-level = 1
+[profile.test]
+opt-level = 1
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

@@ -1,0 +1,15 @@
+[package]
+name = "bazaar-execution"
+description = "Order pipeline, approval queue, Executor trait, kill switch and audit chain."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bazaar-core.workspace = true
+bazaar-risk.workspace = true

@@ -13,6 +13,9 @@ allow = [
 ]
 confidence-threshold = 0.9
 
+[licenses.private]
+ignore = true   # workspace crates are publish = false with a non-SPDX "Proprietary" licence
+
 [bans]
 multiple-versions = "warn"   # large dep trees pull duplicates; review, don't block
 wildcards = "deny"
