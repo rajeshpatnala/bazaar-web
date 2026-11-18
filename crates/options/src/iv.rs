@@ -7,6 +7,7 @@
 
 use crate::OptionKind;
 use crate::black76::{Inputs, greeks, price};
+use crate::time::DEFAULT_EPSILON_YEARS;
 
 /// Solver settings (defaults are numerical conventions, not market facts).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -15,6 +16,11 @@ pub struct SolverParams {
     pub price_tol: f64,
     /// Stop when the bracket is narrower than this in vol.
     pub vol_tol: f64,
+    /// Largest acceptable vol uncertainty `noise / vega` at the answer; above it the result is
+    /// `IllConditioned` (vega too small to identify sigma), never a number.
+    pub vol_accuracy: f64,
+    /// Assumed relative price noise of the pricer (times `max(F, K) * D`), default 1e-15.
+    pub price_noise: f64,
     /// Iteration cap (Newton and bisection steps together).
     pub max_iter: u32,
     /// Lower end of the search bracket.
@@ -30,10 +36,12 @@ impl Default for SolverParams {
         Self {
             price_tol: 1e-13,
             vol_tol: 1e-13,
+            vol_accuracy: 1e-9,
+            price_noise: 1e-15,
             max_iter: 200,
             min_vol: 1e-4,
             max_vol: 10.0,
-            min_years: 1e-6,
+            min_years: DEFAULT_EPSILON_YEARS,
         }
     }
 }
@@ -49,13 +57,17 @@ pub enum IvError {
     ExpiredOrZeroT,
     /// Iteration cap reached without meeting a tolerance.
     NoConvergence,
+    /// The price is matched but vega is too small to pin sigma down (typically deep ITM or
+    /// extremely short-dated); any sigma on a plateau would fit.
+    IllConditioned,
     /// Non-finite or non-positive forward, strike, price, or invalid solver params.
     InvalidInput,
 }
 
 /// Implied vol of `target` for `kind`. `m.vol` is ignored. Domain: finite `F, K > 0`,
 /// `T > min_years`, finite `target > 0`. Returns the sigma with `price(sigma) = target`
-/// (to the tolerances).
+/// to within `vol_accuracy`: the solver stops on price or bracket width, then verifies that
+/// `noise / vega` is below `vol_accuracy`, otherwise it returns `IllConditioned`.
 ///
 /// # Errors
 /// See [`IvError`].
@@ -65,12 +77,15 @@ pub fn implied_vol(
     m: &Inputs,
     p: &SolverParams,
 ) -> Result<f64, IvError> {
-    let params_ok = p.price_tol > 0.0
-        && p.vol_tol > 0.0
-        && p.min_vol > 0.0
+    let pos = |x: f64| x.is_finite() && x > 0.0;
+    let params_ok = pos(p.price_tol)
+        && pos(p.vol_tol)
+        && pos(p.vol_accuracy)
+        && pos(p.price_noise)
+        && pos(p.min_vol)
+        && pos(p.max_vol)
         && p.max_vol > p.min_vol
-        && p.min_years > 0.0
-        && p.max_vol.is_finite();
+        && pos(p.min_years);
     let finite = [m.forward, m.strike, m.years, m.rate, target]
         .iter()
         .all(|x| x.is_finite());
@@ -81,6 +96,9 @@ pub fn implied_vol(
         return Err(IvError::ExpiredOrZeroT);
     }
     let disc = (-m.rate * m.years).exp();
+    if !disc.is_finite() || disc <= 0.0 {
+        return Err(IvError::InvalidInput);
+    }
     let (intrinsic, upper) = match kind {
         OptionKind::Call => (disc * (m.forward - m.strike).max(0.0), disc * m.forward),
         OptionKind::Put => (disc * (m.strike - m.forward).max(0.0), disc * m.strike),
@@ -103,7 +121,14 @@ pub fn implied_vol(
     for _ in 0..p.max_iter {
         let diff = at(sigma)? - target;
         if diff.abs() <= p.price_tol * target || hi - lo <= p.vol_tol {
-            return Ok(sigma);
+            // Stopping on price says nothing about sigma where vega ~ 0: check the uncertainty.
+            let vega = greeks(kind, &Inputs { vol: sigma, ..*m }).map_or(0.0, |g| g.vega);
+            let noise = p.price_noise * m.forward.max(m.strike) * disc + p.price_tol * target;
+            return if vega > 0.0 && noise / vega <= p.vol_accuracy {
+                Ok(sigma)
+            } else {
+                Err(IvError::IllConditioned)
+            };
         }
         if diff > 0.0 {
             hi = sigma;
@@ -140,9 +165,9 @@ mod tests {
     fn round_trips_over_a_grid() {
         let p = SolverParams::default();
         for kind in [Call, Put] {
-            for strike in [80.0, 95.0, 100.0, 105.0, 125.0] {
+            for strike in [60.0, 80.0, 95.0, 100.0, 105.0, 125.0] {
                 for k in 1..=30 {
-                    let sigma = 0.05 * f64::from(k);
+                    let sigma = 0.05 * f64::from(k) + 0.013;
                     let m = mk(strike);
                     let px = price(kind, &Inputs { vol: sigma, ..m }).unwrap();
                     match implied_vol(kind, px, &m, &p) {
@@ -150,19 +175,76 @@ mod tests {
                             (got - sigma).abs() < 1e-8,
                             "{kind:?} K={strike} sigma={sigma} got={got}"
                         ),
-                        Err(e) => {
-                            // only acceptable where the price is numerically at intrinsic
-                            let disc = (-m.rate * m.years).exp();
-                            let intr = match kind {
-                                Call => disc * (100.0 - strike).max(0.0),
-                                Put => disc * (strike - 100.0).max(0.0),
-                            };
-                            assert!(px - intr < 1e-6, "{e:?} {kind:?} {strike} {sigma}");
-                        }
+                        Err(e) => assert!(
+                            matches!(
+                                e,
+                                IvError::BelowIntrinsic
+                                    | IvError::AboveUpperBound
+                                    | IvError::IllConditioned
+                                    | IvError::NoConvergence
+                            ),
+                            "{e:?}"
+                        ),
                     }
                 }
             }
         }
+    }
+
+    #[test]
+    fn deep_itm_is_error_or_accurate() {
+        // K=60, T=0.02 (vega ~ 0): previously returned 0.2 for a true 0.5.
+        let p = SolverParams::default();
+        let m = Inputs {
+            years: 0.02,
+            ..mk(60.0)
+        };
+        for sigma in [0.08, 0.12, 0.5] {
+            let px = price(Call, &Inputs { vol: sigma, ..m }).unwrap();
+            match implied_vol(Call, px, &m, &p) {
+                Ok(got) => assert!((got - sigma).abs() < 1e-8, "{sigma} -> {got}"),
+                Err(e) => assert!(
+                    matches!(e, IvError::IllConditioned | IvError::BelowIntrinsic),
+                    "{e:?}"
+                ),
+            }
+        }
+        // and the ill-conditioned case is reported as such
+        let px = price(Call, &Inputs { vol: 0.5, ..m }).unwrap();
+        assert!(implied_vol(Call, px, &m, &p).is_err());
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn off_grid_round_trip_never_silently_wrong(
+            sigma in 0.03f64..2.5,
+            strike in 55.0f64..170.0,
+            years in 0.003f64..3.0,
+            rate in 0.0f64..0.1,
+            is_call in proptest::bool::ANY,
+        ) {
+            let kind = if is_call { Call } else { Put };
+            let m = Inputs { forward: 100.0, strike, years, rate, vol: 0.0 };
+            let px = price(kind, &Inputs { vol: sigma, ..m }).unwrap();
+            if let Ok(got) = implied_vol(kind, px, &m, &SolverParams::default()) {
+                proptest::prop_assert!((got - sigma).abs() < 1e-8, "sigma {} got {}", sigma, got);
+            }
+        }
+    }
+
+    #[test]
+    fn non_finite_discount_is_invalid_input() {
+        let m = Inputs {
+            forward: 100.0,
+            strike: 100.0,
+            years: 1e3,
+            rate: 1e6,
+            vol: 0.0,
+        };
+        assert_eq!(
+            implied_vol(Call, 5.0, &m, &SolverParams::default()),
+            Err(IvError::InvalidInput)
+        );
     }
 
     #[test]
@@ -229,7 +311,10 @@ mod tests {
             let r = implied_vol(Call, px, &m, &p);
             assert!(matches!(
                 r,
-                Ok(_) | Err(IvError::BelowIntrinsic | IvError::NoConvergence)
+                Ok(_)
+                    | Err(IvError::BelowIntrinsic
+                        | IvError::NoConvergence
+                        | IvError::IllConditioned)
             ));
             if let Ok(v) = r {
                 assert!(v.is_finite() && v > 0.0);
