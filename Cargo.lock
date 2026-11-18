@@ -338,8 +338,11 @@ name = "bazaar-store"
 version = "0.1.0"
 dependencies = [
  "bazaar-core",
+ "chrono",
+ "rust_decimal",
  "sqlx",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
