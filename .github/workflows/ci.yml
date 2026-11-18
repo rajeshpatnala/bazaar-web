@@ -67,7 +67,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - if: hashFiles('web/package.json') != ''
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with: { package_json_file: web/package.json }
       - if: hashFiles('web/package.json') != ''
         uses: actions/setup-node@v5
@@ -131,7 +131,7 @@ jobs:
       - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != ''
         uses: Swatinem/rust-cache@v2
       - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != ''
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with: { package_json_file: web/package.json }
       - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != ''
         name: regenerate UI types and fail on drift
