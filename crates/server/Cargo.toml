@@ -28,6 +28,9 @@ utoipa-axum.workspace = true
 clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 
 [features]
 default = []
@@ -35,4 +38,5 @@ live-trading = ["dep:bazaar-broker", "bazaar-broker/live-trading"]
 
 [dev-dependencies]
 http-body-util.workspace = true
+tower = { workspace = true, features = ["util"] }
 insta.workspace = true
