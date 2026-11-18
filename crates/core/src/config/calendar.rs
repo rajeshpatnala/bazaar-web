@@ -143,7 +143,10 @@ pub struct SpecialSessionRow {
 #[serde(deny_unknown_fields)]
 pub struct CalendarConfig {
     pub schema_version: u32,
-    pub verified_on: NaiveDate,
+    #[serde(default)]
+    pub placeholder: bool,
+    #[serde(default)]
+    pub verified_on: Option<NaiveDate>,
     pub source: String,
     /// A date outside these years is `OutOfRange` in `MarketCalendar`.
     pub covered_years: Vec<i32>,

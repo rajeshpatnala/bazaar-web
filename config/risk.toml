@@ -12,8 +12,10 @@ execution_mode = "paper"
 max_risk_per_trade_pct = "1"
 max_daily_loss_pct = "3"
 
-# Ceilings the loader enforces: a [limits] value above its ceiling is a startup error.
-# Moving a ceiling needs an ADR in DECISIONS.md and the owner's explicit approval.
+# Ceilings: the loader refuses a [limits] value above its ceiling, but both sit in this owner-editable
+# file, so the loader cannot tell a raised ceiling from an original one. Never raise a ceiling
+# without an ADR in DECISIONS.md and the owner's explicit approval. An enforced check outside this
+# file is a follow-up for the DecisionGate feature.
 [hard_limits]
 max_risk_per_trade_pct = "1"
 max_daily_loss_pct = "3"

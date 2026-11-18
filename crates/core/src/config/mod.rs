@@ -19,8 +19,9 @@ pub use calendar::{
 };
 pub use error::ConfigError;
 pub use files::{
-    ChargesConfig, ComplianceConfig, DataConfig, Event, EventKind, EventsConfig, StrategiesConfig,
-    Watchlist, WatchlistsConfig,
+    ChargesConfig, ComplianceConfig, DataConfig, Event, EventKind, EventsConfig, MAX_EVENTS,
+    MAX_SYMBOLS_PER_WATCHLIST, MAX_TEXT_CHARS, MAX_WATCHLISTS, StrategiesConfig, Watchlist,
+    WatchlistsConfig,
 };
 pub use risk::{ExecutionSection, HardLimits, Limits, ModeSection, RiskConfig};
 
@@ -35,7 +36,7 @@ mod decimal_str {
 
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Decimal, D::Error> {
         let s = String::deserialize(d)?;
-        Decimal::from_str(s.trim()).map_err(|_| D::Error::custom("expected a decimal string"))
+        Decimal::from_str(&s).map_err(|_| D::Error::custom("expected a decimal string"))
     }
 }
 
@@ -46,8 +47,10 @@ pub const SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Header {
     pub schema_version: u32,
-    /// Date a human compared the file with its sources.
-    pub verified_on: NaiveDate,
+    /// Date a human compared the file with its sources. `None` only for a placeholder.
+    pub verified_on: Option<NaiveDate>,
+    /// The file holds no data yet; it is never reported as fresh.
+    pub placeholder: bool,
     /// URL, circular number or `owner`.
     pub source: String,
 }
@@ -64,7 +67,15 @@ impl Header {
         if self.source.trim().is_empty() {
             return Err(ConfigError::invalid(file, "source", "must not be empty"));
         }
-        Ok(())
+        match (self.placeholder, self.verified_on) {
+            (true, Some(_)) => Err(ConfigError::invalid(
+                file,
+                "verified_on",
+                "a placeholder file must not claim verification",
+            )),
+            (false, None) => Err(ConfigError::invalid(file, "verified_on", "is required")),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -86,6 +97,7 @@ macro_rules! impl_header {
             $crate::config::Header {
                 schema_version: self.schema_version,
                 verified_on: self.verified_on,
+                placeholder: self.placeholder,
                 source: self.source.clone(),
             }
         }
@@ -113,11 +125,40 @@ pub fn parse_str<T: ConfigFile>(text: &str) -> Result<T, ConfigError> {
 
 /// Read, parse and validate `dir/<T::FILE>`.
 pub fn load<T: ConfigFile>(dir: &Path) -> Result<T, ConfigError> {
-    let text = std::fs::read_to_string(dir.join(T::FILE)).map_err(|source| ConfigError::Io {
-        file: T::FILE,
-        source,
+    let text = read_capped(&dir.join(T::FILE), MAX_CONFIG_BYTES).map_err(|e| match e {
+        ReadError::Io(source) => ConfigError::Io {
+            file: T::FILE,
+            source,
+        },
+        ReadError::TooLarge => ConfigError::invalid(T::FILE, "file", "larger than the size cap"),
     })?;
     parse_str(&text)
+}
+
+/// Largest config file the loader reads (1 MiB).
+pub const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+
+enum ReadError {
+    Io(std::io::Error),
+    TooLarge,
+}
+
+/// Read a regular file as UTF-8, refusing more than `max` bytes (no unbounded read from a FIFO
+/// or a device file).
+fn read_capped(path: &Path, max: u64) -> Result<String, ReadError> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(ReadError::Io)?;
+    if !file.metadata().map_err(ReadError::Io)?.is_file() {
+        return Err(ReadError::Io(std::io::ErrorKind::InvalidInput.into()));
+    }
+    let mut text = String::new();
+    file.take(max + 1)
+        .read_to_string(&mut text)
+        .map_err(ReadError::Io)?;
+    if text.len() as u64 > max {
+        return Err(ReadError::TooLarge);
+    }
+    Ok(text)
 }
 
 /// How old `verified_on` may get before a file is reported stale. The limits are policy chosen
@@ -143,6 +184,8 @@ impl StalenessPolicy {
 pub enum StaleReason {
     /// `verified_on` is older than the limit.
     TooOld { age_days: i64, max_age_days: i64 },
+    /// The file is a placeholder: not yet populated, never fresh.
+    Placeholder,
     /// `verified_on` is after `today`.
     FutureDated,
     /// `calendar.toml` does not cover the current year.
@@ -199,9 +242,11 @@ impl Config {
         ];
         let mut out = Vec::new();
         for (file, header) in headers {
-            let age_days = (today - header.verified_on).num_days();
             let max_age_days = policy.limit(file);
-            let reason = if age_days < 0 {
+            let age_days = header.verified_on.map_or(0, |v| (today - v).num_days());
+            let reason = if header.placeholder {
+                Some(StaleReason::Placeholder)
+            } else if age_days < 0 {
                 Some(StaleReason::FutureDated)
             } else if age_days > max_age_days {
                 Some(StaleReason::TooOld {
@@ -215,7 +260,7 @@ impl Config {
                 out.push(StaleWarning { file, reason });
             }
         }
-        if !self.calendar.covered_years.contains(&today.year()) {
+        if !self.calendar.placeholder && !self.calendar.covered_years.contains(&today.year()) {
             out.push(StaleWarning {
                 file: CalendarConfig::FILE,
                 reason: StaleReason::YearNotCovered { year: today.year() },
@@ -293,25 +338,34 @@ mod tests {
         let missing = "schema_version = 1\nsource = \"x\"\n";
         assert!(matches!(
             parse_str::<DataConfig>(missing),
-            Err(ConfigError::Parse { .. })
+            Err(ConfigError::Invalid { .. })
         ));
         let bad_date = "schema_version = 1\nverified_on = \"2026-13-45\"\nsource = \"x\"\n";
         assert!(parse_str::<DataConfig>(bad_date).is_err());
     }
 
     #[test]
-    fn staleness_age_future_and_uncovered_year() {
-        let cfg = Config::load(Path::new(FIXTURES)).unwrap(); // verified 2026-01-05, covers 2026
+    fn staleness_age_future_placeholder_and_uncovered_year() {
+        // fixtures: risk, watchlists, events, calendar verified 2026-01-05 (covers 2026);
+        // charges, strategies, data, compliance are placeholders.
+        let cfg = Config::load(Path::new(FIXTURES)).unwrap();
         let policy = StalenessPolicy {
             default_max_age_days: 30,
-            overrides: vec![("charges.toml", 90)],
+            overrides: vec![("risk.toml", 90)],
         };
-        assert_eq!(cfg.stale_warnings(d(2026, 1, 20), &policy), vec![]);
-        let w = cfg.stale_warnings(d(2026, 3, 1), &policy); // 55 days: 7 files over 30
+        let placeholders = |w: &[StaleWarning]| {
+            w.iter()
+                .filter(|x| x.reason == StaleReason::Placeholder)
+                .count()
+        };
+        let w = cfg.stale_warnings(d(2026, 1, 20), &policy);
+        assert_eq!(w.len(), 4);
+        assert_eq!(placeholders(&w), 4);
+        let w = cfg.stale_warnings(d(2026, 3, 1), &policy); // 55 days: 3 over 30, risk ok
         assert_eq!(w.len(), 7);
-        assert!(w.iter().all(|x| x.file != "charges.toml"));
+        assert!(w.iter().all(|x| x.file != "risk.toml"));
         assert!(w.contains(&StaleWarning {
-            file: "risk.toml",
+            file: "events.toml",
             reason: StaleReason::TooOld {
                 age_days: 55,
                 max_age_days: 30
@@ -319,11 +373,71 @@ mod tests {
         }));
         let w = cfg.stale_warnings(d(2026, 1, 1), &policy);
         assert_eq!(w.len(), 8);
-        assert!(w.iter().all(|x| x.reason == StaleReason::FutureDated));
+        assert_eq!(placeholders(&w), 4);
+        assert!(w.contains(&StaleWarning {
+            file: "risk.toml",
+            reason: StaleReason::FutureDated
+        }));
         let w = cfg.stale_warnings(d(2027, 1, 6), &policy);
         assert!(
             w.iter()
                 .any(|x| x.reason == StaleReason::YearNotCovered { year: 2027 })
         );
+    }
+
+    #[test]
+    fn shipped_placeholders_are_never_fresh() {
+        let cfg = Config::load(Path::new(SHIPPED)).unwrap();
+        let policy = StalenessPolicy {
+            default_max_age_days: 100_000,
+            overrides: vec![],
+        };
+        let w = cfg.stale_warnings(d(2026, 11, 19), &policy);
+        let files: Vec<_> = w.iter().map(|x| x.file).collect();
+        for f in [
+            "charges.toml",
+            "strategies.toml",
+            "data.toml",
+            "compliance.toml",
+            "events.toml",
+            "calendar.toml",
+        ] {
+            assert!(files.contains(&f), "{f}");
+        }
+        assert!(!files.contains(&"risk.toml") && !files.contains(&"watchlists.toml"));
+        assert!(cfg.charges.verified_on.is_none() && cfg.charges.placeholder);
+    }
+
+    #[test]
+    fn placeholder_header_rules() {
+        let ph = "schema_version = 1\nplaceholder = true\nsource = \"x\"\n";
+        assert!(parse_str::<DataConfig>(ph).is_ok());
+        let both = format!("{ph}verified_on = \"2026-01-01\"\n");
+        assert!(
+            parse_str::<DataConfig>(&both)
+                .unwrap_err()
+                .to_string()
+                .contains("must not claim verification")
+        );
+        let neither = "schema_version = 1\nsource = \"x\"\n";
+        assert!(
+            parse_str::<DataConfig>(neither)
+                .unwrap_err()
+                .to_string()
+                .contains("verified_on: is required")
+        );
+    }
+
+    #[test]
+    fn oversized_and_non_regular_files_are_refused() {
+        let dir = std::env::temp_dir().join(format!("bazaar-cfg-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("big.toml");
+        std::fs::write(&file, "0123456789").unwrap();
+        assert_eq!(read_capped(&file, 10).ok().as_deref(), Some("0123456789"));
+        assert!(matches!(read_capped(&file, 9), Err(ReadError::TooLarge)));
+        assert!(matches!(read_capped(&dir, 100), Err(ReadError::Io(_))));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(MAX_CONFIG_BYTES, 1_048_576);
     }
 }

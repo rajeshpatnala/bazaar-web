@@ -50,7 +50,10 @@ pub struct ExecutionSection {
 #[serde(deny_unknown_fields)]
 pub struct RiskConfig {
     pub schema_version: u32,
-    pub verified_on: NaiveDate,
+    #[serde(default)]
+    pub placeholder: bool,
+    #[serde(default)]
+    pub verified_on: Option<NaiveDate>,
     pub source: String,
     pub mode: ModeSection,
     pub limits: Limits,
@@ -139,6 +142,12 @@ mod tests {
             "100000.50"
         );
         assert_eq!(cfg.mode.execution_mode, ExecutionMode::Paper);
+    }
+
+    #[test]
+    fn rejects_whitespace_around_decimal_strings() {
+        assert!(parse_str::<RiskConfig>(&with("\"100000\"", "\" 100000\"")).is_err());
+        assert!(parse_str::<RiskConfig>(&with("\"100000\"", "\"100000 \"")).is_err());
     }
 
     #[test]

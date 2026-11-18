@@ -1,4 +1,5 @@
-# strategies.toml: header only in F1. A later feature replaces the typed struct and adds the tables.
+# strategies.toml: placeholder. It holds no data and is never reported as fresh (no verified_on on purpose).
+# Replace it with real, dated, sourced content and remove `placeholder`.
 schema_version = 1
-verified_on = "2026-11-18"
-source = "owner: placeholder, holds no market data yet; F2 fills it from official sources"
+placeholder = true
+source = "placeholder: no data yet; to be filled by the first strategy feature (bz-quant)"
