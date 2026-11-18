@@ -11,3 +11,5 @@ problem in one go. One line per rule, newest last, at most 20; merge or retire o
 - No pinned/sticky/scroll-jacking effects.
 - Every section (heading + cards) fits the visible viewport on desktop.
 -->
+
+- Never delete branches (local or remote) after a merge: the merge command must not pass the delete-branch flag; feature branches are kept as history (owner, 2026-11-18).
