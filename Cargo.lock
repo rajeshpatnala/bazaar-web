@@ -293,6 +293,11 @@ version = "0.1.0"
 [[package]]
 name = "bazaar-options"
 version = "0.1.0"
+dependencies = [
+ "bazaar-core",
+ "chrono",
+ "proptest",
+]
 
 [[package]]
 name = "bazaar-paper"
