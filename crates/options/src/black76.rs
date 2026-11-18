@@ -77,7 +77,7 @@ fn value(kind: OptionKind, i: &Inputs, t: &Terms) -> f64 {
 #[must_use]
 pub fn price(kind: OptionKind, i: &Inputs) -> Option<f64> {
     let t = setup(i)?;
-    Some(value(kind, i, &t)).filter(|v| v.is_finite())
+    Some(value(kind, i, &t).max(0.0)).filter(|v| v.is_finite())
 }
 
 /// Raw Greeks. Delta: call `D N(d1)`, put `-D N(-d1)`. Gamma `D n(d1)/(F s sqrt T)`.
@@ -86,7 +86,7 @@ pub fn price(kind: OptionKind, i: &Inputs) -> Option<f64> {
 #[must_use]
 pub fn greeks(kind: OptionKind, i: &Inputs) -> Option<Greeks> {
     let t = setup(i)?;
-    let v = value(kind, i, &t);
+    let v = value(kind, i, &t).max(0.0);
     let n1 = norm::pdf(t.d1);
     let delta = match kind {
         OptionKind::Call => t.disc * norm::cdf(t.d1),
@@ -258,6 +258,106 @@ mod tests {
             if let Some(g) = greeks(Put, &x) {
                 assert!(g.delta.is_finite() && g.theta.is_finite());
             }
+        }
+    }
+
+    #[test]
+    fn hull_black76_example() {
+        // Hull: futures option F=K=20, r=9%, sigma=25%, T=4/12 -> 1.1166 (call = put).
+        let b = Inputs {
+            forward: 20.0,
+            strike: 20.0,
+            years: 4.0 / 12.0,
+            rate: 0.09,
+            vol: 0.25,
+        };
+        assert!((price(Call, &b).unwrap() - 1.1166).abs() < 5e-5);
+        assert!((price(Put, &b).unwrap() - 1.1166).abs() < 5e-5);
+    }
+
+    #[test]
+    fn deep_otm_price_is_never_negative() {
+        let b = Inputs {
+            forward: 100.0,
+            strike: 400.0,
+            years: 0.01,
+            rate: 0.05,
+            vol: 0.1,
+        };
+        assert!(price(Call, &b).unwrap() >= 0.0);
+        let p = Inputs { strike: 10.0, ..b };
+        assert!(price(Put, &p).unwrap() >= 0.0);
+    }
+
+    #[test]
+    fn greek_signs_and_limits() {
+        let b = base();
+        let d = (-b.rate * b.years).exp();
+        for kind in [Call, Put] {
+            let g = greeks(kind, &b).unwrap();
+            assert!(g.gamma > 0.0 && g.vega > 0.0);
+        }
+        let itm_call = greeks(Call, &Inputs { strike: 10.0, ..b }).unwrap();
+        assert!((itm_call.delta - d).abs() < 1e-9);
+        let otm_call = greeks(
+            Call,
+            &Inputs {
+                strike: 1000.0,
+                ..b
+            },
+        )
+        .unwrap();
+        assert!(otm_call.delta.abs() < 1e-9);
+        let itm_put = greeks(
+            Put,
+            &Inputs {
+                strike: 1000.0,
+                ..b
+            },
+        )
+        .unwrap();
+        assert!((itm_put.delta + d).abs() < 1e-9);
+        let otm_put = greeks(Put, &Inputs { strike: 10.0, ..b }).unwrap();
+        assert!(otm_put.delta.abs() < 1e-9);
+        // T -> 0 at the money: delta -> D/2 for a call, gamma and vega stay finite.
+        let tiny = Inputs {
+            strike: 100.0,
+            years: 1e-6,
+            ..b
+        };
+        let g = greeks(Call, &tiny).unwrap();
+        assert!((g.delta - 0.5).abs() < 1e-2 && g.gamma.is_finite() && g.vega >= 0.0);
+        // T -> 0 in the money: delta -> D, vega -> 0.
+        let g = greeks(
+            Call,
+            &Inputs {
+                strike: 90.0,
+                ..tiny
+            },
+        )
+        .unwrap();
+        assert!((g.delta - 1.0).abs() < 1e-6 && g.vega < 1e-6);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn parity_monotone_and_intrinsic(
+            forward in 50.0f64..200.0,
+            strike in 50.0f64..200.0,
+            years in 0.01f64..2.0,
+            rate in 0.0f64..0.12,
+            vol in 0.05f64..1.5,
+        ) {
+            let i = Inputs { forward, strike, years, rate, vol };
+            let disc = (-rate * years).exp();
+            let c = price(Call, &i).unwrap();
+            let p = price(Put, &i).unwrap();
+            proptest::prop_assert!((c - p - disc * (forward - strike)).abs() < 1e-10);
+            proptest::prop_assert!(c >= (disc * (forward - strike)).max(0.0) - 1e-10);
+            proptest::prop_assert!(p >= (disc * (strike - forward)).max(0.0) - 1e-10);
+            let up = Inputs { vol: vol + 0.01, ..i };
+            proptest::prop_assert!(price(Call, &up).unwrap() >= c - 1e-12);
+            proptest::prop_assert!(price(Put, &up).unwrap() >= p - 1e-12);
         }
     }
 }

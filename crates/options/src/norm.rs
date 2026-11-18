@@ -4,7 +4,8 @@
 //! `erf z = 2/sqrt(pi) * e^{-z^2} * sum_n 2^n z^{2n+1} / (1*3*...*(2n+1))` for `|z| < 2`
 //! (no cancellation), and the Laplace continued fraction
 //! `erfc z = e^{-z^2}/sqrt(pi) * 1/(z + (1/2)/(z + 1/(z + (3/2)/(z + ...))))` for `z >= 2`
-//! (Abramowitz and Stegun 7.1.14 context). Accuracy is near machine precision.
+//! (Abramowitz and Stegun 7.1.14 context). Absolute error below 1e-15 everywhere; relative error about 1e-13 for 2 < |x| < 2.83
+//! (there `erfc = 1 - erf` cancels), about 1e-15 beyond.
 
 const FRAC_1_SQRT_2PI: f64 = 0.398_942_280_401_432_7;
 const FRAC_1_SQRT_PI: f64 = 0.564_189_583_547_756_3;
@@ -83,5 +84,14 @@ mod tests {
             let d = (cdf(x + h) - cdf(x - h)) / (2.0 * h);
             assert!((d - pdf(x)).abs() < 1e-9);
         }
+    }
+
+    #[test]
+    fn continuous_across_the_series_seam() {
+        let seam = 2.0 * std::f64::consts::SQRT_2;
+        let e = 1e-9;
+        assert!((cdf(-seam - e) - cdf(-seam + e)).abs() < 1e-8 * pdf(seam) * 2.0 + 1e-15);
+        assert!(cdf(-seam - e) < cdf(-seam + e));
+        assert!(cdf(seam - e) < cdf(seam + e));
     }
 }
