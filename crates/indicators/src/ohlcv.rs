@@ -28,8 +28,23 @@ pub struct Ohlcv {
     pub v: f64,
 }
 
+/// Keep only finite values. Seam so the rejection path is testable.
+fn finite(x: Option<f64>) -> Option<f64> {
+    x.filter(|v| v.is_finite())
+}
+
+/// `Decimal::to_f64` always yields a finite value for in-range decimals, so the guard is
+/// defensive: it keeps NaN/inf out should the conversion ever change. Precision beyond about
+/// 15 significant digits is lost (harmless for tick-sized prices).
 fn conv(d: Decimal) -> Option<f64> {
-    d.to_f64().filter(|x| x.is_finite())
+    finite(d.to_f64())
+}
+
+/// Volume as f64. Exact up to 2^53 (about 9e15), far above any real traded quantity; above that
+/// it rounds to the nearest representable value, still finite.
+#[allow(clippy::cast_precision_loss)]
+const fn volume_f64(v: u64) -> f64 {
+    v as f64
 }
 
 impl TryFrom<&Candle> for Ohlcv {
@@ -42,7 +57,7 @@ impl TryFrom<&Candle> for Ohlcv {
             h: f(c.high(), "high")?,
             l: f(c.low(), "low")?,
             c: f(c.close(), "close")?,
-            v: f64::from(c.volume().0),
+            v: volume_f64(c.volume()),
         })
     }
 }
@@ -51,7 +66,6 @@ impl TryFrom<&Candle> for Ohlcv {
 mod tests {
     use super::*;
     use bazaar_core::candle::Interval;
-    use bazaar_core::money::Qty;
     use chrono::TimeZone;
     use chrono_tz::Asia::Kolkata;
 
@@ -66,7 +80,7 @@ mod tests {
             t,
             Interval::Min1,
             [d("100.5"), d("101"), d("100"), d("100.25")],
-            Qty(7),
+            7,
             false,
         )
         .unwrap();
@@ -83,6 +97,20 @@ mod tests {
     fn conv_accepts_finite_values() {
         assert_eq!(conv(d("2.5")), Some(2.5));
         assert!(conv(Decimal::MAX).is_some_and(f64::is_finite));
+    }
+
+    #[test]
+    fn finite_rejects_nan_inf_and_none() {
+        assert_eq!(finite(Some(1.5)), Some(1.5));
+        assert_eq!(finite(Some(f64::NAN)), None);
+        assert_eq!(finite(Some(f64::INFINITY)), None);
+        assert_eq!(finite(Some(f64::NEG_INFINITY)), None);
+        assert_eq!(finite(None), None);
+    }
+
+    #[test]
+    fn large_volume_converts() {
+        assert!((volume_f64(u64::from(u32::MAX) + 1) - 4_294_967_296.0).abs() < 1e-6);
     }
 
     #[test]

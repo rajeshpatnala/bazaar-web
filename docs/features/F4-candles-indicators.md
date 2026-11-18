@@ -20,6 +20,7 @@ Owner area: `crates/indicators`, `core/src/candle.rs`, `crates/data/src/bars.rs`
 
 ## Decisions
 - F3 is reserved for Kite; offline work starts at F4. One streaming implementation, batch is a fold. Expected values come from hand cases and independent naive implementations (no TA-Lib offline).
+- Candle volume is `u64` (not `Qty`/u32) so summed daily volume cannot overflow; `Candle::new` normalises `close_time` to IST; time vs interval sanity is the bar builder's job (slice 5). Every indicator slice must call `testkit::check_contract`.
 - `Candle` fields are private; `close_time` serialises as RFC 3339 and is read back in `Asia/Kolkata`.
 - 60-minute buckets align to the session open (odd first bucket possible); no owner preference stated.
 

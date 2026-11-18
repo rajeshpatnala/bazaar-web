@@ -10,7 +10,6 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::DomainError;
-use crate::money::Qty;
 
 /// Bar size. These are Kite API protocol constants, not market facts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -65,7 +64,7 @@ pub struct Candle {
     low: Decimal,
     #[serde(with = "rust_decimal::serde::str")]
     close: Decimal,
-    volume: Qty,
+    volume: u64,
     adjusted: bool,
 }
 
@@ -87,6 +86,7 @@ mod ist_time {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawCandle {
     #[serde(deserialize_with = "ist_time::deserialize")]
     close_time: DateTime<Tz>,
@@ -99,7 +99,7 @@ struct RawCandle {
     low: Decimal,
     #[serde(with = "rust_decimal::serde::str")]
     close: Decimal,
-    volume: Qty,
+    volume: u64,
     adjusted: bool,
 }
 
@@ -118,8 +118,10 @@ impl<'de> Deserialize<'de> for Candle {
 }
 
 impl Candle {
-    /// Build a validated candle. `ohlc` is `[open, high, low, close]`; `volume` is a `Qty`
-    /// (unsigned, so it cannot be negative).
+    /// Build a validated candle. `ohlc` is `[open, high, low, close]`; `volume` is a `u64`
+    /// (unsigned, so it cannot be negative; 64-bit so summed daily volume cannot overflow).
+    /// `close_time` is normalised to `Asia/Kolkata`. It is not checked against `interval` or the
+    /// calendar: time sanity is the bar builder's job (F4 slice 5).
     ///
     /// # Errors
     /// `NegativePrice` if any price is negative; `InvalidCandle` if `high < low` or open/close
@@ -128,7 +130,7 @@ impl Candle {
         close_time: DateTime<Tz>,
         interval: Interval,
         ohlc: [Decimal; 4],
-        volume: Qty,
+        volume: u64,
         adjusted: bool,
     ) -> Result<Self, DomainError> {
         let [open, high, low, close] = ohlc;
@@ -145,7 +147,7 @@ impl Candle {
             return Err(DomainError::InvalidCandle("close outside [low, high]"));
         }
         Ok(Self {
-            close_time,
+            close_time: close_time.with_timezone(&Kolkata),
             interval,
             open,
             high,
@@ -188,7 +190,7 @@ impl Candle {
     }
     /// Traded quantity.
     #[must_use]
-    pub const fn volume(&self) -> Qty {
+    pub const fn volume(&self) -> u64 {
         self.volume
     }
     /// Whether prices are corporate-action adjusted.
@@ -212,13 +214,7 @@ mod tests {
     }
 
     fn mk(o: &str, h: &str, l: &str, c: &str) -> Result<Candle, DomainError> {
-        Candle::new(
-            t(),
-            Interval::Min1,
-            [d(o), d(h), d(l), d(c)],
-            Qty(10),
-            false,
-        )
+        Candle::new(t(), Interval::Min1, [d(o), d(h), d(l), d(c)], 10, false)
     }
 
     #[test]
@@ -228,10 +224,35 @@ mod tests {
         assert_eq!(c.low(), d("99.5"));
         assert_eq!(c.open(), d("100"));
         assert_eq!(c.close(), d("101"));
-        assert_eq!(c.volume(), Qty(10));
+        assert_eq!(c.volume(), 10);
         assert_eq!(c.interval(), Interval::Min1);
         assert!(!c.adjusted());
         assert_eq!(c.close_time(), t());
+    }
+
+    #[test]
+    fn new_normalises_to_ist() {
+        let utc = chrono_tz::UTC
+            .with_ymd_and_hms(2026, 3, 2, 3, 46, 0)
+            .unwrap();
+        let c = Candle::new(utc, Interval::Min1, [d("1"); 4], 0, false).unwrap();
+        assert_eq!(c.close_time().timezone(), Kolkata);
+        assert_eq!(c.close_time(), t());
+    }
+
+    #[test]
+    fn volume_above_u32_max_round_trips() {
+        let big = u64::from(u32::MAX) + 10;
+        let c = Candle::new(t(), Interval::Day, [d("1"); 4], big, false).unwrap();
+        assert_eq!(c.volume(), big);
+        let back: Candle = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back.volume(), big);
+    }
+
+    #[test]
+    fn deserialize_rejects_unknown_fields() {
+        let json = r#"{"close_time":"2026-03-02T09:16:00+05:30","interval":"min1","open":"1","high":"1","low":"1","close":"1","volume":0,"adjusted":true,"extra":1}"#;
+        assert!(serde_json::from_str::<Candle>(json).is_err());
     }
 
     #[test]

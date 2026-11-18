@@ -13,6 +13,8 @@ mod ohlcv;
 pub mod session;
 pub mod stoch;
 pub mod swing;
+#[cfg(test)]
+mod testkit;
 pub mod trend;
 pub mod volume;
 
@@ -45,42 +47,44 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    /// Test indicator: running sum, warm after 2 bars.
-    struct Sum2 {
+    /// Test indicator: simple moving average over a window (a real windowed indicator).
+    struct Sma {
         n: usize,
-        sum: f64,
+        buf: Vec<f64>,
     }
-    impl Indicator for Sum2 {
+    impl Indicator for Sma {
         type Input = f64;
         type Output = f64;
         fn warmup(&self) -> usize {
-            2
+            self.n
         }
         fn update(&mut self, x: f64) -> Option<f64> {
-            self.n += 1;
-            self.sum += x;
-            (self.n >= 2).then_some(self.sum)
+            self.buf.push(x);
+            if self.buf.len() > self.n {
+                self.buf.remove(0);
+            }
+            (self.buf.len() == self.n)
+                .then(|| self.buf.iter().sum::<f64>() / f64::from(u32::try_from(self.n).unwrap()))
         }
         fn reset(&mut self) {
-            self.n = 0;
-            self.sum = 0.0;
+            self.buf.clear();
         }
     }
 
-    fn fresh() -> Sum2 {
-        Sum2 { n: 0, sum: 0.0 }
+    fn sma(n: usize) -> Sma {
+        Sma { n, buf: Vec::new() }
     }
 
     #[test]
     fn batch_matches_streaming_hand_case() {
-        // 1, 1+2, 1+2+3
-        let out = batch(fresh(), [1.0, 2.0, 3.0]);
-        assert_eq!(out, vec![None, Some(3.0), Some(6.0)]);
+        // SMA(2): (1+2)/2 = 1.5, (2+4)/2 = 3
+        let out = batch(sma(2), [1.0, 2.0, 4.0]);
+        assert_eq!(out, vec![None, Some(1.5), Some(3.0)]);
     }
 
     #[test]
     fn reset_restarts_warmup() {
-        let mut s = fresh();
+        let mut s = sma(2);
         s.update(1.0);
         s.update(1.0);
         s.reset();
@@ -90,16 +94,11 @@ mod tests {
 
     proptest! {
         #[test]
-        fn batch_length_and_prefix_stable(
+        fn windowed_indicator_obeys_contract(
             xs in proptest::collection::vec(-1e6f64..1e6, 0..50),
-            extra in -1e6f64..1e6,
+            n in 1usize..8,
         ) {
-            let a = batch(fresh(), xs.clone());
-            prop_assert_eq!(a.len(), xs.len());
-            let mut longer = xs;
-            longer.push(extra);
-            let b = batch(fresh(), longer);
-            prop_assert_eq!(&b[..a.len()], &a[..]);
+            testkit::check_contract(|| sma(n), &xs, true);
         }
     }
 }
