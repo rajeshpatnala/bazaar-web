@@ -95,7 +95,9 @@ Skip it only when the owner says "just build it" or the look is already fixed by
             max rounds from team.md, then ask the user
 8 Verify    after the last slice: ONE tester runs T2 for the whole feature (§4)
 9 Merge     tech lead: `just ship <pr>` (or `--branch b --title T`): waits for CI, merge-check, merges,
-            pulls; it refuses unless merge-check passes. Remaining branches rebase
+            pulls; it refuses unless merge-check passes. If ship exits 1 with "merged; <integ> not updated" the PR IS merged and
+            only the sync failed: do not re-run ship, run `git switch "$(just base)" && git pull --ff-only`.
+            Remaining branches rebase
 10 Release  user asks -> promotion PR -> `just promote` (asks the user) -> release PR -> tag
 11 Report   §11; L work adds a 5-line retrospective
 ```

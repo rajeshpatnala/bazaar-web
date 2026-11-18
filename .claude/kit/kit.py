@@ -232,7 +232,7 @@ def test_check(base: str = None) -> int:
         return 0
     if not base:
         base = base_ref()
-    names = set(git("diff", "--name-only", f"{base}...HEAD").split()) | set(git("diff", "--name-only").split())
+    names = set(git("diff", "--name-only", "--no-renames", f"{base}...HEAD").split()) | set(git("diff", "--name-only", "--no-renames").split())
     tests = [n for n in names if matches(n, tc.get("test_globs", []))]
     src = [n for n in names if matches(n, tc.get("source_globs", [])) and n not in tests]
     if not src:
@@ -345,7 +345,7 @@ def codemap(out: str = None) -> int:
         for b in git("for-each-ref", "--format=%(refname:short)", "refs/heads").split():
             if b in (integ, rel) or subprocess.run(["git", "merge-base", "--is-ancestor", b, base], cwd=ROOT).returncode == 0:
                 continue
-            changed = [l.split("\t") for l in git("diff", "--name-status", f"{base}...{b}").splitlines() if l]
+            changed = [l.split("\t") for l in git("diff", "--name-status", "--no-renames", f"{base}...{b}").splitlines() if l]
             changed = [(c[0][0], c[-1]) for c in changed if matches(c[-1], src_globs)][:15]
             if not changed:
                 continue
@@ -387,16 +387,38 @@ def pr_refs(info: dict) -> tuple:
     return b, h
 
 
+def opt_value(argv: list, flag: str) -> str:
+    """Value after a flag; a clean exit instead of a traceback when it is missing."""
+    i = argv.index(flag)
+    if i + 1 >= len(argv):
+        sys.exit(f"kit: {flag} needs a value")
+    return argv[i + 1]
+
+
+def check_pr_arg(arg: str) -> str:
+    if not (arg.isascii() and arg.isdigit()):
+        sys.exit("kit: PR number must be ASCII digits (use --branch for local branches)")
+    return arg
+
+
+def head_branch(name: str) -> str:
+    if name.startswith("-"):
+        sys.exit(f"kit: invalid branch name {name!r}")
+    if subprocess.run(["git", "rev-parse", "--verify", "-q", f"refs/heads/{name}"], cwd=ROOT, capture_output=True).returncode:
+        sys.exit(f"kit: no such branch {name!r}")
+    return name
+
+
 def diff_stats(base: str, head: str) -> list:
     out = []
-    for line in git("diff", "--numstat", f"{base}...{head}").splitlines():
+    for line in git("diff", "--numstat", "--no-renames", f"{base}...{head}").splitlines():
         a, d, path = (line.split("\t") + ["", "", ""])[:3]
         out.append((int(a) if a.isdigit() else 0, int(d) if d.isdigit() else 0, path))
     return out
 
 
 LIGHT_GLOBS = [".agents/**", "docs/**", "**/*.md", "*.md"]
-LIGHT_EXCLUDE = [".claude/**", "CLAUDE.md", "**/CLAUDE.md", ".agents/owner-rules.md", ".agents/team.md", ".agents/scripts/**", ".github/**"]
+LIGHT_EXCLUDE = [".claude/**", "CLAUDE.md", "**/CLAUDE.md", ".agents/owner-rules.md", ".agents/team.md", ".agents/scripts/**", ".agents/templates/**", ".agents/project.md", ".github/**"]
 REVIEW_FILES = {"code": "code-review.md", "security": "security.md", "tests": "tests-<area>.md"}
 
 
@@ -470,7 +492,7 @@ def review_plan(argv: list, show: bool = True) -> tuple:
             print("\n".join(review_paths(req, fid)))
         return req, why, base, headref, head, kind, fid, stats
     if "--branch" in argv:
-        head = argv[argv.index("--branch") + 1]
+        head = head_branch(opt_value(argv, "--branch"))
         base, headref = base_ref(), head
     else:
         info = pr_info(argv[0])
@@ -934,6 +956,7 @@ def review_checks(feature: str, kind: str, required: list = None, refs: list = N
 
 
 def pr_info(pr: str) -> dict:
+    check_pr_arg(pr)
     if not shutil.which("gh"):
         sys.exit("kit: gh is not installed; use --branch for local merges")
     out = subprocess.run(["gh", "pr", "view", pr, "--json",
@@ -997,7 +1020,7 @@ def merge_check(argv: list, quiet: bool = False) -> int:
     feature = argv[argv.index("--feature") + 1] if "--feature" in argv else ""
     results = []
     if "--branch" in argv:
-        head = argv[argv.index("--branch") + 1]
+        head = head_branch(opt_value(argv, "--branch"))
         kind, fid = classify(head)
         feature = feature or fid
         if not feature and required_reviews(kind, diff_stats(base_ref(), head))[0]:
@@ -1014,7 +1037,7 @@ def merge_check(argv: list, quiet: bool = False) -> int:
         if not argv or argv[0].startswith("--"):
             sys.exit("usage: kit.py merge-check <pr-number> [--feature ID]")
         if "--wait" in argv:
-            wait_ci(argv[0], argv)
+            wait_ci(check_pr_arg(argv[0]), argv)
         info = pr_info(argv[0])
         head, base = info["headRefName"], info["baseRefName"]
         target = base
@@ -1051,10 +1074,8 @@ def merge_check(argv: list, quiet: bool = False) -> int:
 def merge(argv: list) -> int:
     integ, rel = branches()
     if "--branch" in argv:  # local fallback without GitHub
-        head = argv[argv.index("--branch") + 1]
-        if head.startswith("-"):
-            sys.exit(f"kit: invalid branch name {head!r}")
-        title = argv[argv.index("--title") + 1] if "--title" in argv else ""
+        head = head_branch(opt_value(argv, "--branch"))
+        title = opt_value(argv, "--title") if "--title" in argv else ""
         if not TITLE_RE.match(title):
             sys.exit("kit: local merge needs --title '<conventional commit title>'")
         if merge_check(argv):
@@ -1088,7 +1109,7 @@ def ship(argv: list) -> int:
     """One command for the mechanical tail: wait for CI, merge-check, merge, pull the integration branch."""
     if "--branch" in argv:
         return merge(argv)
-    if not argv or not argv[0].isdigit():
+    if not argv or not (argv[0].isascii() and argv[0].isdigit()):
         sys.exit("usage: kit.py ship <pr> [--timeout N] | --branch <b> --title T")
     integ = branches()[0]
     wait_ci(argv[0], argv)

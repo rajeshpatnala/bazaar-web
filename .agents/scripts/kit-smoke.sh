@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Smoke test for kit 0.2.0 local paths: light lane, ship --branch, review lookup, checkout warning.
 # Run in your own terminal (outside Claude Code). Builds a throwaway repo under mktemp; touches nothing else.
-# Usage: bash .agents/scripts/kit-smoke.sh [kit_dir]     Output is also saved to /tmp/kit-smoke.log
+# Usage: bash .agents/scripts/kit-smoke.sh [kit_dir]     Output is also saved to <scratch>/smoke.log
 set -u
 KIT="${1:-$HOME/agent-kits/bazaar-web}"
-T="$(mktemp -d)"; W="$T/work"; LOG=/tmp/kit-smoke.log; : > "$LOG"
+T="$(mktemp -d)"; W="$T/work"; LOG="$T/smoke.log"; : > "$LOG"
 exec > >(tee -a "$LOG") 2>&1
 pass=0; fail=0
 expect() { # expect "<name>" <rc> "<grep pattern or empty>" <rc_wanted> <<< "$output"
@@ -61,6 +61,16 @@ echo "== 4 review-plan --files (pre-dispatch)"
 out="$(K review-plan --files docs/a.md,README.md --feature F2 2>&1)"; rc=$?; expect "files: docs only = light" $rc "" 0 <<<"$out"; echo "$out" | sed 's/^/      | /'
 out="$(K review-plan --files .github/workflows/ci.yml --feature F2 2>&1)"; rc=$?; expect "files: ci.yml needs security" $rc "security" 0 <<<"$out"; echo "$out" | sed 's/^/      | /'
 
+echo "== 4b light lane must not cover kit/guard files, renames included"
+git switch -q -c docs/kit-x develop && mkdir -p .claude && echo x > .claude/note.md && git add -A && git commit -qm "docs: kit note"; git switch -q develop
+out="$(K review-plan --branch docs/kit-x 2>&1)"; echo "$out" | grep -q "light lane" && { echo "FAIL  .claude/** took the light lane"; fail=$((fail+1)); } || { echo "PASS  .claude/** not light lane"; pass=$((pass+1)); }
+git switch -q -c docs/team-x develop && echo "# x" >> .agents/team.md && git add -A && git commit -qm "docs: team"; git switch -q develop
+out="$(K review-plan --branch docs/team-x 2>&1)"; echo "$out" | grep -q "light lane" && { echo "FAIL  team.md took the light lane"; fail=$((fail+1)); } || { echo "PASS  team.md not light lane"; pass=$((pass+1)); }
+echo body > docs/rn.md && git add -A && git commit -qm "docs: rn"   # on develop of the scratch repo, so the rename has a base
+git switch -q -c docs/ren-in2 && mkdir -p .claude && git mv docs/rn.md .claude/rn.md && git commit -qm "docs: move in"; git switch -q develop
+out="$(K review-plan --branch docs/ren-in2 2>&1)"; echo "$out" | grep -q "light lane" && { echo "FAIL  rename into .claude took the light lane"; fail=$((fail+1)); } || { echo "PASS  rename into .claude not light lane"; pass=$((pass+1)); }
+git branch -D docs/ren-in2 >/dev/null 2>&1
+
 echo "== 5 ship --branch (merge + switch)"
 out="$(K ship --branch docs/light-x --title 'docs: note' 2>&1)"; rc=$?
 expect "ship light branch merges" $rc "merged docs/light-x into develop" 0 <<<"$out"
@@ -70,6 +80,17 @@ out="$(K ship --branch feat/F1-thing --title 'bad title' 2>&1)"; rc=$?
 expect "ship rejects non-conventional title" $rc "conventional" 1 <<<"$out"
 out="$(K ship --branch develop --title 'chore: x' 2>&1)"; rc=$?
 expect "ship refuses protected branch" $rc "" 1 <<<"$out"
+
+out="$(K ship --branch -x --title 'chore: x' 2>&1)"; rc=$?
+expect "ship rejects leading-dash branch" $rc "invalid branch" 1 <<<"$out"
+out="$(K ship abc 2>&1)"; rc=$?
+expect "ship rejects non-numeric PR" $rc "usage" 1 <<<"$out"
+out="$(K merge-check '١٢' 2>&1)"; rc=$?
+expect "merge-check rejects non-ASCII digits" $rc "PR number" 1 <<<"$out"
+out="$(K merge --branch 2>&1)"; rc=$?
+expect "--branch without value is a clean error" $rc "needs a value" 1 <<<"$out"
+out="$(K merge --branch nosuch --title 'chore: x' 2>&1)"; rc=$?
+expect "missing branch is a clean error" $rc "no such branch" 1 <<<"$out"
 
 echo "== 6 status without gh/board rows"
 out="$(PATH=/usr/bin:/bin K status 2>&1)"; rc=$?; expect "status runs" $rc "preflight" 0 <<<"$out"; echo "$out" | sed 's/^/      | /'
