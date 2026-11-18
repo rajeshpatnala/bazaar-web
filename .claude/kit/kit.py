@@ -374,7 +374,7 @@ def codemap(out: str = None) -> int:
 
 SENSITIVE_DEFAULT = ["**/auth/**", "**/*auth*", "**/*security*", "**/*secret*", "**/*token*", "**/*crypt*",
                      "**/*permission*", "**/config/**", "**/*config*", "**/settings*", "**/migrations/**", "**/*.sql",
-                     ".github/**", "**/Dockerfile", "Dockerfile", ".env.example", "**/deny.toml", "**/*.lock"]
+                     ".github/**", ".claude/**", "**/CLAUDE.md", "**/Dockerfile", "Dockerfile", ".env.example", "**/deny.toml", "**/*.lock"]
 TEST_KINDS = ("feat", "fix", "refactor", "perf", "test")
 
 
@@ -396,15 +396,18 @@ def diff_stats(base: str, head: str) -> list:
 
 
 LIGHT_GLOBS = [".agents/**", "docs/**", "**/*.md", "*.md"]
+LIGHT_EXCLUDE = [".claude/**", "CLAUDE.md", "**/CLAUDE.md", ".agents/owner-rules.md", ".agents/team.md", ".agents/scripts/**", ".github/**"]
 REVIEW_FILES = {"code": "code-review.md", "security": "security.md", "tests": "tests-<area>.md"}
 
 
 def required_reviews(kind: str, stats: list) -> tuple:
     s = stack()
-    light = team_setting("light_lane", "skip").lower()
-    if light != "off" and stats and all(matches(p, LIGHT_GLOBS) for _, _, p in stats):
-        # review effort scales with the risk of the paths touched: records/docs/config-of-agents only
-        return (["code"] if light == "quick" else []), [f"light lane: only .agents/docs/markdown ({light})"]
+    light = team_setting("light_lane", "skip").strip().lower()
+    if light not in ("skip", "quick", "off"):
+        print(f"kit: light_lane '{light}' is not skip|quick|off; treated as off", file=sys.stderr)
+        light = "off"
+    if light != "off" and stats and all(matches(p, LIGHT_GLOBS) and not matches(p, LIGHT_EXCLUDE) for _, _, p in stats):
+        return (["code"] if light == "quick" else []), [f"light lane: only docs/records ({light})"]
     large = int(team_setting("large_pr_lines", "150"))
     sec_policy = team_setting("security_review", "sensitive-or-large").lower()
     test_policy = team_setting("tester_review", "behaviour-change").lower()
@@ -1049,6 +1052,8 @@ def merge(argv: list) -> int:
     integ, rel = branches()
     if "--branch" in argv:  # local fallback without GitHub
         head = argv[argv.index("--branch") + 1]
+        if head.startswith("-"):
+            sys.exit(f"kit: invalid branch name {head!r}")
         title = argv[argv.index("--title") + 1] if "--title" in argv else ""
         if not TITLE_RE.match(title):
             sys.exit("kit: local merge needs --title '<conventional commit title>'")
@@ -1058,7 +1063,7 @@ def merge(argv: list) -> int:
             sys.exit(f"kit: {head} is a protected branch and can't be merged/deleted this way")
         rid = classify(head)[1] or (argv[argv.index("--feature") + 1] if "--feature" in argv else "")
         refs = ["-m", f"Refs: {rid}"] if rid else []  # links the commit to its feature/bug record (just feature <id>)
-        for cmd in (["git", "switch", integ], ["git", "merge", "--squash", head], ["git", "commit", "-m", title, *refs], ["git", "branch", "-D", head]):
+        for cmd in (["git", "switch", integ], ["git", "merge", "--squash", "--", head], ["git", "commit", "-m", title, *refs], ["git", "branch", "-D", "--", head]):
             if subprocess.run(cmd, cwd=ROOT).returncode:
                 return 1
         print(f"merged {head} into {integ}")
@@ -1083,7 +1088,7 @@ def ship(argv: list) -> int:
     """One command for the mechanical tail: wait for CI, merge-check, merge, pull the integration branch."""
     if "--branch" in argv:
         return merge(argv)
-    if not argv or argv[0].startswith("--"):
+    if not argv or not argv[0].isdigit():
         sys.exit("usage: kit.py ship <pr> [--timeout N] | --branch <b> --title T")
     integ = branches()[0]
     wait_ci(argv[0], argv)
@@ -1093,7 +1098,10 @@ def ship(argv: list) -> int:
     r = subprocess.run(["git", "switch", "-q", integ], cwd=ROOT, capture_output=True, text=True)
     if r.returncode == 0:
         r = subprocess.run(["git", "pull", "-q", "--ff-only"], cwd=ROOT, capture_output=True, text=True)
-    print(f"shipped PR {argv[0]}; {integ} " + ("updated" if r.returncode == 0 else f"not updated ({r.stderr.strip()[:120]})"))
+    if r.returncode:
+        print(f"merged; {integ} not updated ({r.stderr.strip()[:120]})")
+        return 1
+    print(f"shipped PR {argv[0]}; {integ} updated")
     return 0
 
 

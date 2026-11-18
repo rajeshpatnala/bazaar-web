@@ -61,7 +61,7 @@ Before planning, tell the user the lane, the size and a token estimate in one li
 - In `in-place` mode L work runs one slice at a time; prefer M-style sequencing with the same developer.
 - If a plan's estimate is more than ~3x what the visible change needs, the tech lead shrinks it or justifies it.
 - When in doubt between two sizes, pick the smaller and grow if needed.
-- **Light lane:** a change confined to `.agents/`, `docs/` or markdown (no source, CI, deps, auth, migrations, Dockerfile)
+- **Light lane:** a change confined to docs and records (`docs/`, markdown, `.agents/` records; never agent prompts, skills, CLAUDE.md, owner rules, team settings, scripts, source, CI, deps, auth, migrations, Dockerfile)
   needs no security review and no tester; code review per `light_lane` (default `skip`; `quick` = code review only).
   merge-check still checks title and CI. Review effort scales with the risk of the paths touched.
 
