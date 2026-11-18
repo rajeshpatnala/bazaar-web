@@ -1,6 +1,6 @@
 //! Architecture checks from `cargo metadata`: crate edges against the `bz-architecture` table,
 //! no domain crate depends on `bazaar-server`, `live-trading` is in no default feature.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::{collections::BTreeMap, process::Command};
 
