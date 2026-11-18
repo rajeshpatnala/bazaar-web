@@ -28,7 +28,7 @@ bazaar-broker = { path = "crates/broker" }
 # external: versions live ONLY here (F1 set approved by the owner on 2026-11-18)
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 tokio-util = "0.7"
-rust_decimal = { version = "1.43", features = ["serde-with-str", "maths"] }
+rust_decimal = { version = "1.43", default-features = false, features = ["std", "serde-with-str", "maths"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }
 chrono-tz = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }

@@ -5,8 +5,14 @@
 //!   is symmetric for profit and loss;
 //! - tick snapping rounds to the nearest tick, exact halves away from zero
 //!   (`MidpointAwayFromZero`), as a price ladder would.
+//!
+//! Caveats: banker's rounding can differ by one paisa from broker contract notes, which usually
+//! round half up per charge line; reconcile per call site in the cost model if that matters.
+//! Nearest-tick snapping is for normalising data only: order limits and stops need directional
+//! rounding (floor/ceil to tick), to be added before any order path uses prices.
+//! No operator impls except `Neg`: all other arithmetic is checked and returns `DomainError`.
 
-use std::ops::{Add, Neg, Sub};
+use std::ops::Neg;
 use std::str::FromStr;
 
 use rust_decimal::{Decimal, RoundingStrategy};
@@ -15,6 +21,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::DomainError;
 
 const PAISE_DP: u32 = 2;
+/// Longest input prefix echoed in an `InvalidAmount` error.
+const MAX_ECHO: usize = 32;
 
 /// Rupee amount; may be negative (P&L). Serialised as a string. Never built from `f64`.
 #[derive(
@@ -58,6 +66,17 @@ impl Money {
             .ok_or(DomainError::Overflow)
     }
 
+    /// Checked difference.
+    ///
+    /// # Errors
+    /// `Overflow` when the result does not fit.
+    pub fn checked_sub(self, o: Self) -> Result<Self, DomainError> {
+        self.0
+            .checked_sub(o.0)
+            .map(Self)
+            .ok_or(DomainError::Overflow)
+    }
+
     /// Checked product with a scalar (rate, fraction, quantity).
     ///
     /// # Errors
@@ -72,21 +91,7 @@ impl FromStr for Money {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Decimal::from_str(s)
             .map(Self)
-            .map_err(|_| DomainError::InvalidAmount(s.to_owned()))
-    }
-}
-
-impl Add for Money {
-    type Output = Self;
-    fn add(self, o: Self) -> Self {
-        Self(self.0 + o.0)
-    }
-}
-
-impl Sub for Money {
-    type Output = Self;
-    fn sub(self, o: Self) -> Self {
-        Self(self.0 - o.0)
+            .map_err(|_| DomainError::InvalidAmount(s.chars().take(MAX_ECHO).collect()))
     }
 }
 
@@ -113,7 +118,10 @@ impl Price {
         if raw < Decimal::ZERO {
             return Err(DomainError::NegativeQuantity);
         }
-        let steps = (raw / tick).round_dp_with_strategy(0, RoundingStrategy::MidpointAwayFromZero);
+        let steps = raw
+            .checked_div(tick)
+            .ok_or(DomainError::Overflow)?
+            .round_dp_with_strategy(0, RoundingStrategy::MidpointAwayFromZero);
         steps
             .checked_mul(tick)
             .map(Self)
@@ -223,12 +231,11 @@ mod tests {
     fn money_arithmetic_and_negative_pnl() {
         let a = Money::from_str("100.10").unwrap();
         let b = Money::from_str("250.25").unwrap();
-        assert_eq!((a - b).amount(), d("-150.15"));
-        assert_eq!((-(a - b)).amount(), d("150.15"));
-        assert_eq!((a + b).amount(), d("350.35"));
-        assert_eq!(a.checked_add(b).unwrap(), a + b);
+        assert_eq!(a.checked_sub(b).unwrap().amount(), d("-150.15"));
+        assert_eq!((-a.checked_sub(b).unwrap()).amount(), d("150.15"));
+        assert_eq!(a.checked_add(b).unwrap().amount(), d("350.35"));
         assert_eq!(a.checked_mul(d("2")).unwrap().amount(), d("200.20"));
-        assert_eq!(Money::ZERO + a, a);
+        assert_eq!(Money::ZERO.checked_add(a).unwrap(), a);
     }
 
     #[test]
@@ -236,6 +243,27 @@ mod tests {
         let big = Money::new(Decimal::MAX);
         assert_eq!(big.checked_add(big), Err(DomainError::Overflow));
         assert_eq!(big.checked_mul(d("2")), Err(DomainError::Overflow));
+        assert_eq!(
+            big.checked_sub(Money::new(Decimal::MIN)),
+            Err(DomainError::Overflow)
+        );
+        // division overflow in tick snapping
+        assert_eq!(
+            Price::snap_to_tick(Decimal::MAX, d("0.0001")),
+            Err(DomainError::Overflow)
+        );
+    }
+
+    #[test]
+    fn negative_zero_is_accepted() {
+        assert!(Price::snap_to_tick(d("-0.00"), d("0.05")).is_ok());
+    }
+
+    #[test]
+    fn invalid_amount_echo_is_bounded() {
+        let long = "x".repeat(10_000);
+        let err = Money::from_str(&long).unwrap_err();
+        assert_eq!(err, DomainError::InvalidAmount("x".repeat(32)));
     }
 
     #[test]
