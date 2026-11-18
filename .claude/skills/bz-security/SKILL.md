@@ -130,7 +130,7 @@ The exact text and wording rules live only in `bz-india-markets` `references/com
 
 ## 11. Review procedure and severity
 
-1. Read the plan and the diff (`git diff develop...<branch>`), not the whole repo. 2. Run the section 3 scan on changed paths; list each hit as fixed, justified or finding. 3. Walk sections 2 and 4 to 8 for the changed area. 4. Threat-model new routes, WebSocket messages, env vars or outbound calls in a few lines: which page or local process can trigger it, whether a GET changes state, what it touches, blast radius in rupees. 5. Each finding: id `SEC-<feature>-<n>`, severity, file:line, issue, impact (rupee or compliance), fix, verification; on re-check `fixed`, `not fixed` or `accepted risk (by tech lead)`. Anything weakening capital protection also goes to `risk-guardian` (veto).
+1. Read the plan and the diff (`git diff develop...<branch>`), not the whole repo. 2. Run the section 3 scan on changed paths; list each hit as fixed, justified or finding. 3. Walk sections 2 and 4 to 8 for the changed area. 4. Threat-model new routes, WebSocket messages, env vars or outbound calls in a few lines: which page or local process can trigger it, whether a GET changes state, what it touches, blast radius in rupees. 5. Each finding: id `SEC-<pr>-<n>`, severity, file:line, issue, impact (rupee or compliance), fix, verification; on re-check `fixed`, `not fixed` or `accepted risk (by tech lead)`. Anything weakening capital protection also goes to `risk-guardian` (veto).
 
 | Severity | Meaning | Blocks merge |
 |---|---|---|

@@ -21,11 +21,24 @@ The kit ships working defaults; adapt them, don't reinvent them:
 
 - Required checks on every PR: PR title, lint, tests, supply chain, image (if any). A human enables branch protection; document required settings in the PR.
 - PR titles **must** be Conventional Commits (`feat(scope): ...`): squash merges make the title the commit, and the changelog is generated from it.
-- Jobs skip cleanly when the project isn't bootstrapped yet (`if: hashFiles('<manifest>') != ''`).
+- Every optional job or step is guarded on the file it needs, so it switches itself on later instead of failing every
+  PR now: the manifest (`if: hashFiles('<manifest>') != ''`), and also the generator or artefact a drift check compares
+  against (generated API types, schema, Dockerfile, models directory). `hashFiles()` only works in a **step** `if`
+  (in a job-level `if` it makes the whole workflow invalid).
+- `just preflight` lints workflow files (actionlint when installed); run it before pushing a workflow change.
+- Slow or scarce runners (macOS, Windows, large warehouses) are `workflow_dispatch` or push-only, never the PR gate;
+  the fast Linux job is the gate.
+- `concurrency`: cancel only superseded **PR** runs (`cancel-in-progress: ${{ github.event_name == 'pull_request' }}`);
+  pushes to the integration/release branch always finish.
+- Pin tool versions in the repo (`packageManager`, `.nvmrc`, `rust-toolchain.toml`, `.tool-versions`) and fail early with a
+  clear message when one is missing; installs are frozen (`--frozen-lockfile`, `--locked`) in every recipe and CI step;
+  package managers that support it get an install-script allow-list and a minimum release age.
+- If GitHub can't update a PR branch (the token lacks workflow scope), the branch's developer merges the base in with
+  plain git in that branch's worktree and pushes.
 - `just check` locally mirrors CI.
 - PR CI target under 10 minutes: fix caching before adding runners.
 - Pin actions to a major version (or SHA); check current majors with web search when editing.
-- Minimal `permissions:` per workflow; `concurrency` cancels superseded runs.
+- Minimal `permissions:` per workflow.
 
 ## 2. Releases, CHANGELOG and tags (automatic)
 

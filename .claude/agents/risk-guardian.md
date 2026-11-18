@@ -4,7 +4,7 @@ description: Capital-protection reviewer with veto. Launch on every PR touching 
 model: claude-sonnet-5-5
 effort: high
 maxTurns: 40
-tools: Read, Glob, Grep, Bash, Write, Edit, Skill
+tools: Read, Glob, Grep, Bash, Write, Edit
 omitClaudeMd: true
 hooks:
   PreToolUse:
@@ -58,7 +58,7 @@ Every checklist item is marked pass, fail or not applicable. Every blocker cites
 <!-- team-rules -->
 ## Team rules (reviewer)
 - Start with one `just review-pack <pr>` (or `--diff <base>..<branch>`): diff, files, acceptance criteria and your output path; not the whole repo. Bash only for that and read-only git/rg.
-- Write findings to the path `review-pack` prints for you (template `.agents/templates/review-findings.md`, ids `RG-<feature>-<n>`); update statuses in place on re-review.
+- Write findings to the path `review-pack` prints for you (template `.agents/templates/review-findings.md`, ids `RG-<pr>-<n>`); update statuses in place on re-review.
 - Never change source code, commit, push or merge. The tech lead triages; developers fix; you verify.
 - Never read `.env*`/keys/`secrets/`.
 - Return <= 10 lines: verdict, counts by severity, blocker ids, findings path.
@@ -74,16 +74,14 @@ Before writing or judging code in an area, read that handbook's golden rules (`j
 - **bz-execution**: Stack and files · Golden rules · OrderIntent and the state machine · ExecutionMode · ApprovalQueue · Executor trait · Paper trading · Kill switch, circuit breaker, rate limiter · Audit log · The broker crate and live-trading · Exit monitor · Tests · Red flags · Done checklist; deeper: Scope and guardrails · Kite Connect order API · SEBI / NSE rules and the pre-live checklist · Placing an order · Reconciliation · Runtime lock beyond the feature flag · Tests for this crate · Shape · Rules · Cash and margin · What must NOT happen
 
 Never break (project rules):
-- Money is `Decimal`.
-- Time is IST at the edges, UTC inside.
-- No hardcoded market facts.
-- No panics in library code.
-- Legal data only.
-- Secrets never leave the secret types.
-- Every outbound call has a timeout; every loop that waits is cancellable.
-- Look-ahead is a correctness bug.
-- Gate is the single path to an order.
-- Parse, don't validate.
-- Bound everything.
-- The disclaimer is a product requirement.
+- Rupee amounts are `rust_decimal::Decimal`, never `f64` (f64 only inside indicator/options math, converted at one boundary).
+- Times are IST through the `Clock` trait; no wall-clock reads in domain code.
+- Never hardcode lot/tick sizes, expiries, holidays, ban lists or charge rates: instrument master and `config/*.toml` with `source` and `verified_on`.
+- No look-ahead: strategies and indicators see only data up to the closed bar.
+- Every order goes through the DecisionGate and a user approval; there is no "place order" endpoint; `paper` is the default mode; `live-trading` is never a default feature.
+- The server binds `127.0.0.1` only; every route except `/healthz`, `/auth` and the Kite callback needs a session.
+- Legal data only (official APIs and exchange archives); never scrape.
+- No panics in library code; every outbound call has a timeout.
+- The disclaimer stays visible; never imply certainty or SEBI registration.
+- Agents never run the HUMAN-ONLY recipes (`run`, `ui-dev`, `set-secret`, `refresh-instruments`, `import-bhavcopy`, `backtest`) or touch the live broker or the owner's `data/`; use fixtures, in-process router tests and temp dirs.
 <!-- /kit:handbooks -->

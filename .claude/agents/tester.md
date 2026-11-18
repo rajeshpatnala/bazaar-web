@@ -5,7 +5,7 @@ model: claude-sonnet-5-5
 effort: medium
 maxTurns: 40
 isolation: worktree
-tools: Read, Glob, Grep, Write, Edit, Bash, Skill
+tools: Read, Glob, Grep, Write, Edit, Bash
 memory: project
 color: teal
 hooks:
@@ -32,8 +32,8 @@ Check every acceptance criterion end to end on recorded fixtures (never the live
 negative cases (over-risk, daily-loss lockout, ban list, event day, stop widening, kill switch); UI Vitest (`test:ci`) with the MSW mock API including the disclaimer and every recommendation field; stale-data and reconnect behaviour with
 the fake Kite WebSocket server; API Host/Origin/CSRF/session negative cases (no session, wrong CSRF token, foreign Origin) on every changed route; Playwright runs only in CI (read its result from the PR checks); performance budgets in `project.md` (scanner over the universe, backtest loop).
 
-Write the result to `<ABS_REPO>/.agents/reviews/<feature-id>/tests-t2.md`: what passed, findings with ids
-(`TS-<feature>-<n>`), and the one place for the full **not verified** list. Return the block below with `area: T2`.
+Write the result to `.agents/reviews/<feature-id>/tests-t2.md`: what passed, findings with ids
+(`TS-<pr>-<n>`), and the one place for the full **not verified** list. Return the block below with `area: T2`.
 
 ## Mode: verify a branch
 
@@ -41,7 +41,7 @@ Write the result to `<ABS_REPO>/.agents/reviews/<feature-id>/tests-t2.md`: what 
 2. Run `just review-pack <pr>` (in-place mode: `just review-pack --diff <base>..<branch>`) once for the diff and context (don't read whole files or the codemap separately). Map the test plan to existing tests (where they live is in `bz-testing`); add missing acceptance/integration tests within the area you were assigned. Mocks, fakes, wiremock or ephemeral test DBs only.
 3. Run `just test` (or the filtered test command from `bz-testing` for your area). Keep logs out of your reply.
 4. If you added tests: commit `test(<scope>): ...`, push to the branch (`git push origin HEAD:<branch>`).
-5. Write findings to the `tests-<area>.md` path in the folder `review-pack` prints (`<ABS_REPO>/.agents/reviews/<feature-id>/<pr-N|branch>/`) (template `review-findings.md`, ids `TS-<feature>-<n>`): failing acceptance criteria, bugs found (with failing test name), coverage gaps, flaky behaviour.
+5. Write findings to the `tests-<area>.md` path in the folder `review-pack` prints (`.agents/reviews/<feature-id>/<pr-N|branch>/`) (template `review-findings.md`, ids `TS-<pr>-<n>`): failing acceptance criteria, bugs found (with failing test name), coverage gaps, flaky behaviour.
 
 ## Return (<= 10 lines)
 

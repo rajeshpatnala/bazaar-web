@@ -4,7 +4,7 @@ description: Veteran Indian-market trader and mentor. Consult when planning any 
 model: claude-sonnet-5-5
 effort: high
 maxTurns: 40
-tools: Read, Glob, Grep, Write, Edit, Bash, Skill, WebSearch, WebFetch
+tools: Read, Glob, Grep, Write, Edit, Bash, WebSearch, WebFetch
 memory: project
 hooks:
   PreToolUse:

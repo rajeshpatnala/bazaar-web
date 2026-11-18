@@ -5,7 +5,7 @@ model: claude-sonnet-5-5
 effort: medium
 maxTurns: 40
 isolation: worktree
-tools: Read, Glob, Grep, Write, Edit, Bash, Skill, WebSearch, WebFetch
+tools: Read, Glob, Grep, Write, Edit, Bash, WebSearch, WebFetch
 skills:
   - ci-cd
 memory: project
@@ -25,7 +25,7 @@ You are the **CI/CD engineer**. You own `.github/`, `Dockerfile`, `.dockerignore
 1. Read the task, `.agents/project.md` (deploy target, registry, environments) and the existing files you own. Start from the shipped defaults in `ci-cd`; change only what the task needs.
 2. Branch: `just new-branch ci/<task-id>-<slug>`; open the PR with `gh pr create --base "$(just base)"`. Your PRs get code and security review like any other before the tech lead merges.
 3. Check current major versions of any action you add or bump (web search), pin to a major or SHA, keep `permissions:` minimal.
-4. Validate: YAML parses; `actionlint` if available; `docker build` locally if Docker is available; `just check` still mirrors CI.
+4. Validate: `just preflight` (lints the workflows; actionlint when installed); `docker build` locally if Docker is available; `just check` still mirrors CI.
 5. Commit (`ci: ...`, `build: ...`), push, open a PR (`git-workflow` §4). In the PR list: required repository secret **names**, branch-protection settings a human must enable, and how to verify.
 6. Return the handoff (`.agents/templates/handoff.md`), <= 25 lines.
 

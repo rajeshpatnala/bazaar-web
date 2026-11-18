@@ -17,7 +17,11 @@
       "color": "yellow",
       "description": "Developer specialised in market data and storage - Kite Connect REST/WebSocket adapters with reconnects, NSE/BSE bhavcopy import, instrument master, corporate-action adjustment, SQLite/Parquet/DuckDB store crate. Launch one instance per data slice; several can run in parallel.",
       "focus": "crates `data` and `store`: the `MarketData` trait and broker/vendor adapters, reconnecting WebSocket ticker, official bhavcopy importers, instrument master (the only source of lot sizes, tick sizes, expiries), corporate actions, stale-data detection, SQLite migrations and Parquet/DuckDB repositories. Legal data only, never scrape. Load `bz-india-markets` for market facts. Tests use recorded fixtures in `fixtures/`, wiremock and a local fake WebSocket server - never the live API.",
-      "slices": "broker adapters, WebSocket client, bhavcopy, instrument master, corporate actions, storage"
+      "slices": "broker adapters, WebSocket client, bhavcopy, instrument master, corporate actions, storage",
+      "paths": [
+        "crates/data/**",
+        "crates/store/**"
+      ]
     },
     {
       "name": "dev-quant",
@@ -25,7 +29,14 @@
       "color": "cyan",
       "description": "Developer specialised in quantitative code - streaming and batch indicators, options pricing (Black-76, IV, Greeks, PCR, max pain, OI build-up, payoff), market regime detection, strategy modules, scanner scoring and recommendations. Launch one instance per quant slice; several can run in parallel.",
       "focus": "crates `indicators`, `options`, `regime`, `strategies`, `scanner`. Every indicator and pricing function is tested against published reference values; every strategy has the doc comment (idea, entry, exit, stop, best regime, weaknesses) and follows the strategist's spec in `docs/strategy/` when one exists. Recommendations carry every field from hard rule 6 and the low-evidence label. Strategies see only past bars. Load `bz-india-markets` and `bz-market-strategy` when a slice needs market facts or trader judgement.",
-      "slices": "indicators, options math, regime, strategies, scanner and scoring"
+      "slices": "indicators, options math, regime, strategies, scanner and scoring",
+      "paths": [
+        "crates/indicators/**",
+        "crates/options/**",
+        "crates/regime/**",
+        "crates/strategies/**",
+        "crates/scanner/**"
+      ]
     },
     {
       "name": "dev-backtest",
@@ -33,7 +44,13 @@
       "color": "orange",
       "description": "Developer specialised in the backtester and risk engine - event-driven backtests without look-ahead, the Indian cost model (charges.toml) and slippage, walk-forward and out-of-sample tests, metrics, position sizing, portfolio limits and the DecisionGate. Launch one instance per slice; several can run in parallel.",
       "focus": "crates `backtest` and `risk`. No look-ahead by construction plus property tests that prove it; every P&L includes all charges from `config/charges.toml` (rates with `source` and `verified_on`, never from memory) and slippage; sizing in `Decimal` with lot rounding; the DecisionGate implements the rule catalogue whose policy lives in `bz-trading-discipline` - thresholds only from `config/risk.toml`.",
-      "slices": "backtester, cost model, slippage, metrics, walk-forward, sizing, DecisionGate rules"
+      "slices": "backtester, cost model, slippage, metrics, walk-forward, sizing, DecisionGate rules",
+      "paths": [
+        "crates/backtest/**",
+        "crates/risk/**",
+        "config/charges.toml",
+        "config/risk.toml"
+      ]
     },
     {
       "name": "dev-execution",
@@ -41,7 +58,12 @@
       "color": "red",
       "description": "Developer specialised in order execution - OrderIntent pipeline, ExecutionMode (paper, semi-auto, auto), approval queue, paper account with realistic fills and charges, kill switch, daily-loss circuit breaker, rate limiter, append-only audit log, and the feature-gated live broker crate. Launch one instance per slice; several can run in parallel.",
       "focus": "crates `execution`, `paper`, `broker`. Paper and live share every step except the final `Executor`; the DecisionGate re-runs at approval time; nothing reaches an executor without the gate and (in semi-auto) a user approval; kill switch and circuit breaker are checked before every send; `live-trading` is never a default feature. Load `bz-trading-discipline` for policy. Tests use fakes only and never place real orders.",
-      "slices": "order pipeline, approvals, paper account and fills, kill switch, rate limits, audit log, broker crate"
+      "slices": "order pipeline, approvals, paper account and fills, kill switch, rate limits, audit log, broker crate",
+      "paths": [
+        "crates/execution/**",
+        "crates/paper/**",
+        "crates/broker/**"
+      ]
     },
     {
       "name": "dev-api",
@@ -49,15 +71,21 @@
       "color": "blue",
       "description": "Developer specialised in the web server - axum REST endpoints under /api/v1, the WebSocket feed, localhost hardening (loopback bind, launch-token session, Host/Origin checks, CSRF), OpenAPI generation, problem+json errors, and serving the built UI. Launch one instance per API slice; several can run in parallel.",
       "focus": "crate `server` only (the composition root). Handlers stay thin and call into the crates; DTOs separate from domain types with OpenAPI schemas; loopback-only bind, Host allowlist and launch-token session on every route except `/healthz`, `/auth` and the Kite callback; non-GET routes need the Origin check and the CSRF token; no route places an order (orders only via order-intents + approvals); WebSocket throttles ticks. Tests run the router in-process with temp dirs and fakes, never the live broker.",
-      "slices": "endpoints, WebSocket, auth and sessions, OpenAPI, error mapping, static UI serving"
+      "slices": "endpoints, WebSocket, auth and sessions, OpenAPI, error mapping, static UI serving",
+      "paths": [
+        "crates/server/**"
+      ]
     },
     {
       "name": "dev-ui",
       "skill": "bz-web-ui",
       "color": "green",
       "description": "Developer specialised in the browser UI in web/ - React + TypeScript screens, lightweight-charts candles with indicators and markers, recommendation cards with Why panels, the order approval dialog, the permanent disclaimer, and the typed API and WebSocket client. Launch one instance per screen or UI slice; several can run in parallel.",
-      "focus": "`web/` only. Types come from the generated OpenAPI schema (never hand-written DTOs); TanStack Query for server data; screens show every recommendation field, the low-evidence, regime and data-delayed badges and plain-English Why panels for a beginner; \u20b9 in en-IN grouping and times in IST; the disclaimer is always visible. Vitest with MSW for every component; one screenshot of the changed screen as the T1 check.",
-      "slices": "screens, charts, Why panels, approval dialog, settings, API client"
+      "focus": "`web/` only. Types come from the generated OpenAPI schema (never hand-written DTOs); TanStack Query for server data; screens show every recommendation field, the low-evidence, regime and data-delayed badges and plain-English Why panels for a beginner; ₹ in en-IN grouping and times in IST; the disclaimer is always visible. Vitest with MSW for every component; one screenshot of the changed screen as the T1 check.",
+      "slices": "screens, charts, Why panels, approval dialog, settings, API client",
+      "paths": [
+        "web/**"
+      ]
     },
     {
       "name": "dev-core",
@@ -66,7 +94,12 @@
       "general": true,
       "description": "General Rust developer for core domain types, Money and IST time, the market calendar, config loading and validation, workspace wiring, the bazaar-cli crate, refactors, bug fixes and anything not covered by the specialist developers. Launch one instance per slice; several can run in parallel.",
       "focus": "crates `core` and `cli`, root workspace files, `config/` schemas and loaders (every rate or market fact has `source` and `verified_on`), the IST `MarketCalendar` built from holiday/config files, `check-connections` for `just db-check`, refactors and general fixes. Load other `bz-*` skills with the Skill tool only if the slice touches their area.",
-      "slices": "core types, IST calendar, config, cli, wiring, refactors, general"
+      "slices": "core types, IST calendar, config, cli, wiring, refactors, general",
+      "paths": [
+        "crates/core/**",
+        "crates/cli/**",
+        "config/**"
+      ]
     }
   ],
   "extra_agents": [
@@ -187,7 +220,7 @@
     "summary": "cargo fmt + clippy -D warnings + nextest; web typecheck + lint + vitest",
     "check_summary": "doc tests + cargo deny + pnpm audit",
     "requires_file": "Cargo.toml",
-    "error_regex": "error(\\[E[0-9]+\\])?:|warning:|^Diff in|panicked at|^---- |FAILED|FAIL |TS[0-9]{4}|\u2717|\u00d7",
+    "error_regex": "error(\\[E[0-9]+\\])?:|warning:|^Diff in|panicked at|^---- |FAILED|FAIL |TS[0-9]{4}|✗|×",
     "steps": [
       {
         "name": "fmt",
@@ -364,5 +397,140 @@
     ".github/workflows/**",
     "justfile",
     "deny.toml"
+  ],
+  "domain_reviews": [
+    {
+      "name": "risk",
+      "agent": "risk-guardian",
+      "file": "risk.md",
+      "pass": [
+        "APPROVE",
+        "PASS"
+      ],
+      "block_severities": [
+        "blocker",
+        "critical",
+        "high",
+        "major"
+      ],
+      "globs": [
+        "crates/risk/**",
+        "crates/execution/**",
+        "crates/paper/**",
+        "crates/broker/**",
+        "crates/scanner/**",
+        "config/risk.toml",
+        "crates/server/src/**/*order*",
+        "crates/server/src/**/*approv*",
+        "crates/server/src/**/*kill*",
+        "web/src/**/*Approval*",
+        "web/src/**/*approval*",
+        "web/src/**/*Order*",
+        "web/src/**/*KillSwitch*",
+        "web/src/**/*kill-switch*"
+      ],
+      "envelope_checklist": [
+        {
+          "skill": "bz-trading-discipline",
+          "sections": "contract|rule catalogue|override|risk-guardian PR checklist"
+        },
+        {
+          "skill": "bz-execution",
+          "sections": "golden rules"
+        }
+      ]
+    },
+    {
+      "name": "quant",
+      "agent": "quant-reviewer",
+      "file": "quant.md",
+      "pass": [
+        "APPROVE",
+        "PASS"
+      ],
+      "block_severities": [
+        "blocker",
+        "critical",
+        "high",
+        "major"
+      ],
+      "globs": [
+        "crates/indicators/**",
+        "crates/options/**",
+        "crates/regime/**",
+        "crates/strategies/**",
+        "crates/scanner/**",
+        "crates/backtest/**",
+        "crates/data/**",
+        "config/charges.toml"
+      ],
+      "envelope_checklist": [
+        {
+          "skill": "bz-quant",
+          "sections": "golden rules|red flags"
+        },
+        {
+          "skill": "bz-backtest-risk",
+          "sections": "golden rules"
+        }
+      ]
+    }
+  ],
+  "envelope_exclude_globs": [
+    "crates/broker/**",
+    "crates/execution/**",
+    "config/risk.toml",
+    "crates/risk/src/**/*gate*",
+    "config/charges.toml"
+  ],
+  "never_break": [
+    "Rupee amounts are `rust_decimal::Decimal`, never `f64` (f64 only inside indicator/options math, converted at one boundary).",
+    "Times are IST through the `Clock` trait; no wall-clock reads in domain code.",
+    "Never hardcode lot/tick sizes, expiries, holidays, ban lists or charge rates: instrument master and `config/*.toml` with `source` and `verified_on`.",
+    "No look-ahead: strategies and indicators see only data up to the closed bar.",
+    "Every order goes through the DecisionGate and a user approval; there is no \"place order\" endpoint; `paper` is the default mode; `live-trading` is never a default feature.",
+    "The server binds `127.0.0.1` only; every route except `/healthz`, `/auth` and the Kite callback needs a session.",
+    "Legal data only (official APIs and exchange archives); never scrape.",
+    "No panics in library code; every outbound call has a timeout.",
+    "The disclaimer stays visible; never imply certainty or SEBI registration.",
+    "Agents never run the HUMAN-ONLY recipes (`run`, `ui-dev`, `set-secret`, `refresh-instruments`, `import-bhavcopy`, `backtest`) or touch the live broker or the owner's `data/`; use fixtures, in-process router tests and temp dirs."
+  ],
+  "docs_synonyms": {
+    "iv": "implied volatility",
+    "pcr": "put call ratio",
+    "oi": "open interest",
+    "f&o": "futures options",
+    "pnl": "profit loss p&l",
+    "greeks": "delta gamma vega theta"
+  },
+  "generated_globs": [
+    "web/src/api/schema.d.ts",
+    "**/openapi.json",
+    "web/pnpm-lock.yaml",
+    "**/*.snap"
+  ],
+  "project_recipes": [
+    "run",
+    "ui-dev",
+    "set-secret",
+    "refresh-instruments",
+    "import-bhavcopy",
+    "backtest",
+    "openapi"
+  ],
+  "tester_risk_globs": [
+    "crates/risk/**",
+    "crates/execution/**",
+    "crates/paper/**",
+    "crates/broker/**",
+    "crates/backtest/src/**/cost*",
+    "crates/backtest/src/**/slippage*",
+    "crates/backtest/src/**/sizing*",
+    "crates/store/src/**/migrat*",
+    "crates/store/migrations/**",
+    "crates/server/src/**/auth*",
+    "crates/server/src/**/session*",
+    "config/charges.toml",
+    "config/risk.toml"
   ]
 }

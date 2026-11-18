@@ -64,17 +64,41 @@ review-plan pr *args:
 review-pack pr *args:
     @python3 .claude/kit/kit.py review-pack {{pr}} {{args}}
 
-# small PRs: all required reviews in one tool-free Claude call instead of reviewer agents (exit 3 = launch them)
+# small PRs: all required reviews in one tool-free Claude call (exit 3 = launch the reviewers, 4 = can't run here: one combined-reviewer)
 envelope pr *args:
     @python3 .claude/kit/kit.py envelope {{pr}} {{args}}
+
+# test the envelope path once (find Claude Code, version, one tiny call) and say what to fix
+envelope-check:
+    @python3 .claude/kit/kit.py envelope-check
 
 # what an agent reads before it starts working, and how big each part is (no agent = summary of all)
 start-report *agent:
     @python3 .claude/kit/kit.py start-report {{agent}}
 
+# the library: one section of the skills/handbooks on request (e.g. just docs money; --list shows topics)
+docs *topic:
+    @python3 .claude/kit/kit.py docs {{topic}}
+
+# copy review files that agents wrote inside their worktrees into this checkout (merge-check and triage do it too)
+collect-reviews:
+    @python3 .claude/kit/kit.py collect-reviews
+
+# zip only the kit (agents, skills, hooks, .agents notes, records, CI) for feedback or upgrades; shows size and contents
+export-kit *args:
+    @python3 .claude/kit/kit.py export-kit {{args}}
+
 # apply the default triage decisions to a PR's findings; lists only what needs the tech lead
 triage feature *args:
     @python3 .claude/kit/kit.py triage {{feature}} {{args}}
+
+# a feature plan, or one slice's brief (works inside agent worktrees): just plan F3 --slice 2
+plan id *args:
+    @python3 .claude/kit/kit.py plan {{id}} {{args}}
+
+# close a milestone: rewrite the board's Resume note, archive finished rows, then start a fresh session (/clear)
+milestone *text:
+    @python3 .claude/kit/kit.py milestone {{text}}
 
 # one-shot status for the manager: checkout, work mode, budget, board, open PRs with CI, bugs
 status:
@@ -195,6 +219,20 @@ ui-dev:
 # UI only in the browser with mocked API (MSW) - previews, screenshots, Playwright
 app-dev:
     pnpm -C web dev:mock
+
+# one screenshot of a route for T1 evidence (agents may run it): starts its own dev server on a spare port, waits,
+# saves {{out}}, stops the server. e.g. just ui-shot /settings 360
+ui-shot route="/" width="1440" out="web/.shots/shot.png":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+    mkdir -p "$(dirname "{{out}}")"
+    VITE_MOCK_API=1 pnpm -C web exec vite --port "$port" --strictPort --host 127.0.0.1 >"$(dirname "{{out}}")/ui-shot.log" 2>&1 &
+    server=$!
+    trap 'kill $server 2>/dev/null || true' EXIT
+    for _ in $(seq 1 60); do curl -sf "http://127.0.0.1:$port/" >/dev/null && break; sleep 1; done
+    pnpm -C web exec playwright screenshot --viewport-size="{{width}},900" --wait-for-timeout=1500 "http://127.0.0.1:$port{{route}}" "{{out}}"
+    echo "saved {{out}} ({{width}} wide) - open it with Read and say what you saw"
 
 # build the UI and a release server binary
 build:

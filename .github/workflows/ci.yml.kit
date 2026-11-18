@@ -3,13 +3,16 @@ on:
   pull_request:
   push:
     branches: [main, develop]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+# One group per ref, so a run never cancels another ref's runs. Only PR runs are cancelled when superseded;
+# pushes to develop/main always finish (their macOS test would otherwise be cancelled by the next push).
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -67,6 +70,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - if: hashFiles('web/package.json') != ''
+        name: pinned tool versions (packageManager, .nvmrc)
+        run: |
+          node -e "if(!require('./web/package.json').packageManager){console.log('::error::add packageManager (e.g. pnpm@10.x) to web/package.json; pnpm/action-setup needs it');process.exit(1)}"
+          test -f web/.nvmrc || { echo '::error::add web/.nvmrc with the Node major (setup-node reads it)'; exit 1; }
+      - if: hashFiles('web/package.json') != ''
         uses: pnpm/action-setup@v4
         with: { package_json_file: web/package.json }
       - if: hashFiles('web/package.json') != ''
@@ -93,6 +101,10 @@ jobs:
         run: pnpm e2e
 
   test-macos:
+    # Manual-only by default: macOS runners queue for a long time, so this job never runs automatically; the Linux
+    # `test` job is the PR gate. It compiles the Keychain store (the owner's platform). Run it from
+    # Actions > ci > Run workflow. To run it after every merge instead: if: github.event_name == 'push'.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
@@ -108,6 +120,9 @@ jobs:
 
   secrets-scan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v5
         with: { fetch-depth: 0 }
@@ -122,18 +137,20 @@ jobs:
       - if: hashFiles('Cargo.lock') != ''
         uses: EmbarkStudios/cargo-deny-action@v2
 
+  # Permanent guard (not a bypass): the steps run only once the generated API schema (web/src/api/schema.d.ts) is
+  # committed, together with the server `openapi` command and the web `gen:api` script; the job switches itself on then.
   openapi-drift:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != ''
+      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != '' && hashFiles('web/src/api/schema.d.ts') != ''
         uses: dtolnay/rust-toolchain@stable
-      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != ''
+      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != '' && hashFiles('web/src/api/schema.d.ts') != ''
         uses: Swatinem/rust-cache@v2
-      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != ''
+      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != '' && hashFiles('web/src/api/schema.d.ts') != ''
         uses: pnpm/action-setup@v4
         with: { package_json_file: web/package.json }
-      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != ''
+      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != '' && hashFiles('web/src/api/schema.d.ts') != ''
         name: regenerate UI types and fail on drift
         run: |
           cargo run -q -p bazaar-server -- openapi > web/openapi.json

@@ -29,6 +29,7 @@ New agents you hire get their rows here automatically.
 | risk-guardian | claude-sonnet-5-5 | high | 40 | 200,000 |
 | quant-reviewer | claude-sonnet-5-5 | high | 40 | 200,000 |
 | prototyper | claude-sonnet-5-5 | medium | 30 | 150,000 |
+| combined-reviewer | claude-sonnet-5-5 | medium | 6 | 80,000 |
 
 - `model`: sonnet, opus, haiku, fable, a full model id (e.g. claude-sonnet-5-5), or inherit.
 - `effort`: low | medium | high | xhigh | max - how hard the agent thinks per step.
@@ -41,7 +42,7 @@ New agents you hire get their rows here automatically.
 
 | agent | context_window | cache_ttl | memory | permission_mode |
 |---|---|---|---|---|
-| manager | - | - | project | - |
+| manager | 160,000 | 1h | project | - |
 | tech-lead | - | - | project | - |
 | architect | - | - | project | - |
 | dev-data | - | - | project | - |
@@ -60,6 +61,7 @@ New agents you hire get their rows here automatically.
 | risk-guardian | - | - | none | - |
 | quant-reviewer | - | - | none | - |
 | prototyper | - | - | none | - |
+| combined-reviewer | - | - | none | - |
 
 - `context_window`: 100,000-1,000,000 tokens; the conversation is summarised when it reaches this size.
   Smaller = cheaper turns on long tasks. Needs Claude Code 2.1.296+.
@@ -108,8 +110,9 @@ then there is no fixed cap on developers - the budget is the governor.
 | checkpoint_commits | yes |
 | preview_first | yes |
 
-| reuse_roles | tech-lead, architect, market-strategist |
+| reuse_roles | tech-lead, architect, market-strategist, code-reviewer, security-reviewer, risk-guardian, quant-reviewer, combined-reviewer |
 | reuse_window_minutes | 90 |
+| reuse_max_context | 100,000 |
 - `work_mode`: `worktrees` (developers in parallel, each in its own git worktree) or `in-place` (one developer at a
   time in this checkout, for repos where worktrees fail). `just preflight` recommends one; `just work-mode <mode>` switches.
 - `small_max_files`: work touching at most this many files in one area is size S (no plan, one developer, gate only).
@@ -138,6 +141,7 @@ Code review runs on every PR. Security review and testing scale with risk so sma
 | envelope_max_lines | 150 |
 | envelope_max_diff_chars | 60000 |
 | envelope_command | claude |
+| require_feature_t2 | yes |
 `security_review`: `always` or `sensitive-or-large` (auth, config, SQL/migrations, dependency/lock files, CI, Dockerfile, or >= large_pr_lines).
 `tester_review`: `always`, `behaviour-change` (feat/fix/perf with >= tester_min_source_lines production lines), or `large`.
 `require_feature_record`: `yes` = a feat/fix/refactor/perf PR for feature F<n> can't merge until `docs/features/F<n>-*.md` exists (on the PR or already merged).

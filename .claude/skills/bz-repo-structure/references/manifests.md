@@ -225,6 +225,9 @@ server: {
 - Versions: React 19.3, Vite 8, TypeScript `~6.0` (as of 2026-11-18 typescript-eslint 8.73 needs `<6.1` and TS 7 has no compiler API; openapi-typescript 7.13 still declares peer `^5`, so pnpm warns: if `gen:api` breaks, run it with `pnpm dlx -p typescript@5 -p openapi-typescript@7.13 openapi-typescript ...` and log it in `DECISIONS.md`), Vitest 5, ESLint 10 (flat config `eslint.config.js`), lightweight-charts 5.3 (ESM only), TanStack Query 5, React Router 8.5, MSW 3, openapi-typescript 7.13, openapi-fetch 0.17, Playwright 1.65. Check Prettier's current major at bootstrap. Usage: `bz-web-ui`.
 - `tsconfig.json`: `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noEmit`.
 - `web/.nvmrc` holds the Node major used locally and by CI (`actions/setup-node` reads it): use the current LTS at bootstrap. Commit `web/pnpm-lock.yaml`; CI and `just setup` install with `--frozen-lockfile`.
+- Supply-chain guards in `web/pnpm-workspace.yaml` (pnpm 10+): `onlyBuiltDependencies: [esbuild]` (only listed packages
+  may run install scripts; add one only with a reason in `DECISIONS.md`) and `minimumReleaseAge: 1440` (a version must be
+  a day old before it can be installed). `packageManager` must stay pinned: CI fails early with a clear message without it.
 
 ## 5. Build wiring
 

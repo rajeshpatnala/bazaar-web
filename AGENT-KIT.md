@@ -167,7 +167,7 @@ Change a value, run `just agents-sync`, restart Claude Code. Or ask the manager 
 CLAUDE.md                     agent guide (every agent loads it)
 AGENT-KIT.md                  this file
 .claude/settings.json         manager as main agent, permissions, hooks
-.claude/agents/               19 agents: manager, tech-lead, architect, dev-data, dev-quant, dev-backtest, dev-execution, dev-api, dev-ui, dev-core,
+.claude/agents/               20 agents: manager, tech-lead, architect, dev-data, dev-quant, dev-backtest, dev-execution, dev-api, dev-ui, dev-core,
                               cicd, tester, code-reviewer, security-reviewer, build-runner, prototyper (+ pack extras)
 .claude/skills/               21 skills
 .claude/rules/                path-scoped rules
@@ -194,8 +194,13 @@ Run the new kit's installer against your repo (once per repo that uses this kit)
 | Kit agents, skills, hooks, `.claude/kit/` scripts, rules, `.agents/templates/`, `AGENT-KIT.md`, `AGENT-GUIDE.md`, `AGENT-SETTINGS.md` | Replaced. Any you changed are backed up to `.agents/backup-<date>/` first |
 | `CLAUDE.md`, `.gitignore`, `justfile`, `.claude/settings.json` | Merged: your lines stay, new kit lines are added |
 | `.agents/team.md` | Kept. New settings are added with their defaults; your values stay; model/effort/turns are re-applied to the agents |
+| `.agents/stack.json` | Merged: new kit keys (review routing, never-break rules, developer paths) are added; values you changed stay |
 | `project.md`, `decisions.md`, board, plans, reviews, bug drafts, agents you hired, your code | Never touched |
 | Your own `Dockerfile`, CI workflows and similar | Kept; the kit's version is saved beside them as `*.kit` to compare |
+
+**Sending the kit for feedback or an upgrade:** `just export-kit` zips only the kit (agents, skills, hooks, `.agents`
+notes and records, CI, kit docs) and prints its size and contents - never your code, `data/`, build output, worktrees,
+backups or `.env` files. `just export-kit --list` shows the file list without zipping.
 
 After upgrading:
 1. Restart Claude Code in the repo.

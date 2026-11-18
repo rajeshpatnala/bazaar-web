@@ -43,7 +43,8 @@ pick becomes owner rules and acceptance criteria. Details: `references/preview-a
 3 Approve   plan summary + `just budget-check` to the user (if plan approval = yes)
 4 Build     M: one developer, continued. L: one developer per independent slice. T0+T1 per step (§4)
 5 Review    at each hand-off: small PR -> `just envelope <pr>` first: every required review in one
-            tool-free call, findings written to the usual files (re-reviews too). Exit 3 or a big PR ->
+            tool-free call, findings written to the usual files (re-reviews too). Exit 4 (can't run here) ->
+            one `combined-reviewer` with the prompt it prints, same files. Exit 3 or a big PR ->
             `just review-plan <pr>` and launch exactly the reviewers it names, each with the output path
             `review-pack` prints. Docs-only PRs: `light` (no reviewer). The tester still runs when required
 6 Triage    `just triage <id> --ref <pr-N|branch>` applies the defaults (§8). Fixes go straight to the
@@ -60,12 +61,14 @@ Assign by dominant skill: `dev-data`, `dev-quant`, `dev-backtest`, `dev-executio
 
 ## 4. Verification tiers
 T0 every step (gate hook), T1 one quick look at the changed thing, T2 the full matrix once per feature by the tester.
+A PR gets its own tester only when `review-plan` says "risk area" (money, auth, migrations, destructive operations);
+then the tester checks that area only. `just promote` waits until every feature in it has a signed-off T2.
 Slices never run T2; never re-run a tier that already passed on unchanged code. Stack specifics: `references/preview-and-verify.md`.
 
 ## 5. Dispatch (the only format)
 ```
 Task: <id> <one-line goal>      Size: S|M|L
-Plan: <ABS_REPO>/.agents/plans/<id>.md (slice <n>)   | S: 5-line brief here
+Plan: just plan <id> --slice <n>   (M: just plan <id>; S: 5-line brief here) - works inside worktrees
 Branch: just new-branch feat/<id>-<slug>
 Scope: files/modules you may change
 Acceptance: <= 3 bullets          Verify: T0 | T0+T1
@@ -77,11 +80,17 @@ Owner rules, work mode, skills and CLAUDE.md reach every agent already: never re
 **Reuse over cold start.** Every fresh agent re-pays its whole start (Claude Code's prompt, CLAUDE.md, preloaded skills,
 memory) - often more than the work. Continue the existing agent (SendMessage to its id) for fix rounds, the next step
 in the same area, triage questions and command-only steps (`just ship`, rebase). The tech lead who planned or merged is
-the one you continue. A hook blocks the first fresh launch of a `reuse_roles` agent that already ran this session.
+the one you continue. **One warm team per feature:** one tech lead and one reviewer of each kind; the next PR of the
+same feature goes to the same reviewer by message ("review PR <n>: `just review-pack <n>`, write to <path>").
+A hook blocks the first fresh launch of a `reuse_roles` agent that already ran on this task this session (unless its
+context passed `reuse_max_context`).
 Fresh launches are for parallel work or a different area. `just budget-report <id>` shows start vs work per run.
 
 **Hand-backs:** read once; pass on the verdict and the path, never restate or relay the text; don't re-read files you
 just wrote. **Checkpoints:** developers commit on their branch whenever T0 passes, so undo = `git revert`.
+**Milestones:** after a merged wave, a merged feature or a release, update the board and run `just milestone "<resume>"`;
+then suggest `/clear` - the manager's conversation is re-sent on every step, the board carries the state. Things only
+the owner can do go in the board's "Owner actions" list (`just status` shows them).
 
 ## 6. Owner rules
 A correction that could recur: one line in `.agents/owner-rules.md` (max 20; a hook gives it to every agent), search
@@ -98,6 +107,7 @@ Feature questions: `just feature F<n>` first. Full procedure: `references/record
 | blocker, critical, high, major, medium; failing acceptance test; missing unit tests | fix now (blocks merge) |
 | minor, nit, low, info | fix now if cheap; the developer may propose defer |
 | disputed, conflicting fixes for one spot, no clear fix, unknown severity | **needs the tech lead** |
+| `question` severity, or a finding that asks for a decision (design, wording, policy, limits) | **never auto-decided**: tech lead, or the owner for product calls |
 Deferrals and rejections are the tech lead's call and go into the feature record.
 
 **Status is checked, never remembered:** "green / ready" only from `merge-check`, `pr-wait`, `ship` or `status` run

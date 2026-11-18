@@ -32,5 +32,10 @@ Skip it only when the owner says "just build it" or the look is already fixed by
   recommendation to approval to fill with charges debited; quant-reviewer / risk-guardian findings closed; the full
   "not verified" list.
 
+**When a check needs something you may not run** (a dev server you'd have to leave running, the live service, a real
+warehouse or broker, a human-only recipe): use the substitute your stack names in the tier text above (a self-contained
+screenshot recipe, a render test, an in-process request, a dry-run or `--empty` build, fixtures). If none fits, do the
+nearest automated check, write `not verified: <what>, because <why>` in the handoff, and carry on - never stop to ask.
+
 Slices never run T2. A slice handoff says "T0+T1 done; T2 pending". The T2 report is the only place for the long
 "not verified" list. Don't re-run checks a previous tier already passed on unchanged code.

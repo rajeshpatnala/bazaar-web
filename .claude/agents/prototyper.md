@@ -4,7 +4,7 @@ description: Makes up to three cheap, throwaway previews of different directions
 model: claude-sonnet-5-5
 effort: medium
 maxTurns: 30
-tools: Read, Glob, Grep, Write, Edit, Bash, Skill
+tools: Read, Glob, Grep, Write, Edit, Bash
 hooks:
   PreToolUse:
     - matcher: "Edit|Write"

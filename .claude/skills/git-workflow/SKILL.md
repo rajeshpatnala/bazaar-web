@@ -15,7 +15,7 @@ description: Git and PR workflow for the agent team - integration and release br
 
 Both names live in `.agents/team.md` -> Branches. Nobody pushes to the integration or release branch, and nobody commits on them; the branch guard hook blocks it for every agent.
 
-**Policy - never wipe them:** no agent deletes, renames, force-moves (`branch -f`, `checkout -B`), force-pushes, mirror/prune-pushes or resets the integration or release branch, locally or on GitHub (`gh api` included), and nobody deletes, archives or renames the repository. Merges never delete them (`just merge` only deletes work branches). If a situation seems to require it, stop and ask the user. GitHub branch protection (`just protect-branches`) is the authoritative safeguard.
+**Policy - never wipe them:** no agent deletes, renames, force-moves (`branch -f`, `checkout -B`), force-pushes, mirror/prune-pushes or resets the integration or release branch, locally or on GitHub (`gh api` included), and nobody deletes, archives or renames the repository. Merges never delete them; work branches are kept after merging too unless `delete_merged_branches` is `yes` in team.md. If a situation seems to require it, stop and ask the user. GitHub branch protection (`just protect-branches`) is the authoritative safeguard.
 
 ## 2. Roles
 
@@ -92,12 +92,17 @@ Reviews happen **on the PR, before merging**: code reviewer, security reviewer a
 ```bash
 just merge-check <pr>        # status for anyone (manager reports this, never memory)
 just pr-wait <pr>            # wait for CI inside the script (free); PASSED / FAILED / STILL RUNNING
-just ship <pr>               # tech lead: wait for CI, merge-check, squash-merge, delete the branch, update the integration branch, codemap
+just ship <pr>               # tech lead: wait for CI, merge-check, squash-merge, update the integration branch, codemap
+                             # (keeps the branch unless team.md delete_merged_branches = yes)
 # local fallback without GitHub:
 just merge --branch feat/F12-orders --title "feat(api): orders endpoint"
 ```
 
 After merging, refresh the main checkout so the code map updates: `git switch "$(just base)" && git pull --ff-only`. Merge order for parallel work: smallest/most foundational first; remaining branches rebase (their developers resolve conflicts). If the integration branch breaks: revert via a PR (`git revert <sha>` on a `fix/` branch).
+
+**Restore a deleted branch** (it is recoverable): the PR still knows its last commit.
+`sha=$(gh pr view <pr> --json headRefOid -q .headRefOid)` then `git push origin $sha:refs/heads/<branch>` (or locally
+`git branch <branch> $sha`). Without a PR: `git reflog` in the checkout that had it. Ask the user before re-pushing.
 
 ## 7. Promotions and releases (user-approved)
 

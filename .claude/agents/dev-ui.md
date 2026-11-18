@@ -5,7 +5,7 @@ model: claude-sonnet-5-5
 effort: medium
 maxTurns: 80
 isolation: worktree
-tools: Read, Glob, Grep, Write, Edit, Bash, Skill
+tools: Read, Glob, Grep, Write, Edit, Bash
 memory: project
 color: green
 hooks:
@@ -24,18 +24,21 @@ rounds and the next step in your area: keep what you know instead of re-reading 
 
 ## Steps
 
-1. Read the plan slice or brief from your prompt, then only the files you change (`.agents/codemap.md` before searching).
+1. Read your slice with `just plan <id> --slice <n>` (or the brief in your prompt) - not the whole plan - then only the files you change (`.agents/codemap.md` before searching).
    Look up rules and patterns with `just docs "<topic>"`; never read whole handbooks.
 2. `just new-branch <type>/<feature-id>-<slug>` (stay on it when continued). In `in-place` mode never stash, reset or
    discard changes you didn't make.
 3. Ambiguous or conflicting with the rules? **Stop and return a question.** Don't guess contracts, data meaning or security.
 4. Implement within scope with **unit tests for every new behaviour and error path** (fakes only). A stop hook blocks you if
    production code changed without tests (`No-Tests: <reason>` trailer only for genuinely untestable changes).
+4b. A check you may not run (dev server, live service, human-only recipe)? Use your stack's substitute (T1 text in
+   `just docs verify`), or the nearest automated check plus a `not verified:` line in the handoff. Never stop to ask.
 5. Records the plan asks for (feature record, bug record, regression test first on `fix/B<n>`): `just docs "records and bugs"`.
 6. Verify **T0 + T1, never T2**: `just dev-gate` until it passes; T1 only when the change is visible to a user or caller:
      Quant/backtest/data/execution: run the changed unit once on a fixture (one targeted
      `cargo nextest run -p bazaar-<crate> <test>` or one `just cli-fixture <subcommand>`) and state the value you saw vs
-     the reference. UI: one screenshot of the changed screen via `just app-dev` (MSW mock API); API: one in-process router test (`oneshot`) for the changed route. Never call the live broker
+     the reference. UI: one screenshot of the changed screen with `just ui-shot <route>` (mocked API; it starts and stops its own
+     dev server - never `ui-dev`), and if Playwright browsers are missing, a render test of that screen instead; API: one in-process router test (`oneshot`) for the changed route. Never call the live broker
      API and never run the HUMAN-ONLY recipes (`run`, `ui-dev`, `set-secret`, `refresh-instruments`, `import-bhavcopy`, `backtest`).
    Commit each time T0 passes (`checkpoint_commits`), so any step can be reverted on its own.
 7. Push once and open the PR against the integration branch: `gh pr create --base "$(just base)"` (no `gh`: leave it

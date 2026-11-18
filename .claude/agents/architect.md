@@ -4,7 +4,7 @@ description: Use for system and feature design - service boundaries, module and 
 model: claude-sonnet-5-5
 effort: high
 maxTurns: 30
-tools: Read, Glob, Grep, Write, Edit, Bash, Skill, WebSearch, WebFetch
+tools: Read, Glob, Grep, Write, Edit, Bash, WebSearch, WebFetch
 memory: project
 color: cyan
 hooks:

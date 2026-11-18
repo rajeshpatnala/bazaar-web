@@ -26,6 +26,8 @@ BASE_TOOLS = [  # every kit needs these
     {"name": "python3", "why": "kit scripts", "required": True},
     {"name": "just", "why": "task runner used by agents", "required": True, "install": "cargo install --locked just  # or brew/apt/winget install just"},
     {"name": "gh", "why": "GitHub PRs (agents open PRs with it)", "required": False},
+    {"name": "actionlint", "why": "checks CI workflow files before they are pushed (preflight)", "required": False,
+     "install": "brew install actionlint  # or: go install github.com/rhysd/actionlint/cmd/actionlint@latest, or pip install actionlint-py"},
     {"name": "git-cliff", "why": "offline changelog", "required": False, "install": "cargo install --locked git-cliff  # or brew install git-cliff"},
 ]
 
@@ -68,6 +70,60 @@ def install_hint(missing: list) -> list:
     return list(dict.fromkeys(hints))
 
 
+def just_recipes() -> set:
+    jf = ROOT / "justfile"
+    if shutil.which("just"):
+        r = subprocess.run(["just", "--summary"], cwd=ROOT, capture_output=True, text=True)
+        if r.returncode == 0:
+            return set(r.stdout.split())
+    names = set()
+    if jf.exists():
+        import re
+        for line in jf.read_text(errors="replace").splitlines():
+            m = re.match(r"^@?([A-Za-z_][A-Za-z0-9_-]*)(\s[^:]*)?:(?!=)", line)
+            a = re.match(r"^alias\s+([A-Za-z0-9_-]+)\s*:=", line)
+            if m and not re.match(r"^(set|export|import|mod)\b", line):
+                names.add(m.group(1))
+            if a:
+                names.add(a.group(1))
+    return names
+
+
+def missing_commands() -> dict:
+    """`just <recipe>` named in agent files, skills, rules or CLAUDE.md/AGENTS.md that the justfile doesn't have.
+    Every agent that tries one pays a failed call plus a fallback read."""
+    import re
+    have_r = just_recipes()
+    if not have_r:
+        return {}
+    have_r |= set(stack().get("project_recipes", []))  # recipes the project's own justfile adds later (human-only etc.)
+    files = list((ROOT / ".claude" / "agents").glob("*.md")) + list((ROOT / ".claude" / "skills").rglob("*.md")) \
+        + list((ROOT / ".claude" / "rules").glob("*.md")) + [ROOT / n for n in ("CLAUDE.md", "AGENTS.md") if (ROOT / n).exists()]
+    out = {}
+    tick = re.compile(r"`just\s+([a-z][a-z0-9_-]*)")
+    line_cmd = re.compile(r"^\s*(?:\$\s*)?just\s+([a-z][a-z0-9_-]*)")
+    for f in files:
+        in_code = False
+        for line in f.read_text(errors="replace").splitlines():
+            if re.match(r"^\s*(```|~~~)", line):
+                in_code = not in_code
+                continue
+            found = tick.findall(line) + (line_cmd.findall(line) if in_code else [])
+            for name in found:
+                if name not in have_r:
+                    out.setdefault(name, set()).add(str(f.relative_to(ROOT)))
+    return out
+
+
+def kit_engine():
+    import importlib.util
+    os.environ.setdefault("KIT_ROOT", str(ROOT))
+    spec = importlib.util.spec_from_file_location("kit_engine", ROOT / ".claude" / "kit" / "kit.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
 def main() -> int:
     problems, notes, fixed = [], [], []
 
@@ -108,6 +164,26 @@ def main() -> int:
             fixed.append("applied .agents/team.md to agent files")
         else:
             problems.append("agent files differ from .agents/team.md: " + sync.stdout.strip().splitlines()[0])
+
+    # every `just <recipe>` the agents are told to run must exist
+    miss = missing_commands()
+    if miss:
+        problems.append("commands named in agent files/skills but missing from the justfile: " + "; ".join(
+            f"just {n} ({', '.join(sorted(fs)[:2])}{'...' if len(fs) > 2 else ''})" for n, fs in sorted(miss.items())))
+
+    # envelope reviews need the `claude` executable; without it every small PR silently falls back to reviewer agents
+    try:
+        eng = kit_engine()
+        if eng.team_setting("envelope_reviews", "yes").lower() == "yes" and not eng.find_claude():
+            if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CODE_EXECPATH"):
+                problems.append("envelope reviews are on but the `claude` executable was not found; set envelope_command in "
+                                ".agents/team.md to its full path (or envelope_reviews = no)")
+            else:  # a terminal run (installer, `just doctor`): Claude Code finds itself once a session starts
+                notes.append("envelope reviews: the `claude` command isn't on this terminal's PATH (normal with the desktop "
+                             "app). The first Claude Code session in this repo finds and remembers it; ask the manager to run "
+                             "`just envelope-check` to confirm. Meanwhile small PRs go to one combined-reviewer agent")
+    except Exception as e:  # noqa: BLE001
+        notes.append(f"could not load the kit engine for the envelope check: {e}")
 
     # .env presence (never read)
     env, example = ROOT / ".env", ROOT / ".env.example"

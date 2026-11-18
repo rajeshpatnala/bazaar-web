@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# PreToolUse (Agent/Task): before the manager launches a FRESH tech lead, architect (or another role in reuse_roles)
-# while one already worked in this session, block once and point at the warm agent to continue with SendMessage.
+# PreToolUse (Agent/Task): before the manager launches a FRESH tech lead, architect, reviewer (or another role in
+# reuse_roles) while one already worked on the same task in this session (and its context is still small), block once and point at the warm agent to continue with SendMessage.
 # A fresh launch re-pays the whole cold start (prompt, CLAUDE.md, preloaded skills). Repeating the same launch
 # goes through, so genuinely parallel or unrelated work is never stuck. Never blocks anything else.
 input=$(cat)
@@ -16,7 +16,7 @@ ti = data.get("tool_input") or {}
 agent, session = ti.get("subagent_type") or "", data.get("session_id") or ""
 if not agent or not session:
     sys.exit(0)
-roles, window = {"tech-lead", "architect"}, 90
+roles, window, max_ctx = {"tech-lead", "architect", "code-reviewer", "security-reviewer"}, 90, 100_000
 team = root / ".agents" / "team.md"
 if team.exists():
     tt = team.read_text(errors="replace")
@@ -26,6 +26,11 @@ if team.exists():
     m = re.search(r"^\|\s*reuse_window_minutes\s*\|\s*(\d+)", tt, re.M)
     if m:
         window = int(m.group(1))
+    m = re.search(r"^\|\s*reuse_max_context\s*\|\s*([\d,_]+)", tt, re.M)
+    if m:
+        max_ctx = int(m.group(1).replace(",", "").replace("_", ""))
+ct = root / ".agents" / "current-task"
+task_now = ct.read_text().strip() if ct.exists() else ""
 if agent not in roles:
     sys.exit(0)
 ledger = root / ".agents" / "budget.csv"
@@ -43,6 +48,10 @@ with ledger.open() as f:
             continue
         if (now - when).total_seconds() <= window * 60:
             prev = r
+if prev and task_now and prev.get("task") and prev["task"] not in (task_now, "untracked"):
+    sys.exit(0)  # a different feature/task: a fresh agent is right
+if prev and int(prev.get("tokens") or 0) > max_ctx:
+    sys.exit(0)  # the warm agent's context is already large; continuing it costs more than a fresh start
 if not prev:
     sys.exit(0)
 key = hashlib.sha1(f"{session}|{agent}|{(ti.get('prompt') or '')[:400]}".encode()).hexdigest()[:16]

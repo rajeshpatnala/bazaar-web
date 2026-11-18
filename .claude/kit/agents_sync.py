@@ -282,6 +282,11 @@ def apply_cards(agent: str, front: list, body: str) -> tuple:
     owned = [x for x in dict.fromkeys(owned_prev + [s for s in skills if s not in keep])
              if (ROOT / ".claude" / "skills" / x / "SKILL.md").exists() and x not in keep]
     kept = [s for s in skills if s in keep]
+    # no Skill tool for sub-agents: its manual lists every installed skill on every start; `just docs` replaces it.
+    # The manager (main session) keeps it, so the user's own skills stay usable.
+    if agent != "manager" and agent not in stack_json().get("keep_skill_tool", []):
+        out = [re.sub(r"^tools:(.*)$", lambda m: "tools:" + ",".join(x for x in m.group(1).split(",") if x.strip() != "Skill"), l)
+               if l.startswith("tools:") else l for l in out]
     idx = next((n + 1 for n, l in enumerate(out) if l.startswith("tools:")), len(out))
     out = out[:idx] + (["skills:"] + [f"  - {x}" for x in kept] if kept else []) + out[idx:]
     body = re.sub(r"\n*" + re.escape(HB_START) + r".*?" + re.escape(HB_END) + r"\n*", "\n\n", body, flags=re.S).rstrip() + "\n"

@@ -1,0 +1,536 @@
+{
+  "id": "bazaar-web",
+  "title": "Bazaar Rust web trading app",
+  "description": "Indian-market (NSE/BSE, F&O) analysis, backtesting and paper-trading local web app - Rust axum server on 127.0.0.1, React/TypeScript UI in the browser",
+  "default_stack": "Rust 2024 Cargo workspace (tokio, rust_decimal for all money, chrono + chrono-tz Asia/Kolkata, sqlx/SQLite, Parquet + DuckDB, polars, tracing, keyring-core with the macOS Keychain) with an axum 0.8 server (REST /api/v1 + WebSocket on 127.0.0.1 only, launch-token session, utoipa OpenAPI) serving a React 19 + TypeScript + Vite UI charting with TradingView lightweight-charts 5; Zerodha Kite Connect + official NSE/BSE bhavcopy data.",
+  "skill_roles": {
+    "core": "bz-core",
+    "testing": "bz-testing",
+    "architecture": "bz-architecture",
+    "security": "bz-security",
+    "repo": "bz-repo-structure"
+  },
+  "developers": [
+    {
+      "name": "dev-data",
+      "skill": "bz-market-data",
+      "color": "yellow",
+      "description": "Developer specialised in market data and storage - Kite Connect REST/WebSocket adapters with reconnects, NSE/BSE bhavcopy import, instrument master, corporate-action adjustment, SQLite/Parquet/DuckDB store crate. Launch one instance per data slice; several can run in parallel.",
+      "focus": "crates `data` and `store`: the `MarketData` trait and broker/vendor adapters, reconnecting WebSocket ticker, official bhavcopy importers, instrument master (the only source of lot sizes, tick sizes, expiries), corporate actions, stale-data detection, SQLite migrations and Parquet/DuckDB repositories. Legal data only, never scrape. Load `bz-india-markets` for market facts. Tests use recorded fixtures in `fixtures/`, wiremock and a local fake WebSocket server - never the live API.",
+      "slices": "broker adapters, WebSocket client, bhavcopy, instrument master, corporate actions, storage",
+      "paths": [
+        "crates/data/**",
+        "crates/store/**"
+      ]
+    },
+    {
+      "name": "dev-quant",
+      "skill": "bz-quant",
+      "color": "cyan",
+      "description": "Developer specialised in quantitative code - streaming and batch indicators, options pricing (Black-76, IV, Greeks, PCR, max pain, OI build-up, payoff), market regime detection, strategy modules, scanner scoring and recommendations. Launch one instance per quant slice; several can run in parallel.",
+      "focus": "crates `indicators`, `options`, `regime`, `strategies`, `scanner`. Every indicator and pricing function is tested against published reference values; every strategy has the doc comment (idea, entry, exit, stop, best regime, weaknesses) and follows the strategist's spec in `docs/strategy/` when one exists. Recommendations carry every field from hard rule 6 and the low-evidence label. Strategies see only past bars. Load `bz-india-markets` and `bz-market-strategy` when a slice needs market facts or trader judgement.",
+      "slices": "indicators, options math, regime, strategies, scanner and scoring",
+      "paths": [
+        "crates/indicators/**",
+        "crates/options/**",
+        "crates/regime/**",
+        "crates/strategies/**",
+        "crates/scanner/**"
+      ]
+    },
+    {
+      "name": "dev-backtest",
+      "skill": "bz-backtest-risk",
+      "color": "orange",
+      "description": "Developer specialised in the backtester and risk engine - event-driven backtests without look-ahead, the Indian cost model (charges.toml) and slippage, walk-forward and out-of-sample tests, metrics, position sizing, portfolio limits and the DecisionGate. Launch one instance per slice; several can run in parallel.",
+      "focus": "crates `backtest` and `risk`. No look-ahead by construction plus property tests that prove it; every P&L includes all charges from `config/charges.toml` (rates with `source` and `verified_on`, never from memory) and slippage; sizing in `Decimal` with lot rounding; the DecisionGate implements the rule catalogue whose policy lives in `bz-trading-discipline` - thresholds only from `config/risk.toml`.",
+      "slices": "backtester, cost model, slippage, metrics, walk-forward, sizing, DecisionGate rules",
+      "paths": [
+        "crates/backtest/**",
+        "crates/risk/**",
+        "config/charges.toml",
+        "config/risk.toml"
+      ]
+    },
+    {
+      "name": "dev-execution",
+      "skill": "bz-execution",
+      "color": "red",
+      "description": "Developer specialised in order execution - OrderIntent pipeline, ExecutionMode (paper, semi-auto, auto), approval queue, paper account with realistic fills and charges, kill switch, daily-loss circuit breaker, rate limiter, append-only audit log, and the feature-gated live broker crate. Launch one instance per slice; several can run in parallel.",
+      "focus": "crates `execution`, `paper`, `broker`. Paper and live share every step except the final `Executor`; the DecisionGate re-runs at approval time; nothing reaches an executor without the gate and (in semi-auto) a user approval; kill switch and circuit breaker are checked before every send; `live-trading` is never a default feature. Load `bz-trading-discipline` for policy. Tests use fakes only and never place real orders.",
+      "slices": "order pipeline, approvals, paper account and fills, kill switch, rate limits, audit log, broker crate",
+      "paths": [
+        "crates/execution/**",
+        "crates/paper/**",
+        "crates/broker/**"
+      ]
+    },
+    {
+      "name": "dev-api",
+      "skill": "bz-web-api",
+      "color": "blue",
+      "description": "Developer specialised in the web server - axum REST endpoints under /api/v1, the WebSocket feed, localhost hardening (loopback bind, launch-token session, Host/Origin checks, CSRF), OpenAPI generation, problem+json errors, and serving the built UI. Launch one instance per API slice; several can run in parallel.",
+      "focus": "crate `server` only (the composition root). Handlers stay thin and call into the crates; DTOs separate from domain types with OpenAPI schemas; loopback-only bind, Host allowlist and launch-token session on every route except `/healthz`, `/auth` and the Kite callback; non-GET routes need the Origin check and the CSRF token; no route places an order (orders only via order-intents + approvals); WebSocket throttles ticks. Tests run the router in-process with temp dirs and fakes, never the live broker.",
+      "slices": "endpoints, WebSocket, auth and sessions, OpenAPI, error mapping, static UI serving",
+      "paths": [
+        "crates/server/**"
+      ]
+    },
+    {
+      "name": "dev-ui",
+      "skill": "bz-web-ui",
+      "color": "green",
+      "description": "Developer specialised in the browser UI in web/ - React + TypeScript screens, lightweight-charts candles with indicators and markers, recommendation cards with Why panels, the order approval dialog, the permanent disclaimer, and the typed API and WebSocket client. Launch one instance per screen or UI slice; several can run in parallel.",
+      "focus": "`web/` only. Types come from the generated OpenAPI schema (never hand-written DTOs); TanStack Query for server data; screens show every recommendation field, the low-evidence, regime and data-delayed badges and plain-English Why panels for a beginner; ₹ in en-IN grouping and times in IST; the disclaimer is always visible. Vitest with MSW for every component; one screenshot of the changed screen as the T1 check.",
+      "slices": "screens, charts, Why panels, approval dialog, settings, API client",
+      "paths": [
+        "web/**"
+      ]
+    },
+    {
+      "name": "dev-core",
+      "skill": "bz-repo-structure",
+      "color": "pink",
+      "general": true,
+      "description": "General Rust developer for core domain types, Money and IST time, the market calendar, config loading and validation, workspace wiring, the bazaar-cli crate, refactors, bug fixes and anything not covered by the specialist developers. Launch one instance per slice; several can run in parallel.",
+      "focus": "crates `core` and `cli`, root workspace files, `config/` schemas and loaders (every rate or market fact has `source` and `verified_on`), the IST `MarketCalendar` built from holiday/config files, `check-connections` for `just db-check`, refactors and general fixes. Load other `bz-*` skills with the Skill tool only if the slice touches their area.",
+      "slices": "core types, IST calendar, config, cli, wiring, refactors, general",
+      "paths": [
+        "crates/core/**",
+        "crates/cli/**",
+        "config/**"
+      ]
+    }
+  ],
+  "extra_agents": [
+    {
+      "name": "market-strategist",
+      "kind": "lead",
+      "body_file": "agents/market-strategist.md",
+      "description": "Veteran Indian-market trader and mentor. Consult when planning any feature that touches strategies, recommendations, scoring, regime, options structures, risk rules or long-term mode, to decide what is worth building, the evidence bar, regime fit and the plain-English Why wording. Writes strategy specs to docs/strategy/. Never edits source code.",
+      "skills": [
+        "bz-market-strategy",
+        "bz-india-markets",
+        "bz-trading-discipline"
+      ],
+      "effort": "high",
+      "max_turns": 40,
+      "max_tokens_per_run": 250000
+    },
+    {
+      "name": "risk-guardian",
+      "kind": "reviewer",
+      "body_file": "agents/risk-guardian.md",
+      "description": "Capital-protection reviewer with veto. Launch on every PR touching crates risk, execution, paper, broker or scanner, config/risk.toml, the order-intent/approval/kill-switch endpoints, or the recommendation or approval UI. Blocks anything that weakens the DecisionGate, risk limits, approvals, kill switch, audit log or automation safety, so decisions stay rule-based rather than emotional.",
+      "skills": [
+        "bz-trading-discipline",
+        "bz-backtest-risk",
+        "bz-execution"
+      ],
+      "effort": "high",
+      "max_turns": 40,
+      "max_tokens_per_run": 200000
+    },
+    {
+      "name": "quant-reviewer",
+      "kind": "reviewer",
+      "body_file": "agents/quant-reviewer.md",
+      "description": "Quantitative correctness reviewer. Launch on every PR touching crates indicators, options, regime, strategies, scanner, backtest, risk or data, or config/charges.toml. Checks look-ahead bias, Decimal money math, complete Indian costs, hardcoded market facts, reference-value tests and the required recommendation fields.",
+      "skills": [
+        "bz-quant",
+        "bz-backtest-risk",
+        "bz-india-markets"
+      ],
+      "effort": "high",
+      "max_turns": 40,
+      "max_tokens_per_run": 200000
+    }
+  ],
+  "tools": [
+    {
+      "name": "just",
+      "why": "task runner for every gate and kit command",
+      "required": true,
+      "install": "brew install just"
+    },
+    {
+      "name": "cargo",
+      "why": "Rust toolchain (version pinned in rust-toolchain.toml)",
+      "required": true,
+      "install": "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+    },
+    {
+      "name": "node",
+      "why": "Node.js for the React UI (LTS, pinned in web/.nvmrc)",
+      "required": true,
+      "install": "install Node LTS with nvm, fnm or volta"
+    },
+    {
+      "name": "pnpm",
+      "why": "UI package manager",
+      "required": true,
+      "install": "corepack enable && corepack prepare pnpm@latest --activate"
+    },
+    {
+      "name": "cargo-nextest",
+      "why": "fast Rust test runner",
+      "required": false,
+      "check": "cargo nextest --version",
+      "install": "cargo install --locked cargo-nextest"
+    },
+    {
+      "name": "cargo-deny",
+      "why": "Rust supply-chain and licence checks",
+      "required": false,
+      "check": "cargo deny --version",
+      "install": "cargo install --locked cargo-deny"
+    },
+    {
+      "name": "cargo-llvm-cov",
+      "why": "coverage",
+      "required": false,
+      "check": "cargo llvm-cov --version",
+      "install": "cargo install --locked cargo-llvm-cov"
+    }
+  ],
+  "permissions_allow": [
+    "Bash(cargo fmt:*)",
+    "Bash(cargo clippy:*)",
+    "Bash(cargo check:*)",
+    "Bash(cargo test:*)",
+    "Bash(cargo nextest:*)",
+    "Bash(cargo doc:*)",
+    "Bash(cargo tree:*)",
+    "Bash(cargo deny:*)",
+    "Bash(cargo llvm-cov:*)",
+    "Bash(cargo bench:*)",
+    "Bash(cargo run -q -p bazaar-cli -- check-connections:*)",
+    "Bash(pnpm -C web typecheck:*)",
+    "Bash(pnpm -C web lint:*)",
+    "Bash(pnpm -C web format:*)",
+    "Bash(pnpm -C web test:*)",
+    "Bash(pnpm -C web test:ci:*)",
+    "Bash(pnpm -C web build:*)",
+    "Bash(pnpm -C web audit:*)",
+    "Bash(pnpm -C web install --frozen-lockfile:*)",
+    "Bash(pnpm -s -C web:*)",
+    "Bash(node --version:*)"
+  ],
+  "gate": {
+    "summary": "cargo fmt + clippy -D warnings + nextest; web typecheck + lint + vitest",
+    "check_summary": "doc tests + cargo deny + pnpm audit",
+    "requires_file": "Cargo.toml",
+    "error_regex": "error(\\[E[0-9]+\\])?:|warning:|^Diff in|panicked at|^---- |FAILED|FAIL |TS[0-9]{4}|✗|×",
+    "steps": [
+      {
+        "name": "fmt",
+        "cmd": "cargo fmt --all -- --check"
+      },
+      {
+        "name": "lint",
+        "cmd": "cargo clippy --workspace --all-targets --message-format=short -- -D warnings"
+      },
+      {
+        "name": "test",
+        "cmd": "cargo nextest run --workspace --status-level fail --final-status-level fail --no-tests=pass",
+        "needs": "cargo nextest --version",
+        "fallback": "cargo test --workspace -q"
+      },
+      {
+        "name": "ui-typecheck",
+        "cmd": "pnpm -s -C web typecheck",
+        "needs": "test -f web/package.json",
+        "optional": true
+      },
+      {
+        "name": "ui-lint",
+        "cmd": "pnpm -s -C web lint",
+        "needs": "test -f web/package.json",
+        "optional": true
+      },
+      {
+        "name": "ui-test",
+        "cmd": "pnpm -s -C web test:ci",
+        "needs": "test -f web/package.json",
+        "optional": true
+      }
+    ],
+    "check_steps": [
+      {
+        "name": "doctest",
+        "cmd": "cargo test --doc --workspace -q"
+      },
+      {
+        "name": "deny",
+        "cmd": "cargo deny check",
+        "needs": "cargo deny --version",
+        "optional": true
+      },
+      {
+        "name": "ui-audit",
+        "cmd": "pnpm -C web audit --prod",
+        "needs": "test -f web/package.json",
+        "optional": true
+      }
+    ]
+  },
+  "db_check": {
+    "requires": "crates/cli",
+    "cmd": "cargo run -q -p bazaar-cli -- check-connections"
+  },
+  "test_check": {
+    "source_globs": [
+      "crates/*/src/**/*.rs",
+      "web/src/**/*.ts",
+      "web/src/**/*.tsx"
+    ],
+    "test_globs": [
+      "**/tests/**/*.rs",
+      "**/benches/**",
+      "fixtures/**",
+      "**/*.test.ts",
+      "**/*.test.tsx",
+      "web/e2e/**",
+      "**/test/**",
+      "web/src/mocks/**",
+      "web/src/api/schema.d.ts"
+    ],
+    "test_marker_regex": "#\\[(tokio::|rstest|test)|proptest!|\\b(it|test|describe)(\\.\\w+)?\\("
+  },
+  "codemap": {
+    "modules_title": "Crates and web UI features",
+    "groups": [
+      "crates/*",
+      "web/src/features/*",
+      "web/src/app",
+      "web/src/shared",
+      "web/src/api"
+    ],
+    "group_manifest": "Cargo.toml",
+    "group_desc_regex": "^description\\s*=\\s*\"([^\"]*)\"",
+    "file_globs": [
+      "src/**/*.rs",
+      "tests/**/*.rs",
+      "**/*.ts",
+      "**/*.tsx"
+    ],
+    "source_globs": [
+      "crates/**/*.rs",
+      "web/src/**/*.ts",
+      "web/src/**/*.tsx"
+    ],
+    "doc_regex": "^//!\\s*(.+)$",
+    "item_regex": "^\\s*pub (?:async )?(fn|struct|enum|trait|type|const|mod) (\\w+)|^export (?:default )?(?:async )?(function|const|class|type|interface) (\\w+)",
+    "routes_title": "HTTP routes (axum; utoipa paths are relative to /api/v1)",
+    "route_regex": "(?:\\.route\\(\\s*|#\\[utoipa::path\\(.*?\\bpath\\s*=\\s*)\"(/[^\"]*)\"",
+    "file_lists": [
+      {
+        "title": "Config (rates and limits with verified_on)",
+        "globs": [
+          "config/*.toml"
+        ]
+      },
+      {
+        "title": "Strategy specs",
+        "globs": [
+          "docs/strategy/*.md"
+        ]
+      },
+      {
+        "title": "Migrations",
+        "globs": [
+          "**/migrations/*.sql"
+        ]
+      }
+    ]
+  },
+  "review_redflags": "unwrap\\(|expect\\(|todo!|unimplemented!|println!|dbg!|#\\[allow|unsafe|\\bf(32|64)\\b.*(price|pnl|amount|charge|capital|risk|qty|inr|rupee)|(price|pnl|amount|charge|capital|risk|inr|rupee)\\w*\\s*:\\s*f(32|64)|lot_size\\s*[:=]\\s*\\d|tick_size\\s*[:=]\\s*\\d|Weekday::(Tue|Thu)|skip_gate|bypass|auto_approve|default\\s*=\\s*\\[[^\\]]*live-trading|access_token|api_secret|request_token|innerHTML|dangerouslySetInnerHTML|: any\\b|as any|@ts-ignore|console\\.log|SELECT \\*|format!\\(.*(SELECT|INSERT|UPDATE|DELETE)|std::thread::sleep|unbounded_channel|Utc::now\\(\\)|Local::now\\(\\)|reqwest::get\\(|CorsLayer::permissive|allow_origin\\(Any\\)|0\\.0\\.0\\.0|SameSite=None|danger_accept_invalid_certs|SameSite::None",
+  "dependabot_ecosystems": [
+    "cargo",
+    "npm",
+    "github-actions"
+  ],
+  "release": {
+    "version_files": [
+      {
+        "type": "toml",
+        "path": "crates/server/Cargo.toml",
+        "jsonpath": "$.package.version"
+      },
+      {
+        "type": "json",
+        "path": "web/package.json",
+        "jsonpath": "$.version"
+      }
+    ]
+  },
+  "estimates": {
+    "developer": 200000
+  },
+  "security_sensitive_globs": [
+    "**/Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "**/build.rs",
+    "crates/execution/**",
+    "crates/broker/**",
+    "crates/paper/**",
+    "crates/risk/**",
+    "config/risk.toml",
+    "config/charges.toml",
+    "crates/data/src/**/kite*",
+    "crates/core/src/**/secret*",
+    "web/package.json",
+    "web/pnpm-lock.yaml",
+    "crates/server/src/**/auth*",
+    "crates/server/src/**/session*",
+    "crates/server/src/**/csrf*",
+    "crates/server/src/main.rs",
+    "crates/server/src/**/security*",
+    "crates/server/src/app.rs",
+    "crates/server/src/ws.rs",
+    "crates/server/src/routes/kite.rs",
+    "crates/server/src/routes/auth.rs",
+    "crates/store/src/secrets.rs",
+    "web/vite.config.ts",
+    "web/e2e/csp.txt",
+    ".github/workflows/**",
+    "justfile",
+    "deny.toml"
+  ],
+  "domain_reviews": [
+    {
+      "name": "risk",
+      "agent": "risk-guardian",
+      "file": "risk.md",
+      "pass": [
+        "APPROVE",
+        "PASS"
+      ],
+      "block_severities": [
+        "blocker",
+        "critical",
+        "high",
+        "major"
+      ],
+      "globs": [
+        "crates/risk/**",
+        "crates/execution/**",
+        "crates/paper/**",
+        "crates/broker/**",
+        "crates/scanner/**",
+        "config/risk.toml",
+        "crates/server/src/**/*order*",
+        "crates/server/src/**/*approv*",
+        "crates/server/src/**/*kill*",
+        "web/src/**/*Approval*",
+        "web/src/**/*approval*",
+        "web/src/**/*Order*",
+        "web/src/**/*KillSwitch*",
+        "web/src/**/*kill-switch*"
+      ],
+      "envelope_checklist": [
+        {
+          "skill": "bz-trading-discipline",
+          "sections": "contract|rule catalogue|override|risk-guardian PR checklist"
+        },
+        {
+          "skill": "bz-execution",
+          "sections": "golden rules"
+        }
+      ]
+    },
+    {
+      "name": "quant",
+      "agent": "quant-reviewer",
+      "file": "quant.md",
+      "pass": [
+        "APPROVE",
+        "PASS"
+      ],
+      "block_severities": [
+        "blocker",
+        "critical",
+        "high",
+        "major"
+      ],
+      "globs": [
+        "crates/indicators/**",
+        "crates/options/**",
+        "crates/regime/**",
+        "crates/strategies/**",
+        "crates/scanner/**",
+        "crates/backtest/**",
+        "crates/data/**",
+        "config/charges.toml"
+      ],
+      "envelope_checklist": [
+        {
+          "skill": "bz-quant",
+          "sections": "golden rules|red flags"
+        },
+        {
+          "skill": "bz-backtest-risk",
+          "sections": "golden rules"
+        }
+      ]
+    }
+  ],
+  "envelope_exclude_globs": [
+    "crates/broker/**",
+    "crates/execution/**",
+    "config/risk.toml",
+    "crates/risk/src/**/*gate*",
+    "config/charges.toml"
+  ],
+  "never_break": [
+    "Rupee amounts are `rust_decimal::Decimal`, never `f64` (f64 only inside indicator/options math, converted at one boundary).",
+    "Times are IST through the `Clock` trait; no wall-clock reads in domain code.",
+    "Never hardcode lot/tick sizes, expiries, holidays, ban lists or charge rates: instrument master and `config/*.toml` with `source` and `verified_on`.",
+    "No look-ahead: strategies and indicators see only data up to the closed bar.",
+    "Every order goes through the DecisionGate and a user approval; there is no \"place order\" endpoint; `paper` is the default mode; `live-trading` is never a default feature.",
+    "The server binds `127.0.0.1` only; every route except `/healthz`, `/auth` and the Kite callback needs a session.",
+    "Legal data only (official APIs and exchange archives); never scrape.",
+    "No panics in library code; every outbound call has a timeout.",
+    "The disclaimer stays visible; never imply certainty or SEBI registration.",
+    "Agents never run the HUMAN-ONLY recipes (`run`, `ui-dev`, `set-secret`, `refresh-instruments`, `import-bhavcopy`, `backtest`) or touch the live broker or the owner's `data/`; use fixtures, in-process router tests and temp dirs."
+  ],
+  "docs_synonyms": {
+    "iv": "implied volatility",
+    "pcr": "put call ratio",
+    "oi": "open interest",
+    "f&o": "futures options",
+    "pnl": "profit loss p&l",
+    "greeks": "delta gamma vega theta"
+  },
+  "generated_globs": [
+    "web/src/api/schema.d.ts",
+    "**/openapi.json",
+    "web/pnpm-lock.yaml",
+    "**/*.snap"
+  ],
+  "project_recipes": [
+    "run",
+    "ui-dev",
+    "set-secret",
+    "refresh-instruments",
+    "import-bhavcopy",
+    "backtest",
+    "openapi"
+  ],
+  "tester_risk_globs": [
+    "crates/risk/**",
+    "crates/execution/**",
+    "crates/paper/**",
+    "crates/broker/**",
+    "crates/backtest/src/**/cost*",
+    "crates/backtest/src/**/slippage*",
+    "crates/backtest/src/**/sizing*",
+    "crates/store/src/**/migrat*",
+    "crates/store/migrations/**",
+    "crates/server/src/**/auth*",
+    "crates/server/src/**/session*",
+    "config/charges.toml",
+    "config/risk.toml"
+  ]
+}

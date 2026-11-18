@@ -40,7 +40,9 @@
       "Bash(git push:*)",
       "Bash(git rebase:*)",
       "Bash(gh pr:*)",
-      "Read(./.env.example)"
+      "Read(./.env.example)",
+      "Edit(./.agents/reviews/**)",
+      "Write(./.agents/reviews/**)"
     ],
     "deny": [
       "Read(./.env)",
@@ -192,5 +194,6 @@
         ]
       }
     ]
-  }
+  },
+  "includeGitInstructions": false
 }

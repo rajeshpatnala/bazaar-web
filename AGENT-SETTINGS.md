@@ -136,7 +136,8 @@ If one of these seems to have no effect, it may need to be set in your shell bef
 | Setting | Default | Values | What it does |
 |---|---|---|---|
 | `security_review` | `sensitive-or-large` | `always`, `sensitive-or-large` | When a security review runs (sensitive = auth, config, SQL/migrations, dependencies, CI, Dockerfile) |
-| `tester_review` | `behaviour-change` | `always`, `behaviour-change`, `large` | When a tester runs |
+| `tester_review` | `feature` | `feature`, `always`, `behaviour-change`, `large` | When a tester runs. `feature`: full test pass once per feature, plus targeted runs on PRs that touch risk areas |
+| `require_feature_t2` | `yes` | `yes`, `no` | Promotion to the release branch waits for each feature's test pass |
 | `large_pr_lines` | 150 | number | Size at which a PR counts as large |
 | `tester_min_source_lines` | 20 | number | Smallest code change that gets a tester |
 | `review_pack_max_diff_lines` | 1,200 | number | How much diff reviewers see in one go |

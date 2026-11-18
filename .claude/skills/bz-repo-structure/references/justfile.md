@@ -12,6 +12,7 @@ The kit owns `default`, `gate`, `dev-gate`, `test`, `check`, `db-check`, `codema
 | `just run` | `pnpm -C web build`, then `cargo run --release -p bazaar-server` on `127.0.0.1:8787` against `data/` and the Keychain; prints and opens a one-time login link | **human only** |
 | `just ui-dev` | debug `bazaar-server --no-open` + `pnpm -C web dev` on :5173 (stop `just run` first; wiring in CONTRACTS section 7) | **human only** |
 | `just set-secret <name>` | `bazaar-cli set-secret` (prompts without echo, writes the Keychain) | **human only** |
+| `just ui-shot <route> [width]` | one screenshot with the mocked API; starts and stops its own dev server | agents (T1) |
 | `just app-dev` | `pnpm -C web dev:mock` (MSW, no server) for previews, screenshots, Playwright | anyone |
 | `just build` | `pnpm -C web build` + `cargo build --release -p bazaar-server` | anyone |
 | `just openapi` | `bazaar-server openapi > web/openapi.json`, then `pnpm -C web gen:api` | anyone |

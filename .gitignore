@@ -70,3 +70,14 @@ junit.xml
 
 # --- agent-kit ---
 .agents/.reuse-nudged
+
+# --- agent-kit ---
+# screenshots agents take for T1 evidence
+web/.shots/
+.agents/backup-*/
+.agents/shots/
+__pycache__/
+*.pyc
+
+# --- agent-kit ---
+.agents/.claude-path

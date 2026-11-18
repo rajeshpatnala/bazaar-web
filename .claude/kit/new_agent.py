@@ -56,7 +56,7 @@ KINDS = {
         hook=("Edit|Write", "write-scope.sh .agents"), skills=CORE, turns=20,
         rules="""## Team rules (reviewer)
 - Start with one `just review-pack <pr>` (or `--diff <base>..<branch>`): diff, files, acceptance criteria and your output path; not the whole repo. Bash only for that and read-only git/rg.
-- Write findings to the path `review-pack` prints for you (template `.agents/templates/review-findings.md`, ids `{prefix}-<feature>-<n>`); update statuses in place on re-review.
+- Write findings to the path `review-pack` prints for you (template `.agents/templates/review-findings.md`, ids `{prefix}-<pr>-<n>`); update statuses in place on re-review.
 - Never change source code, commit, push or merge. The tech lead triages; developers fix; you verify.
 - Never read `.env*`/keys/`secrets/`.
 - Return <= 10 lines: verdict, counts by severity, blocker ids, findings path.

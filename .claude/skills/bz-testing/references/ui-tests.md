@@ -15,4 +15,4 @@ Essentials:
 - Formatting tests (`en-IN` grouping, rupee sign, IST via `Asia/Kolkata`) per `bz-web-ui` section 7, run with `TZ=UTC` and `TZ=America/New_York`.
 - Fake timers (`vi.useFakeTimers({ shouldAdvanceTime: true })`, `await vi.advanceTimersByTimeAsync(...)`) for throttles, reconnect backoff and stale timers.
 
-Playwright smoke runs against `dev:mock` (port 5173) in CI only; agents capture one screenshot of the changed screen from `just app-dev` for T1 evidence instead. One spec per screen: loads with no console errors, shows the disclaimer, renders the recommendation card from fixtures, paper approval flow; plus a CSP spec on a production-style build. Spec list and config: `references/ui-mocked-api.md`.
+Playwright smoke runs against `dev:mock` (port 5173) in CI only; agents capture one screenshot of the changed screen with `just ui-shot <route>` (mocked API, own short-lived server) for T1 evidence instead. One spec per screen: loads with no console errors, shows the disclaimer, renders the recommendation card from fixtures, paper approval flow; plus a CSP spec on a production-style build. Spec list and config: `references/ui-mocked-api.md`.
