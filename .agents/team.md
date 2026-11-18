@@ -129,7 +129,7 @@ Code review runs on every PR. Security review and testing scale with risk so sma
 | setting | value |
 |---|---|
 | security_review | sensitive-or-large |
-| tester_review | large |
+| tester_review | feature |
 | large_pr_lines | 150 |
 | tester_min_source_lines | 20 |
 | review_pack_max_diff_lines | 1200 |
@@ -144,10 +144,14 @@ Code review runs on every PR. Security review and testing scale with risk so sma
 | envelope_command | /Users/rajesh/.local/bin/claude |
 | require_feature_t2 | yes |
 `security_review`: `always` or `sensitive-or-large` (auth, config, SQL/migrations, dependency/lock files, CI, Dockerfile, or >= large_pr_lines).
-`tester_review`: `always`, `behaviour-change` (feat/fix/perf with >= tester_min_source_lines production lines), or `large`.
+`tester_review`: `feature` = the full test matrix runs **once per feature** (T2 after the last slice); a PR gets its own
+tester run only when it touches a risk area (money maths, auth, migrations, destructive operations: `tester_risk_globs`
+in `.agents/stack.json` plus kit defaults) with >= tester_min_source_lines production lines. Older options: `always`,
+`behaviour-change` (every feat/fix/perf PR with >= tester_min_source_lines), `large`.
+`require_feature_t2`: `yes` = `just promote` refuses while a feature merged since the last release has no signed-off T2
+report (`.agents/reviews/<F>/tests-t2.md`).
 `require_feature_record`: `yes` = a feat/fix/refactor/perf PR for feature F<n> can't merge until `docs/features/F<n>-*.md` exists (on the PR or already merged).
 `require_bug_record`: `yes` = a `fix/B<n>-...` PR can't merge until it commits `docs/bugs/B<n>-*.md` with `Regression test:` filled.
-
 ## Context (token use)
 
 | setting | value |
