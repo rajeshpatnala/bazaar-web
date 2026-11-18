@@ -140,7 +140,7 @@ Code review runs on every PR. Security review and testing scale with risk so sma
 | envelope_reviews | yes |
 | envelope_max_lines | 150 |
 | envelope_max_diff_chars | 60000 |
-| envelope_command | claude |
+| envelope_command | /Users/rajesh/.local/bin/claude |
 | require_feature_t2 | yes |
 `security_review`: `always` or `sensitive-or-large` (auth, config, SQL/migrations, dependency/lock files, CI, Dockerfile, or >= large_pr_lines).
 `tester_review`: `always`, `behaviour-change` (feat/fix/perf with >= tester_min_source_lines production lines), or `large`.
