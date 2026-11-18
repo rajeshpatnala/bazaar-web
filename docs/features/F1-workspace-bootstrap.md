@@ -46,9 +46,6 @@ Owner area: Cargo.toml, crates/{core,server,cli,...stubs}, config/, fixtures/con
 ## Deferred
 - CR-F1-3 / SEC-F1-1: `[hard_limits]` live in the owner-editable `config/risk.toml` (owner decision: file-only). The DecisionGate feature adds an enforced check so a raised ceiling cannot slip through.
 - CR-F1-S5-1: slice 6 adds a router-level test: every OpenAPI path returns 401 without a cookie (exempt: `/healthz`, `/auth`, Kite callback). Slice 6 also wires layers with `security_headers` outermost, then `host_guard`, `origin_guard`, `problem_backstop` (see `security.rs` module doc).
-
-- TS-21-1..4, TS-21-6 (tests, F2 calendar-data slice): strengthen the calendar proptest (shift idempotent and never later, lands on a trading day, `session_at` Closed on non-trading days, all segments, `prev(next(x)) == x`); add Saturday-Closed, special-session edges (18:00:00 inclusive, 18:59:59), UTC/IST boundary (2026-01-05T18:29:59Z vs 18:30:00Z) and 2026-12-31T18:30Z OutOfRange, OutOfRange for `close_time`/`shift_to_prior_trading_day`.
-- CR-21-3: add a one-line comment in `next/prev_trading_day` that termination relies on the finite covered years (OutOfRange).
 - CR-22-1: add a router test for an oversize POST body (413 problem+json); 408 test via an injected tiny timeout or soften the module doc claim (`app.rs`).
 - CR-22-3, TS-22-1: first mutating route adds the CSRF success-path test; add foreign-Origin and wrong-CSRF-token cases to `post_without_origin_or_csrf_is_refused` with a comment on guard order.
 - CR-22-2: done in this record (slice 6 entry above; the slice 3 and PR 21 text is correct, kept).
