@@ -125,18 +125,21 @@ jobs:
       - if: hashFiles('Cargo.lock') != ''
         uses: EmbarkStudios/cargo-deny-action@v2
 
+  # Permanent guard (not a bypass): the job activates itself once the generated
+  # API schema (web/src/api/schema.d.ts) is committed, i.e. once the server
+  # `openapi` subcommand and the web `gen:api` script exist.
   openapi-drift:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != ''
+      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != '' && hashFiles('web/src/api/schema.d.ts') != ''
         uses: dtolnay/rust-toolchain@stable
-      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != ''
+      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != '' && hashFiles('web/src/api/schema.d.ts') != ''
         uses: Swatinem/rust-cache@v2
-      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != ''
+      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != '' && hashFiles('web/src/api/schema.d.ts') != ''
         uses: pnpm/action-setup@v4
         with: { package_json_file: web/package.json }
-      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != ''
+      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != '' && hashFiles('web/src/api/schema.d.ts') != ''
         name: regenerate UI types and fail on drift
         run: |
           cargo run -q -p bazaar-server -- openapi > web/openapi.json
