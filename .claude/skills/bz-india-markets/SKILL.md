@@ -9,25 +9,8 @@ Domain knowledge for NSE/BSE cash and F&O. Rule 2 of the product is absolute: **
 
 ## 1. Where each fact comes from
 
-| Fact | Source of truth | Refresh | Never |
-|---|---|---|---|
-| Lot size, tick size, expiry dates, strikes, F&O eligibility | Broker instrument master (Kite `GET /instruments`, CSV; `bz-market-data`) | daily, before the first scan | hardcode `NIFTY_LOT = 75`, or compute "last Tuesday" |
-| Trading holidays, special sessions | `config/calendar.toml` filled from the exchange holiday calendar | yearly + on every exchange circular | `weekday < 5` as "market open" |
-| Session timings | `config/calendar.toml` (`verified_on`) | on every exchange timing circular | literal `15:30` in logic |
-| F&O ban list | exchange daily "securities in ban period" file | daily, pre-open | cache across days |
-| Price bands / circuits | exchange daily price-band file + live tick circuit fields | daily | assume 20% |
-| Corporate actions, result dates | exchange corporate-announcement archives / vendor / `config/events.toml` | daily | scrape a news site |
-| Charges | `config/charges.toml` from broker charges page + circulars | quarterly + on circulars | numbers from memory |
-| Margin | broker margin API | per order | estimate by hand |
-
-Official places (verify they still resolve; exchanges reorganise pages):
-- NSE holiday calendar (trading and clearing holidays are separate lists): https://www.nseindia.com/resources/exchange-communication-holidays
-- NSE circulars (timings, expiry, lot-size changes), PDFs under https://nsearchives.nseindia.com/content/circulars/
-- Bhavcopy (EOD): NSE archives host the UDiFF common bhavcopy zips (file names and folders are reported by third parties and change; the current list is at https://www.nseindia.com/static/resources/forms-formats-members). Legacy pre-UDiFF files use other names and column sets; retirement dates of older paths are unverified, confirm at the NSE circular list. URL templates live in `config/data.toml` (`bz-market-data`). BSE equivalent: https://www.bseindia.com/static/members/udiff.aspx
-- Kite instruments dump: https://kite.trade/docs/connect/v3/market-data-and-instruments
-- Zerodha charges: https://zerodha.com/charges
-
-If a source is unreachable or a file is older than its refresh window, the app shows "data stale" and `just db-check` reports the instrument-master freshness. It never silently falls back to a remembered value.
+In short: Official places (verify they still resolve; exchanges reorganise pages):
+Full detail, examples and patterns: `references/where-each-fact-comes-from.md` - read it before changing this area.
 
 ## 2. Config files carry `verified_on`
 
@@ -47,48 +30,18 @@ Anti-patterns (quant-reviewer: grep for these): `const LOT_SIZE`, `if symbol == 
 
 ## 3. Sessions and the calendar
 
-Session structure is **in flux** and this skill states no session time as fact. What was reported as of 2026-11-18, each item to be checked by a human against the primary source before it goes into `calendar.toml` (primary sources: the NSE closing auction page https://www.nseindia.com/static/products-services/closing-auction-session, NSE circulars at https://www.nseindia.com/resources/exchange-communication-circulars with PDFs under https://nsearchives.nseindia.com/content/circulars/, SEBI circulars at https://www.sebi.gov.in/legal/circulars.html):
-- Closing Auction Session (CAS) for F&O stocks: reported to start 2026-08-03 with equity derivatives running 10 minutes later than before; verify at NSE/CMTR/74466 and NSE/FAOP/74467 (dated 2026-05-29, as cited by broker coverage). Non-F&O stocks reportedly keep the old close.
-- Reported, verify at the NSE circulars of 2026-11-06 (one cash-market and one F&O circular, numbers not confirmed by this pack; locate them in the circular list): effective 2026-12-07 the CAS window moves later and shorter, equity derivatives (stock and non-expiring index) run a few minutes past the current close, and expiring index contracts stop earlier than other derivatives; revised treatment of some unexecuted orders reportedly starts separately on 2027-02-08. A broker article (https://www.kotakneo.com/news/regulations/nse-new-closing-auction-and-f-and-o-trading-rules-from-7-december/) gave exact times; other coverage disagreed, so no time is copied here.
-- SEBI circular of October 2026 on reviewing CAS, market timings and derivatives settlement methodology (https://www.sebi.gov.in/sebi_data/attachdocs/oct-2026/1792079571420.pdf; title seen, content not verified by this pack): confirm whether it overrides any NSE item above.
-- Pre-open order-entry split from 2026-09-07: reported by a broker note citing NSE/CMTR/74969 and NSE/FAOP/74970; verify there.
-- Whether the old post-close session still runs under the new regime: unverified, confirm at the NSE circulars before modelling it.
-- Zerodha square-off times for MIS, broker cut-offs and GTT rules are broker facts: take them from the broker, not this file.
-
-Because dates differ by regime, `calendar.toml` windows are effective-dated; a circular adds rows, it never edits history.
-
-Engineering consequences:
-- The `MarketCalendar` (`bz-repo-structure`) answers `session_at(ts, segment, kind)`, `is_trading_day(date, segment)`, `next_trading_day` and `close_time(date, segment)`. Close time depends on the segment, the instrument kind and the date; all of it comes from `calendar.toml`.
-- **Option expiry instant = `calendar.close_time(expiry_date, segment, kind)`**, never a literal 15:30 or 15:40; time-to-expiry, bar cut-offs and expiry-day rules all read it.
-- Special sessions exist: Muhurat trading on Diwali (timing announced by circular), Saturday/Sunday Budget or special sessions, and Saturday mock/DR sessions that must NOT feed live data into analytics. Model the calendar as explicit dated entries, not "Mon-Fri minus holidays".
-- A daily bar's "close" is the closing-price method of that day (auction price versus the earlier VWAP-based method; the switch date is per instrument kind and comes from `calendar.toml` regimes). Backtests spanning the change need a per-date flag; label the discontinuity instead of hiding it.
-- The bar builder must not assume a 15:30 final tick. Bars are cut from the calendar's session end for that instrument.
-- Settlement for equities is T+1 (verify on the exchange site); T+1 matters for paper-trade cash availability (`bz-execution`).
-- Segment calendars differ (equity, derivatives, currency, commodity, SLB; trading vs clearing holidays). Key holidays by segment.
-
-Time-of-day behaviour (context for strategy logic and Why? text, not rules):
-- First 15 minutes: wide spreads, gaps resolve, false breakouts common; ORB strategies live here, beginners should wait.
-- Midday: lower volume, range-bound drift; trend strategies underperform, mean reversion does better.
-- Last hour: positioning and trend continuation; MIS square-off flows near the close.
-- Expiry-day afternoon: gamma and theta dominate, premiums collapse or spike within minutes, wide option spreads, pinning near large-OI strikes. Defined-risk only; flag it in the UI.
+In short: Session structure is **in flux** and this skill states no session time as fact. What was reported as of 2026-11-18, each item to be checked by a human against the primary source before it goes into `calendar.toml` (primary sources: the NSE ...
+Full detail, examples and patterns: `references/sessions-and-the-calendar.md` - read it before changing this area.
 
 ## 4. Expiries, lots and ticks
 
-Expiry schedules are data from the instrument master, not rules in code. Reported as of 2026-11-18 (broker and news coverage; unverified here): index options expire on a Tuesday (NSE) or Thursday (BSE), weekly expiries are limited to one benchmark index per exchange, and an expiry that falls on a trading holiday moves to the previous trading day, possibly cascading over consecutive holidays. Verify at the NSE contract-specification pages, the NSE circular list and the SEBI circular on expiry days (confirm the circular number there), plus https://www.nseindia.com/resources/exchange-communication-holidays; schedules have changed several times in two years. Tests must derive shifts from a fixture calendar, never from a remembered weekday.
-
-Implementation:
-- Expiries come from the instrument master: group `instrument_type in (CE, PE, FUT)` rows by `name` and `expiry`, sort, label weekly vs monthly by whether another expiry for the same underlying falls later in the same calendar month. Never derive them from weekday arithmetic.
-- `days_to_expiry` uses the calendar (trading days and calendar days both, labelled). Time to expiry for option pricing uses the actual expiry instant, `calendar.close_time(expiry_date, segment, kind)`.
-- Lot size and tick size are per instrument and change by circular (lot sizes are revised periodically, tick size is 0.05 for most but can differ). A lot-size change mid-series produces different lot sizes for different expiries of the same underlying; keep lot size on the instrument row, never on the underlying.
-- F&O eligibility = presence in the instrument master's NFO segment today. Backtests need the historical eligibility list; if it is unavailable say so ("survivorship caveat", `bz-backtest-risk`).
-- Freeze limits (max quantity per order) and strike steps change too; read them from the exchange file or reject when unknown.
+In short: Expiry schedules are data from the instrument master, not rules in code. Reported as of 2026-11-18 (broker and news coverage; unverified here): index options expire on a Tuesday (NSE) or Thursday (BSE), weekly expiries are limited to one ...
+Full detail, examples and patterns: `references/expiries-lots-and-ticks.md` - read it before changing this area.
 
 ## 5. F&O ban, circuits, price bands
 
-- Ban: a stock enters the ban period when aggregate open interest crosses an entry percentage of its market-wide position limit (MWPL); during the ban only position-reducing trades are allowed, and normal trading resumes when OI falls below an exit percentage. Index derivatives have no MWPL ban. Reported by broker explainers (https://support.zerodha.com/category/trading-and-markets/trading-faqs/f-otrading/articles/why-do-futures-and-option-scrips-enter-ban-period-what-does-it-mean); verify the percentages at the exchange's F&O ban circular. They are config values (`ban_entry_pct`, `ban_exit_pct` with `verified_on`), not literals, and the test fixtures use fictional values around them. Approaching-ban stocks (say above ~80% MWPL) deserve a "ban risk" tag, with the cut-off configurable.
-- Banned stocks: scanner marks "no new F&O positions" and DecisionGate (`bz-backtest-risk`) rejects openings; closing orders stay allowed. Paper trading enforces the same rule.
-- Price bands: each cash stock has a daily band (percentage varies per stock and changes), carried in the exchange's daily band file and on the tick. F&O stocks and indices follow different (dynamic) mechanisms. Market-wide index circuit breakers halt the whole market at several levels. Backtest/paper fills must not execute at or beyond the band, and a locked circuit (no counter-side liquidity) means no fill. Never encode "10%/20%" in code.
-- Stock under surveillance (ASM/GSM), T2T segment, and trade-for-trade lists restrict intraday and leverage; treat as `restrictions` flags from the exchange files, surfaced in Why? panels.
+In short: Ban: a stock enters the ban period when aggregate open interest crosses an entry percentage of its market-wide position limit (MWPL); during the ban only position-reducing trades are allowed, and normal trading resumes when OI falls below ...
+Full detail, examples and patterns: `references/f-o-ban-circuits-price-bands.md` - read it before changing this area.
 
 ## 6. Events
 
@@ -99,20 +52,8 @@ Implementation:
 
 ## 7. Charges taxonomy (no numbers here)
 
-`config/charges.toml`, one table per segment and side (equity delivery, equity intraday, equity futures, equity options, plus currency/commodity if enabled), each with `verified_on` and `source`:
-- brokerage (flat or percentage, with caps; per executed order);
-- STT (equities, futures, options) or CTT (commodities): charged on a defined side and base (turnover, option premium, or intrinsic value on exercise);
-- exchange transaction charges (rate differs by exchange and segment; NSE vs BSE are not the same);
-- SEBI turnover fee;
-- stamp duty (buy side, state-uniform, by segment);
-- GST on brokerage, exchange charges and SEBI fee (not on STT or stamp duty);
-- DP charges on delivery sells (per scrip per day, plus depository fee), investor-protection fund charge where applicable.
-
-Rules:
-- Rates live only in `config/charges.toml` (schema: `bz-backtest-risk` `references/charges-toml.md`), filled from https://zerodha.com/charges and exchange/SEBI/finance-ministry notices at implementation time, each with `verified_on`. Statutory rates (for example STT) changed in recent budgets and third-party summaries conflict: unverified, confirm at the Finance Act notification or the broker charges page. Record the source in `DECISIONS.md`. No rate appears in skill text or code.
-- A calculator that cannot find a rate for a segment/side returns an error, never zero.
-- Reference-value tests use a published worked example from the broker's calculator for each segment (store input, expected components, and `verified_on` in the fixture).
-- Tax (STCG/LTCG on equity, business income on F&O, audit thresholds, loss carry-forward) is out of scope unless asked; point users to the Income Tax Department and a chartered accountant and never compute tax liability in the app.
+In short: `config/charges.toml`, one table per segment and side (equity delivery, equity intraday, equity futures, equity options, plus currency/commodity if enabled), each with `verified_on` and `source`:
+Full detail, examples and patterns: `references/charges-taxonomy.md` - read it before changing this area.
 
 ## 8. Data legality
 

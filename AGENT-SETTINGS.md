@@ -46,6 +46,9 @@ How hard the agent thinks on each step. Higher = better reasoning, more tokens, 
 - Values: `low`, `medium`, `high`, `xhigh`, `max`.
 - Example - developers on tricky work: `| dev-data | claude-sonnet-5-5 | high | ... |`
 - Example - build-runner only runs commands: `| build-runner | claude-sonnet-5-5 | low | ... |`
+- Defaults: `high` for tech-lead and architect (planning, triage, design); `medium` for the manager (it mostly routes,
+  runs commands and relays, and takes the most turns of any agent) and everyone else. If the manager starts sizing or
+  classifying requests badly, set it back to `high`.
 
 ### `max_turns`
 The most steps an agent can take on one task. A step is one action: reading a file, running a command, searching, writing a file. When it hits the limit, the agent stops and hands back what it has; the manager continues it or asks you. **This is the hard limit.**
@@ -126,12 +129,12 @@ If one of these seems to have no effect, it may need to be set in your shell bef
 | `max_slice_changed_lines` | 400 | Largest piece of work one developer gets |
 | `small_max_files` | 3 | Work touching at most this many files in one area is size S: no plan, one developer, gate only |
 | `checkpoint_commits` | `yes` | Developers commit on their feature branch each time the gate passes, so "undo that step" is a `git revert`, not another agent run |
+| `reuse_roles` | `tech-lead, architect` (+ the kit's consulting agents) | agent names, comma-separated | Agents the manager continues instead of relaunching; a hook blocks the first fresh launch within `reuse_window_minutes` (90) and names the warm agent |
 | `preview_first` | `yes` | Look-and-feel work gets a cheap preview you pick from before anything is built (frontend kits: clickable demo pages) |
 
 ### Review policy
 | Setting | Default | Values | What it does |
 |---|---|---|---|
-| `light_lane` | `skip` | `skip`, `quick`, `off` | Docs and records only (never agent prompts, skills, CLAUDE.md, owner rules, team settings, scripts, CI): `skip` = no reviews (title and CI still checked), `quick` = code review only, `off` = normal policy |
 | `security_review` | `sensitive-or-large` | `always`, `sensitive-or-large` | When a security review runs (sensitive = auth, config, SQL/migrations, dependencies, CI, Dockerfile) |
 | `tester_review` | `behaviour-change` | `always`, `behaviour-change`, `large` | When a tester runs |
 | `large_pr_lines` | 150 | number | Size at which a PR counts as large |
@@ -139,6 +142,8 @@ If one of these seems to have no effect, it may need to be set in your shell bef
 | `review_pack_max_diff_lines` | 1,200 | number | How much diff reviewers see in one go |
 | `require_feature_record` | `yes` | `yes`, `no` | Feature PRs need `docs/features/F<n>-*.md` before they merge |
 | `require_bug_record` | `yes` | `yes`, `no` | `fix/B<n>` PRs need `docs/bugs/B<n>-*.md` with a regression test |
+| `envelope_reviews` | `yes` | `yes`, `no` | Small PRs (`envelope_max_lines`, default 150) are reviewed by one tool-free Claude call covering every required review, instead of reviewer agents: ~5-15k tokens instead of ~30k+ per reviewer. Big or always-full files (migrations, CI, auth, secrets, lock files, agent files) still get reviewer agents |
+| `light_review_docs` | `yes` | `yes`, `no` | Docs-only PRs (never agent, CI or settings files) need no reviewer launch; the tech lead reads the diff |
 
 Check what a PR will get: `just review-plan <pr>`.
 
@@ -151,6 +156,7 @@ Check what a PR will get: `just review-plan <pr>`.
 | `usd_per_million_tokens` | `-` | Your blended price, to show dollar estimates |
 
 See usage any time: `just budget` (today) or `just budget <task>`; `just budget-report <task>` breaks it down per agent.
+Every run also shows its **cold start** (what the agent loaded before doing any work) separately from its work; `just budget-starts` lists the typical start per agent type. A large start is the reason to continue agents rather than relaunch them, and to keep preloaded skills small.
 Usage is **measured, not estimated**: a hook reads every agent's transcript when it finishes and books it against the
 current task (`just budget-task F12`), and the manager's own session is measured the same way.
 

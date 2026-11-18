@@ -100,77 +100,13 @@ Evidence labels used everywhere: **Rejected** (fails a row) -> **Low evidence** 
 
 ## 6. Options selection (defined risk by default)
 
-First fix the **view** (up, down, sideways, big move either way) and the **IV rank** of the underlying (India VIX for index context; stock IV from the chain; `bz-quant` computes it, and the same lookback must be used everywhere, state it in the spec). **Selection uses IV rank bands; IV percentile is shown as context only**, never as the selection input (same statement in `bz-quant` `references/options-math.md`).
-
-| IV rank | Options are... | Directional view | Preferred defined-risk structure | Avoid |
-|---|---|---|---|---|
-| Low (< ~30) | Cheap | Up / down | Debit spread (bull call, bear put), or a single long option with a premium-capped stop | Selling premium for tiny credit |
-| Low | Cheap | Big move, direction unknown | Long straddle/strangle only with a catalyst; otherwise skip | Holding through theta decay hoping |
-| Middle (~30-50) | Fair | Any | Discretionary; debit spreads in clear trends, credit spreads in clear ranges; otherwise "no trade" | Forcing a trade |
-| High (> ~50) | Rich | Range-bound | Iron condor / iron butterfly (wings bought) | Naked short strangle |
-| High | Rich | Mild up / down | Credit spread (bull put, bear call) at a level the chart supports | Long options (overpaying for vol) |
-| Any | | Own the stock, mildly bullish | Covered call or cash-secured put, only if the lot fits the account | Over-sizing |
-| Any | | Term-structure view | Calendar / diagonal | Around events without checking the front expiry |
-
-The 30/50 bands are config values and a house convention to be tuned by backtest (many options-education sources use a 50 split; IV rank differs by platform), not a law.
-
-Rules the strategist enforces in every options spec:
-
-1. **Max loss in rupees is computed first** (spread width x lot - credit for credit spreads; premium x lot for long options) and must be <= the per-trade risk budget. If even one lot exceeds it, the output is "No trade: one lot risks X, your limit is Y". Do not shrink the structure until it becomes meaningless.
-2. **Contract size is the key constraint for a small account.** SEBI tightened index-derivative contract sizes in late 2024 (circular of 2024-10-01 on measures for equity index derivatives; confirm the number and current lot sizes at sebi.gov.in and the instrument master). One index lot can control many times the whole account, so many index spreads and every covered call or cash-secured put exceed the per-lot risk budget. Expect options output to be mostly "paper-only education" or "no trade", and say so honestly rather than loosening the limit.
-3. **Margin comes from the broker margin API**, never from a hand estimate; if it cannot be fetched, F&O paper orders are blocked.
-4. **Events:** no short-premium structures through results, RBI policy or Budget unless the spec is an explicit event strategy that passed the evidence bar. Expiry-day afternoons: gamma risk is extreme, so entries on expiry day are suppressed by default for beginners. The expiry instant is `calendar.close_time(expiry_date, segment)`, not a remembered clock time (`bz-india-markets`).
-5. **Exits are part of the spec:** profit target as % of max profit (default band 50-75% for credit structures), loss stop on premium or on the underlying, and a time exit well before expiry. Never "hope" past the stop; never widen it.
-6. **Show the payoff:** breakevens, max profit, max loss, probability of profit (a model estimate with its assumptions), and days to expiry in the Why panel.
-7. Ratio spreads, naked short options and any structure with undefined risk on one side: high-risk flag, excluded from recommendations (section 9).
-
----
+In short: First fix the **view** (up, down, sideways, big move either way) and the **IV rank** of the underlying (India VIX for index context; stock IV from the chain; `bz-quant` computes it, and the same lookback must be used everywhere, state it ...
+Full detail, examples and patterns: `references/options-selection.md` - read it before changing this area.
 
 ## 7. Writing beginner "Why?" panels
 
-The Why panel is generated from `Recommendation` fields (field list: `bz-quant`) via templates (deterministic, snapshot-tested), not free-form prose, so every number shown is a real field. The strategist owns the wording; `dev-ui` renders it; `dev-quant` supplies the fields.
-
-**Rules**
-
-1. **Rupee risk is the first line**, in en-IN grouping: "If this goes wrong you lose about 980 rupees (0.98% of your capital)".
-2. Plain English: 8th-grade vocabulary, sentences under ~20 words, <= ~120 words in the default view. Jargon appears only with a tooltip definition (RSI, ATR, profit factor, IV rank, theta).
-3. Order is fixed: **Risk -> Setup -> Why now -> Proven wrong if -> Evidence -> Watch out -> Action**.
-4. Probability language only ("tends to", "has historically", "about 4 in 10 trades worked"). The banned-phrase list, the disclaimer text and the full no-advice rules are in `bz-india-markets` `references/compliance-and-disclaimer.md`; follow them, do not restate them here.
-5. **Evidence is stated plainly, including bad news:** trade count, win rate, profit factor, worst drawdown, and the **Low evidence** label under the configured minimum.
-6. Always state the regime and whether it fits ("market is sideways today; this setup prefers trends -> smaller size or skip").
-7. Name the exit before the entry: stop price, target(s), time limit.
-8. The "Watch out" line lists the nearest event risk (results, expiry, RBI, ex-date, ban list) from the events calendar.
-9. "No trade" panels explain **what is missing** and what would change the answer.
-
-**Template (fields in braces come from the Recommendation struct)**
-
-```
-Risk first: you could lose about {risk_rupees} ({risk_pct_of_capital} of your capital) on this trade.
-Size: {qty} shares/lots. Entry {entry_zone}. Stop {stop}. Target {target1} (reward is {rr} times the risk).
-
-The setup: {one_sentence_plain_description}
-Why now: {reason_1}; {reason_2}; {reason_3_if_any}.
-Market today: {regime_label}. {regime_fit_sentence}
-Proven wrong if: price closes {stop_condition}. Then we exit and accept the loss.
-
-Track record ({strategy} on {symbol}, after costs): {n_trades} trades, {win_rate} won,
-profit factor {pf}, worst drawdown {max_dd}.  {low_evidence_sentence_if_below_min}
-
-Watch out: {nearest_event_or_none}. Hold time: about {horizon}.
-{DISCLAIMER}        <- the shared constant, never retyped
-```
-
-**No-trade template**
-
-```
-No trade today. Nothing met our rules. Your capital stays safe at {cash_amount}.
-What we looked at: {n_scanned} stocks; {n_blocked_by_regime} blocked by market conditions, {n_low_evidence} had too little history.
-What would change this: {condition}. Waiting is a position too.
-```
-
-Worked examples (equity, options, long-term, no-trade) are in `references/why-panel-examples.md`; open it when drafting or reviewing Why wording.
-
----
+In short: The Why panel is generated from `Recommendation` fields (field list: `bz-quant`) via templates (deterministic, snapshot-tested), not free-form prose, so every number shown is a real field. The strategist owns the wording; `dev-ui` renders ...
+Full detail, examples and patterns: `references/writing-beginner-why-panels.md` - read it before changing this area.
 
 ## 8. What to reject (the strategist's veto list)
 

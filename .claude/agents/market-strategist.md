@@ -5,10 +5,6 @@ model: claude-sonnet-5-5
 effort: high
 maxTurns: 40
 tools: Read, Glob, Grep, Write, Edit, Bash, Skill, WebSearch, WebFetch
-skills:
-  - bz-market-strategy
-  - bz-india-markets
-  - bz-trading-discipline
 memory: project
 hooks:
   PreToolUse:
@@ -60,3 +56,12 @@ Your recommendation (including "don't build this" or "no trade" when that's the 
 - Record lasting decisions in `.agents/decisions.md`.
 - Never read `.env*`/keys/`secrets/`.
 - Return to the manager <= 20 lines: decisions, open questions, files written.
+
+<!-- kit:handbooks bz-market-strategy,bz-india-markets,bz-trading-discipline -->
+## Handbooks: look up the part you need
+Run `just docs "<topic>"` (or `"<handbook>: <topic>"`) to get one section; don't read whole handbooks.
+Before writing or judging code in an area, read that handbook's golden rules (`just docs "<handbook>: golden rules"`); a rule file may already have shown them when you opened a file there.
+- **bz-market-strategy**: Operating mode · Philosophy · Regime first · Strategy catalogue · Evidence bar: when a strategy is trusted · Options selection · Writing beginner "Why?" panels · What to reject · Strategist workflow in planning · Red flags, tests and checklist; deeper: Fundamentals screen · SIP staggering · What to test · Strategy spec template · Swing equity, low evidence · Options, defined risk, does not fit · Options, defined risk, fits · Long-term SIP suggestion · No trade
+- **bz-india-markets**: Where each fact comes from · Config files carry verified_on · Sessions and the calendar · Expiries, lots and ticks · F&O ban, circuits, price bands · Events · Charges taxonomy · Data legality · Formatting and wording · Tests · Red flags · Checklist; deeper: calendar.toml · events.toml · Fixtures · Permanent disclaimer · Wording rules · SEBI adviser rules in plain terms · Tests for wording and compliance
+- **bz-trading-discipline**: The contract · DecisionGate rule catalogue · Override policy · Paper-to-live readiness bar · Automation safety · Journaling discipline · risk-guardian PR checklist · Tests and verification · Checklist
+<!-- /kit:handbooks -->

@@ -13,19 +13,8 @@ Deep dives: `references/web-auth-template.md` (the `crates/server/src/security.r
 
 ## 1. Default tools (as of 2026-11-18)
 
-| Concern | Choice | Note |
-|---|---|---|
-| Server | `axum` 0.8 (0.8.9 current), features `ws`; `axum-extra` with `cookie` | middleware via `axum::middleware::from_fn_with_state` |
-| Headers, limits | `tower-http` 0.7: features `set-header`, `timeout`, `trace`, `fs`; axum `DefaultBodyLimit` | no `cors` feature. tower-http 0.7 also ships a `csrf` feature: do not use it as the Origin check, it lets requests with neither `Origin` nor `Sec-Fetch-Site` through; ours rejects them |
-| Randomness | `getrandom` 0.4 (`getrandom::fill`) | launch token, session ids, CSRF tokens, nonces; 32 bytes each |
-| Constant-time compare | `subtle` 2.6 (`ConstantTimeEq`) | token and CSRF compares |
-| Sessions | in-memory `HashMap` behind a `Mutex` in `crates/server` | restart logs out; no `tower-sessions`, `argon2`, `totp-rs` |
-| Secret types | `secrecy::SecretString` everywhere + redacting `Debug` | `bz-core` |
-| Secret store | `keyring-core` 1.0 + `apple-native-keyring-store` 1.0 (macOS Keychain) behind `SecretStore` | `.env` via `dotenvy` as dev fallback in bin entrypoints only |
-| Rust supply chain | `cargo deny check` (advisories, licenses, bans, sources) | `just check` |
-| JS supply chain | `pnpm -C web audit --prod`, lockfile committed, `--frozen-lockfile` in CI | |
-| Secret scanning | `gitleaks` on every PR (`secrets-scan` CI job) | |
-| Lint | `unsafe_code = "forbid"`; clippy `unwrap_used`, `expect_used`, `dbg_macro`, `print_stdout` | `bz-repo-structure` |
+In short: 
+Full detail: `references/default-tools.md` - read it before changing or reviewing this area.
 
 ## 2. Golden rules
 
@@ -112,56 +101,28 @@ Patterns are deliberately noisy; tune them in `.agents/` if a hit class is alway
 
 ## 5. Browser-security template (code: `references/web-auth-template.md`)
 
-All of it lives in `crates/server/src/security.rs`; this is the only copy in the pack. Any web page can send requests to `127.0.0.1`, and browsers do not apply CORS to WebSocket handshakes, so the server defends itself. Note that `SameSite` does not isolate ports: a page on another local port of the same host (a dev server, an XSS'd tool) is same-site, so the Origin and CSRF checks carry real weight.
-
-- **Bind guard:** build `127.0.0.1:<port>`; a startup check refuses any other IP (also `::`, `0.0.0.0`, `::1`, LAN addresses). No bind setting anywhere.
-- **Launch token:** 32 bytes from the OS RNG, hex. At startup print `http://127.0.0.1:<port>/auth?token=<t>` (debug builds: `http://localhost:5173/auth?token=<t>` for `just ui-dev`) once with a plain stdout write (never `tracing`) and open it with the default browser; failure to open is not fatal. `GET /auth` compares in constant time (`subtle`), consumes the token only on success (a wrong guess must not burn it), sets `bz_session` (random 32-byte id; `HttpOnly; SameSite=Strict; Path=/`; no `Domain`; no `Secure` because loopback HTTP is a secure context) and answers 303 to `/` so the token leaves the URL. Single use; a restart mints a new token and drops every session. Residual risk accepted: the URL is briefly visible in `ps` args and terminal scrollback; single use and a 10-minute TTL bound it.
-- **Host allowlist (DNS rebinding):** only `127.0.0.1:<port>` and `localhost:<port>` (case-insensitive); anything else, or a missing Host, gets 403. Runs first on every route including static files. The Vite dev proxy uses `changeOrigin: true`, so it arrives as `127.0.0.1:<port>`; no extra debug Host entry.
-- **Origin check:** on every non-GET request and every WebSocket upgrade, `Origin` must exactly equal `http://127.0.0.1:<port>` or `http://localhost:<port>` (debug builds also `http://localhost:5173`). Missing, `null`, or a prefix/suffix lookalike gets 403. Exact string match, no substring logic. An `OPTIONS` preflight is a non-GET, so it is refused too.
-- **Session guard:** cookie `bz_session` must name a live in-memory session, else 401 problem+json. Non-GET also needs header `X-CSRF-Token` equal (constant time) to the session's CSRF token, else 403. The token comes from `GET /api/v1/auth/me` and lives in browser memory only. Content types stay strict (`Json` rejects `text/plain` form tricks).
-- **Kite callback:** `/api/v1/kite/login` (session required) mints a 16-byte nonce with a 5-minute TTL, stores it, and redirects to Kite with `redirect_params` carrying `nonce=<n>` (URL-encoded query string; Kite appends it to the redirect URL, per the Kite login docs, checked 2026-11-18). `/api/v1/kite/callback` accepts only a known, unexpired, unused nonce; extra query keys from Kite are ignored (do not `deny_unknown_fields` here); exchange the `request_token` at once, store the access token via `SecretStore`, 303 to the UI. Redirect URL registered at Kite: `http://127.0.0.1:8787/api/v1/kite/callback`.
-- **Headers:** CSP constant exactly as in CONTRACTS section 4 item 5 (`default-src 'self'; script-src 'self'; ...; object-src 'none'`), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` on every response; `Cache-Control: no-store` on `/api/*`. Nothing more is required; do not add CORS-adjacent headers.
-- **Limits:** `DefaultBodyLimit` 1 MiB, `TimeoutLayer::with_status_code(408, 30 s)` (`TimeoutLayer::new` is deprecated). Max 4 concurrent WebSockets; page-size caps on list routes. An upload route needs its own cap and an ADR (imports are CLI commands by default).
-- **WebSocket** `/api/v1/ws`: passes Host, Origin and session guards on the handshake; closes when its session disappears; server-to-client messages plus a typed subscribe; carries no order action.
-- **Logging:** `TraceLayer` with a custom `make_span_with` recording method and `uri().path()` only. The default span logs the whole URI, which would put `/auth?token=` and the Kite callback query in logs. A tracing field-name redaction layer (`secret|token|password|authorization|cookie|csrf|nonce|api_key`) is defence in depth.
-- **Chart and CSP, decided once:** start with `style-src 'self'`. lightweight-charts draws on canvas and sets styles through the DOM style API, which CSP does not block (unconfirmed from the library docs), so a test decides: the Playwright smoke (`bz-testing`) loads the built UI under the real CSP constant and fails on any `securitypolicyviolation` while the chart renders. If it fires, the owner records a `DECISIONS.md` line and CONTRACTS changes first; do not widen the policy in code alone. The dev server (Vite HMR) is outside the production policy, never merged into it.
-- **Debug UI (`just ui-dev`):** settled in CONTRACTS section 7: debug builds print and open the launch link on `http://localhost:5173` (so the host-scoped cookie belongs to the page), the proxy rewrites Host, and only the Origin allowlist gains `http://localhost:5173`, in debug builds only.
+In short: All of it lives in `crates/server/src/security.rs`; this is the only copy in the pack. Any web page can send requests to `127.0.0.1`, and browsers do not apply CORS to WebSocket handshakes, so the server defends itself. Note that ...
+Full detail, examples and patterns: `references/browser-security-template.md` - read it before changing this area.
 
 ## 6. API input validation
 
-Every route is an API boundary exposed to code you do not fully control (npm dependencies, a future XSS, a hostile local page that passes the checks by luck).
-
-- Request bodies are DTOs with `serde` `deny_unknown_fields`, converted by `TryFrom` into domain newtypes (`Symbol` resolved against the instrument master, `Qty` > 0 and a lot multiple for F&O, `Price` a tick multiple, `Decimal` not `f64`). Reject, never clamp silently.
-- Routes accept no file paths, SQL, URLs, shell strings or mode flags (`execution_mode` is only set in `risk.toml`).
-- Risk, money and limits are recomputed server-side from the store and `config/risk.toml`; a UI-supplied `risk_rupees` or `quantity` is a request validated by `DecisionGate`. `POST /api/v1/approvals/{id}/approve` re-loads the pending intent, re-runs the gate with fresh prices, checks expiry, kill switch, mode and the intent hash the user saw (`bz-execution`); a replayed or stale id fails.
-- Errors are `application/problem+json` with a closed `code` and a safe message: no SQL, paths, tokens, stack traces, driver text. Detail goes to `tracing` after redaction. Paginate store reads.
-- Never render broker or news text as HTML. SQL: `sqlx` bind parameters only; table and column names from enums. DuckDB: never interpolate user text into `read_parquet('...')` paths; build them from validated `Symbol` and year values. `ServeDir` serves `web/dist` only (never `data/` or the repo root).
+In short: Every route is an API boundary exposed to code you do not fully control (npm dependencies, a future XSS, a hostile local page that passes the checks by luck).
+Full detail: `references/api-input-validation.md` - read it before changing or reviewing this area.
 
 ## 7. Order-placement safety (live phase and its scaffolding)
 
-Detail and tests live in `bz-execution` and `bz-trading-discipline`; the reviewer verifies:
-
-- `broker` compiles only behind `live-trading`; default builds and tests never link a live executor; CI builds the feature but never calls live APIs.
-- Mode changes (`paper -> semi_auto -> auto`) are explicit typed confirmations, audited, and impossible by config edit alone for `auto`.
-- Kill switch: global, persisted in SQLite, checked in the executor just before every send, set and released only by `PUT /api/v1/kill-switch` from a logged-in session (never Telegram, CLI flag or env var). The daily-loss breaker trips the same switch. Hard ceiling rows in the `bz-trading-discipline` table.
-- Rate limiter in front of the broker client, far below the broker limit (as of 2026-11-18 Zerodha reports 10 orders per second per client; verify in `sebi-algo-compliance.md`). Client order tag per intent; after a timeout reconcile via the order book, no blind retry. Reconciliation on start and reconnect freezes orders on mismatch.
-- Audit rows hold ids, times, actor, mode, intent hash, verdict, override reason, broker order id, result, `prev_hash` and `hash`; no secrets or full broker payloads. Agents never set `ok = true` in `config/compliance.toml`.
-- **Live-phase prerequisite (owner decision, not a kit feature):** SEBI's retail algo framework requires order APIs to be called from a whitelisted static IP (reported, as of 2026-11-18). A home connection needs a static IP from the ISP, or another owner decision, before phase 9. The owner records the choice, date and evidence in `DECISIONS.md`; never route orders through a third-party relay. Details, checklist item `static_ip` and the verification sources: `references/sebi-algo-compliance.md`. Paper and data phases are unaffected.
+In short: Detail and tests live in `bz-execution` and `bz-trading-discipline`; the reviewer verifies:
+Full detail: `references/order-placement-safety.md` - read it before changing or reviewing this area.
 
 ## 8. Local exposure and host hygiene
 
-- **Never public.** No port forward, tunnel (ngrok, cloudflared, `tailscale funnel`), reverse proxy or `ssh -R` to 8787. The Vite dev server keeps its default localhost binding (`server.host` unset). A recipe that starts a server on another interface is a critical finding.
-- **Other local users and processes** can open `127.0.0.1:8787`: they get 403 or 401 without the launch token or a session cookie. Do not put the token in a file, env var or CLI flag of any long-lived process.
-- **Files:** `data/` and any `.env` are owner-only (`chmod 700 data`, `chmod 600 .env`); `.gitignore` from day one: `.env`, `.env.*` except `.env.example`, `data/`, `*.parquet`, `*.sqlite*`, `*.pem`, `*.key`, `target/`, `node_modules/`, broker UI screenshots. FileVault on; the Keychain holds the tokens, so Time Machine copies of `data/` hold no broker secret but do hold the audit log and positions.
-- **Browser hygiene (owner):** use a normal profile with few extensions for the Bazaar tab; the token URL stays in history but is dead after first use. Chrome's Local Network Access prompts and similar browser features are extra, not relied on.
-- **Healthcheck** `/healthz` returns no data and needs no session; status detail only behind a session.
+In short: **Never public.** No port forward, tunnel (ngrok, cloudflared, `tailscale funnel`), reverse proxy or `ssh -R` to 8787. The Vite dev server keeps its default localhost binding (`server.host` unset). A recipe that starts a server on another ...
+Full detail: `references/local-exposure-and-host-hygiene.md` - read it before changing or reviewing this area.
 
 ## 9. Supply chain and build
 
-- `deny.toml`: `[advisories]` deny vulnerabilities and unmaintained crates unless an ignore carries a reason and expiry; `[licenses]` allowlist; `[bans]` block `openssl` and `native-tls` (rustls only), duplicate majors reviewed; `[sources]` crates.io only, no git dependencies without an ADR. `cargo deny check` and `pnpm audit --prod` run in CI and `just check`.
-- New dependency checklist: maintained recently, `unsafe` footprint, transitive count, licence, and for npm packages install scripts (pnpm `onlyBuiltDependencies` allowlist). Trading-adjacent crates (TA libraries, broker SDKs) are not trusted by default: the Kite client is ours over `reqwest`.
-- Critical or high advisories are patched or mitigated within 48 hours; record in `DECISIONS.md`.
-- Pin third-party GitHub Actions to a version or SHA; CI holds no broker secrets and no network access to broker APIs. Nothing is packaged or deployed, so there is no image to scan.
+In short: `deny.toml`: `[advisories]` deny vulnerabilities and unmaintained crates unless an ignore carries a reason and expiry; `[licenses]` allowlist; `[bans]` block `openssl` and `native-tls` (rustls only), duplicate majors reviewed; `[sources]` ...
+Full detail: `references/supply-chain-and-build.md` - read it before changing or reviewing this area.
 
 ## 10. Disclaimer and no-advice language (compliance item)
 
@@ -180,12 +141,8 @@ The exact text and wording rules live only in `bz-india-markets` `references/com
 
 ## 12. Tests (all with fakes, temp dirs and in-process requests)
 
-Build the router with a test constructor (fixed launch token, `dev` flag, `FakeClock`), drive it with `tower::ServiceExt::oneshot`, and always set `Host` (oneshot adds none).
-
-- HTTP security tests (bind, launch token, session, Host, Origin, CSRF, CORS absence, headers, limits, Kite callback nonce, no secret in responses): the single table in `bz-testing` section 5.6, run against every OpenAPI route. Keep them green; add new cases there.
-- Secrets: `SecretString` redaction; `resolve` prefers the store over env; a token from day D is rejected on D+1 IST (`FakeClock`); a 403 from the fake clears the token and blocks order sends.
-- Validation: table tests per DTO (bad symbol, zero qty, off-tick price, unknown field, oversize list) return the closed error. Gate bypass, kill switch and audit chain tests as in `bz-execution`.
-- Playwright smoke (`bz-testing`): chart screen renders with the production CSP and zero `securitypolicyviolation` events.
+In short: Build the router with a test constructor (fixed launch token, `dev` flag, `FakeClock`), drive it with `tower::ServiceExt::oneshot`, and always set `Host` (oneshot adds none).
+Full detail: `references/tests.md` - read it before changing or reviewing this area.
 
 ## 13. Checklist (done means)
 

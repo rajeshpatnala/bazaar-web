@@ -1,0 +1,13 @@
+# 10. Tests (unit tests in every PR; fakes and temp dirs only)
+
+(From `bz-web-api` SKILL.md; open when the task touches this area.)
+
+
+- `tests/common/mod.rs`: `TestApp::new()` builds `AppState` from fakes (`FakeClock`, in-memory ports, `FakeFeed`, `FakeExecutor` that counts calls), temp dirs and a temp `web/dist`, calls `app::build`, performs the real `/auth?token=` exchange and keeps the cookie and CSRF token; requests send `Host: 127.0.0.1:8787` and `Origin: http://127.0.0.1:8787`. Drive with `tower::ServiceExt::oneshot` (clone the router per request) and read bodies with `http_body_util::BodyExt`.
+- Per route: happy path, 401 without session, 403 without CSRF on non-GET, validation 422, 404, and one domain-failure mapping; assert the problem `code`, never the English `detail`. Snapshot (`insta`) response JSON of representative DTOs.
+- Contract tests that need no per-route work: every path in the OpenAPI document returns 401 without a cookie; no operation path contains `place` and none except the allowed list is a mutation; no mutation exists under `/settings`; schema of `DecimalStr` is `string`; the document equals a committed snapshot; unknown `/api/...` is 404 problem+json while unknown non-API paths serve `index.html`; `/assets/missing.js` is 404.
+- Order flow with `FakeExecutor` and a fake gate: gate fail leaves `place` count 0; approve twice yields 200 then 409 and one `place`; expired approval 409 `approval_expired`; kill switch engaged blocks approve; drifted quote returns `quote_drifted` with the new risk. Needs `risk-guardian` review.
+- WebSocket: start `axum::serve` on `127.0.0.1:0` inside the test and connect with `tokio-tungstenite` plus cookie and Origin. Check foreign Origin and missing cookie are refused; a tick burst yields one `tick` per symbol per window (coalescer period set to ~20 ms in the test config); unsubscribed symbols arrive never; a tiny broadcast capacity forces `resync`; shutdown closes with 1001. Unit-test the coalescer alone with `tokio::time::pause()` (no sockets).
+- Jobs: fake runner reports progress and honours cancel; assert 202, `job_progress`, cancel to `cancelled`, busy 409, panic to `failed`.
+- Startup: the bind-address function is loopback for any port; `openapi` subcommand output parses and contains `/api/v1`. Security tests (Host, Origin, CSRF, headers, token reuse, cookie flags, log redaction) are listed in `bz-testing` and owned by `bz-security`; keep them green, do not duplicate them.
+- Run `cargo nextest run -p bazaar-server`; never `just run`, never the live broker, `just db-check` for connection status.

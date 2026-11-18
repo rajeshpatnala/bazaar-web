@@ -64,38 +64,18 @@ Overrides exist so the owner stays in control, but friction and measurement keep
 
 ## 4. Paper-to-live readiness bar
 
-Evaluated by code from the ledger, journal and audit log (`bazaar-cli readiness`), never self-declared. The report is stored with its inputs hash. Thresholds sit in `risk.toml` under `[readiness]` and may only be raised in the first release.
-
-| Gate to open | Requirements (defaults) |
-|---|---|
-| `paper` -> `semi_auto` | 40 or more trading days **and** 50 or more closed paper trades; net expectancy after real charges and slippage > 0 and profit factor >= 1.3; max paper drawdown within 10% of capital; 0 hard-limit breaches; 0 gate bypasses; override rate <= 10% of trades; journal completion >= 95%; paper fills reconcile with the backtest cost/slippage model within tolerance; kill switch and daily-loss lockout drills passed (recorded); `DECISIONS.md` ADR; owner types the opt-in phrase |
-| `semi_auto` -> `auto` | 60 or more further trading days of `semi_auto` with 50 or more live trades; all of the above on live results; zero reconciliation mismatches in the last 20 sessions; SEBI retail-algo compliance checklist complete (static IP whitelisted for order APIs - a home connection needs a static IP from the ISP, an owner decision - daily 2FA, Algo ID or broker permission for personal automation, OPS limit under broker's - see `bz-security`, `bz-india-markets`); explicit owner opt-in plus ADR |
-
-Rules: paper must behave like real cash (charges, slippage, partial fills, no fill at circuit), otherwise paper results do not count. Paper wins of fewer than 30 trades per strategy remain "low evidence". `live-trading` is never in `default`; passing the readiness row only allows enabling it at build or run time.
+In short: Evaluated by code from the ledger, journal and audit log (`bazaar-cli readiness`), never self-declared. The report is stored with its inputs hash. Thresholds sit in `risk.toml` under `[readiness]` and may only be raised in the first ...
+Full detail: `references/paper-to-live-readiness-bar.md` - read it before changing or reviewing this area.
 
 ## 5. Automation safety (`auto` and any unattended path)
 
-Owned by `bz-execution`; policy here:
-
-1. Kill switch: global, persisted (survives restart), checked immediately before every send, and flipped automatically on reconciliation mismatch, repeated order rejects, or data staleness.
-2. Daily-loss circuit breaker (G03) active before the first order of the day; it also cancels working entry orders.
-3. Order-rate limiter below both the broker limit and the SEBI per-segment threshold (`bz-india-markets`); the per-minute cap is `hard_limits.max_orders_per_minute` (Hard ceiling, G16); the per-day and per-order notional caps are the `[limits]` keys named under the table.
-4. The auto policy is just another approver: the full gate runs at send time, with fresh data, exactly as for a human click. No separate "fast path".
-5. Limit orders only (with a marketable-limit band) for illiquid names; idempotent client order ids; reconcile positions with the broker every few minutes.
-6. Every position has a protective stop at the broker or exchange side (SL order or GTT), not only inside the server, so a server crash or restart does not leave exposure unprotected.
-7. First `auto` sessions run at `limits.auto_size_factor = 0.5` for the first N sessions; the owner gets a browser notification (and Telegram if enabled; WebSocket `order_update` / `gate_alert` messages feed both) for each order, fill and gate rejection.
-8. Daily login/2FA is never automated. When the session expires, `auto` stops and says so.
-9. No self-modifying behaviour: auto never edits `risk.toml`, strategy params or overrides, and never widens a stop.
+In short: Owned by `bz-execution`; policy here:
+Full detail: `references/automation-safety.md` - read it before changing or reviewing this area.
 
 ## 6. Journaling discipline
 
-The journal is how rules improve; it is also a gate input (G08 cool-off reads it).
-
-- **Every recommendation gets a record**, including skipped ones and "no trade" days. Skipped-by-gate entries keep the failing rule ids.
-- **Pre-trade section is written before approval and is immutable (append-only):** recommendation id, strategy and params, evidence snapshot (trades, PF, expectancy, "low evidence" flag), regime, planned entry/stop/target, ₹ risk, R:R, rule results, config hash, chart-state screenshot. Failure to write it blocks the order (fail closed).
-- **Post-trade section:** actual fills, exit reason enum (`target`, `stop`, `trail`, `time`, `manual`, `kill_switch`), R-multiple net of charges, mistake tags (`chased`, `oversized`, `moved_stop`, `ignored_cooloff`, `early_exit`, `none`), optional mood tag (`calm`, `anxious`, `fomo`, `revenge`).
-- **Review cadence:** a weekly review screen: planned vs achieved R, rule overrides, mistakes by count and ₹ cost, results by strategy, time-of-day and regime. Plain-English summary first, charts second.
-- Journal text never contains tokens, account numbers or secrets (`bz-security`).
+In short: The journal is how rules improve; it is also a gate input (G08 cool-off reads it).
+Full detail: `references/journaling-discipline.md` - read it before changing or reviewing this area.
 
 ## 7. risk-guardian PR checklist
 
@@ -136,13 +116,8 @@ rg -n 'fn place\(|Executor::|ApprovedOrder \{|GatedIntent \{' crates
 
 ## 8. Tests and verification
 
-- **Per rule:** boundary tests just below, at and above the limit (G02: one rupee under/over budget; G03: -2.99%, -3.00%, -3.01%), table-driven, using `rust_decimal_macros::dec!`. Use a fake `Clock` for cool-off, event days, expiry cutoff and next-session lockout release.
-- **Properties (`proptest`):** no sequence of fills and quotes lets sized risk exceed the budget; gate is pure (same input, same verdict); stop updates never raise ₹ risk; lockout holds until the clock crosses into the next session; override cap never exceeded.
-- **Fail-closed tests:** stale ban list, missing quote, empty events file, corrupt config each produce `Reject`.
-- **Config tests:** the committed `risk.toml` parses, validates, matches the documented defaults (`insta` snapshot), and the loader refuses values above `[hard_limits]`, `allow_stop_widening = true` and `allow_averaging_down = true`.
-- **Pipeline tests:** with a mock `Executor`, assert `Executor::place` is never called when the gate rejects, and that the gate is called a second time at approval; ephemeral in-memory SQLite for the audit log, kill switch persistence across a simulated restart, hash-chain verification.
-- **Readiness tests:** synthetic ledgers on each side of every threshold. No live API, no real broker, no secrets; connection status only via `just db-check`.
-- **UI:** override dialog cannot confirm without a reason; gate reasons rendered in plain English with ₹ first (`bz-web-ui`, `bz-testing`).
+In short: **Per rule:** boundary tests just below, at and above the limit (G02: one rupee under/over budget; G03: -2.99%, -3.00%, -3.01%), table-driven, using `rust_decimal_macros::dec!`. Use a fake `Clock` for cool-off, event days, expiry cutoff ...
+Full detail: `references/tests-and-verification.md` - read it before changing or reviewing this area.
 
 ## 9. Checklist (done means)
 

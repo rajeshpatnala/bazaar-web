@@ -197,6 +197,100 @@ def apply_preload(front: list, want_all: bool, base: set, extra: list) -> list:
     return out[:idx] + (["skills:"] + [f"  - {x}" for x in skills] if skills else []) + out[idx:]
 
 
+# ---- pocket cards: agents preload only their process skill; handbooks are an index looked up with `just docs`
+
+KEEP_PRELOADED = {"manager": {"delivery-process"}, "tech-lead": {"delivery-process"}, "code-reviewer": {"code-review"},
+                  "security-reviewer": {"security-review"}, "cicd": {"ci-cd"}}
+HB_START, HB_END = "<!-- kit:handbooks", "<!-- /kit:handbooks -->"
+
+
+def preload_mode() -> str:
+    return stack_json().get("preload_mode", "cards")
+
+
+def _clean(h: str) -> str:
+    h = re.sub(r"^#+\s*", "", h)
+    h = re.sub(r"^\d+[a-z]?(\.\d+)*\.?\s*", "", h)
+    return re.sub(r"\s+", " ", re.sub(r"\(.*?\)|`|\*", "", h)).strip(" :-")
+
+
+def _heading_lines(text: str) -> list:
+    out, fence = [], False
+    for l in text.splitlines():
+        if l.lstrip().startswith("```"):
+            fence = not fence
+        elif not fence:
+            out.append(l)
+    return out
+
+
+def skill_topics(skill: str) -> tuple:
+    d = ROOT / ".claude" / "skills" / skill
+    main = [_clean(l) for l in _heading_lines((d / "SKILL.md").read_text(errors="replace")) if l.startswith("## ")] if (d / "SKILL.md").exists() else []
+    deeper = []
+    for f in sorted((d / "references").glob("*.md")) if (d / "references").exists() else []:
+        lines = _heading_lines(f.read_text(errors="replace"))
+        hs = [_clean(l) for l in lines if l.startswith("## ")] or [_clean(l) for l in lines if l.startswith("# ")][:1]
+        deeper += hs
+    seen = {x.lower() for x in main}
+    deeper = [x for x in dict.fromkeys(deeper) if x.lower() not in seen]
+    return [x for x in main if x][:14], [x for x in deeper if x][:14]
+
+
+def never_break() -> list:
+    s = stack_json()
+    if s.get("never_break"):
+        return list(s["never_break"])
+    core = s.get("skill_roles", {}).get("core", "")
+    f = ROOT / ".claude" / "skills" / core / "SKILL.md"
+    if not f.exists():
+        return []
+    m = re.search(r"^## [^\n]*golden rules[^\n]*\n(.*?)(?=^## |\Z)", f.read_text(errors="replace"), re.S | re.M | re.I)
+    return [x.strip().rstrip(".") + "." for x in re.findall(r"^\s*\d+\.\s+\*\*(.+?)\*\*", m.group(1), re.M)] if m else []
+
+
+def handbook_block(owned: list, omit_claude_md: bool) -> str:
+    lines = [f"{HB_START} {','.join(owned)} -->", "## Handbooks: look up the part you need",
+             'Run `just docs "<topic>"` (or `"<handbook>: <topic>"`) to get one section; don\'t read whole handbooks.',
+             "Before writing or judging code in an area, read that handbook's golden rules "
+             '(`just docs "<handbook>: golden rules"`); a rule file may already have shown them when you opened a file there.']
+    for s in owned:
+        main, deeper = skill_topics(s)
+        lines.append(f"- **{s}**: " + " · ".join(main) + ("; deeper: " + " · ".join(deeper) if deeper else ""))
+    if omit_claude_md:
+        nb = never_break()
+        if nb:
+            lines += ["", "Never break (project rules):"] + [f"- {x}" for x in nb]
+    lines.append(HB_END)
+    return "\n".join(lines)
+
+
+def apply_cards(agent: str, front: list, body: str) -> tuple:
+    skills, out, i = [], [], 0
+    while i < len(front):
+        if front[i].startswith("skills:"):
+            i += 1
+            while i < len(front) and front[i].startswith("  - "):
+                skills.append(front[i][4:].strip())
+                i += 1
+            continue
+        out.append(front[i])
+        i += 1
+    keep = KEEP_PRELOADED.get(agent, set()) | set(stack_json().get("keep_preloaded", {}).get(agent, []))
+    m = re.search(re.escape(HB_START) + r" ([^\n]*?) -->", body)
+    owned_prev = [x for x in (m.group(1).split(",") if m else []) if x]
+    owned = [x for x in dict.fromkeys(owned_prev + [s for s in skills if s not in keep])
+             if (ROOT / ".claude" / "skills" / x / "SKILL.md").exists() and x not in keep]
+    kept = [s for s in skills if s in keep]
+    idx = next((n + 1 for n, l in enumerate(out) if l.startswith("tools:")), len(out))
+    out = out[:idx] + (["skills:"] + [f"  - {x}" for x in kept] if kept else []) + out[idx:]
+    body = re.sub(r"\n*" + re.escape(HB_START) + r".*?" + re.escape(HB_END) + r"\n*", "\n\n", body, flags=re.S).rstrip() + "\n"
+    if owned:
+        omit = any(l.strip() == "omitClaudeMd: true" for l in out)
+        body = body.rstrip() + "\n\n" + handbook_block(owned, omit) + "\n"
+    return out, body
+
+
 def list_params() -> int:
     print("Per-agent columns (.agents/team.md, tables starting with 'agent'):")
     for col, (key, _, desc, _) in AGENT_PARAMS.items():
@@ -274,7 +368,8 @@ def main() -> int:
             new_front = set_nested(new_front, parent, key, value)
             if new_front != before_nf:
                 changed.append(f"{agent}: {parent}.{key} -> {value}")
-        if agent in LEAN_AGENTS and extra:
+        cards = preload_mode() == "cards"
+        if agent in LEAN_AGENTS and extra and not cards:
             roles = stack_json().get("skill_roles", {})
             base = {"tech-lead": {roles.get("core"), roles.get("architecture")},
                     "code-reviewer": {roles.get("core")},
@@ -290,8 +385,14 @@ def main() -> int:
         if swap[0] in new_front:
             new_front = [swap[1] if l == swap[0] else l for l in new_front]
             changed.append(f"{agent}: worktree isolation {'off' if in_place else 'on'}")
-        if new_front != front and not check:
-            path.write_text("---\n" + "\n".join(new_front) + "\n---\n" + text[m.end():])
+        body = text[m.end():]
+        if cards:
+            before_front, before_body = list(new_front), body
+            new_front, body = apply_cards(agent, new_front, body)
+            if new_front != before_front or body != before_body:
+                changed.append(f"{agent}: pocket card (handbooks looked up, not preloaded)")
+        if (new_front != front or body != text[m.end():]) and not check:
+            path.write_text("---\n" + "\n".join(new_front) + "\n---\n" + body)
 
     session = session_rows(team_text)
     if session and SETTINGS.exists():

@@ -52,14 +52,15 @@ KINDS = {
 **Specialty:** TODO - what this developer is best at and what it owns.
 """),
     "reviewer": dict(
-        tools="Read, Glob, Grep, Bash, Write, Edit, Skill", isolation=False, memory=True,
-        hook=("Edit|Write", "write-scope.sh .agents"), skills=CORE, turns=40,
+        tools="Read, Glob, Grep, Bash, Write, Edit, Skill", isolation=False, memory=False, omit_claude_md=True,
+        hook=("Edit|Write", "write-scope.sh .agents"), skills=CORE, turns=20,
         rules="""## Team rules (reviewer)
-- Review the diff (`git diff origin/$(just base)...<branch>`), not the whole repo; Bash only for read-only git/rg.
-- Write findings to `<ABS_REPO>/.agents/reviews/<feature-id>/{name}.md` (template `.agents/templates/review-findings.md`, ids `{prefix}-<feature>-<n>`); update statuses in place on re-review.
+- Start with one `just review-pack <pr>` (or `--diff <base>..<branch>`): diff, files, acceptance criteria and your output path; not the whole repo. Bash only for that and read-only git/rg.
+- Write findings to the path `review-pack` prints for you (template `.agents/templates/review-findings.md`, ids `{prefix}-<feature>-<n>`); update statuses in place on re-review.
 - Never change source code, commit, push or merge. The tech lead triages; developers fix; you verify.
 - Never read `.env*`/keys/`secrets/`.
 - Return <= 10 lines: verdict, counts by severity, blocker ids, findings path.
+- You start without CLAUDE.md or a memory notebook: `just review-pack`, your skills and this file are what you need.
 """,
         body="""You are **{name}**, a reviewer on the AI delivery team.
 
@@ -218,6 +219,8 @@ def install(a) -> None:
         front += ["skills:"] + [f"  - {s}" for s in skills]
     if k["memory"]:
         front.append("memory: project")
+    if k.get("omit_claude_md"):
+        front.append("omitClaudeMd: true")  # reviewers work from review-pack + skills; keeps their start small
     if k["hook"]:
         matcher, script = k["hook"]
         front += ["hooks:", "  PreToolUse:", f'    - matcher: "{matcher}"', "      hooks:",

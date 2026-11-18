@@ -20,6 +20,7 @@ The manager asks the tech lead to plan it, launches the right developers, has th
   not just the place you named.
 - **Checks are tiered.** Each piece of work is checked quickly as it's built; the full test matrix runs once per feature.
 - **Every report says where to look**: which page, route or command shows the change, so you can see it yourself.
+- **Small changes are reviewed by envelope**: one short Claude call checks everything a small PR needs instead of several reviewer agents, which is much cheaper; bigger changes still get the full reviewers.
 - **Usage is measured, not guessed**: `just budget` and `just budget-report <id>` show real numbers per agent and for the manager.
 
 ## Asking for a specific agent

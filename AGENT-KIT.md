@@ -51,6 +51,8 @@ You ──▶ manager (main session: plans, launches, tracks board + budget, rep
 - **Previews before taste work.** Requests judged by look or feel get up to three cheap previews you pick from before anything is built (`preview_first`).
 - **No developer limit for L work.** The tech lead slices it as finely as is safe; the manager launches one developer per slice in parallel. Developers are reused for the next step in the same area instead of starting cold.
 - **Owner rules.** Corrections you give once ("cards fit the screen") go into `.agents/owner-rules.md`; a hook hands them to every agent, and the whole product is checked for the same problem.
+- **Small cold starts.** Every fresh agent first reads its instructions, handbooks, CLAUDE.md levels and notebook; reviewers skip CLAUDE.md and the notebook, and `just start-report <agent>` shows what each one reads and how big it is.
+- **Envelope reviews.** A small PR is reviewed by one tool-free Claude call that applies every required checklist at once (`just envelope <pr>`), instead of launching up to four reviewer agents. Big or always-full changes still get the reviewer agents.
 - **Tiered verification.** Each slice: T0 (gate) + T1 (one quick look at what changed). Once per feature: T2, the full matrix, by one tester.
 - **Preflight.** `just preflight` checks branches, `gh` and worktrees before work starts. If worktrees fail, `in-place` mode runs one developer at a time in your checkout, with the same reviews and gates (`--diff` / `--branch`). The manager never swaps a kit agent for a general-purpose one.
 - **Pipelined reviews.** Code review, security review and testing start on each branch the moment its developer finishes, overlapping with developers still building. Big slices get an early checkpoint review on a draft PR.
@@ -81,9 +83,9 @@ You ──▶ manager (main session: plans, launches, tracks board + budget, rep
 ## Branches, reviews and merging
 
 - **Integration branch** (default `develop`, set in `team.md` -> Branches; the manager asks you on first run): every work branch starts here and every feature PR targets it.
-- **Reviews happen on the PR, before merging.** Code review, security review and testing start on each PR as soon as its author hands off, including CI/infra PRs. Verdicts go to `.agents/reviews/<feature>/`.
+- **Reviews happen on the PR, before merging.** Code review, security review and testing start on each PR as soon as its author hands off, including CI/infra PRs. Verdicts go to one folder per PR, `.agents/reviews/<feature>/<pr-N|branch>/`, so slices never overwrite each other.
 - **`just merge-check <pr>`** is the gate and the only source for "it's green". It checks the target branch, the Conventional Commit title, every GitHub CI check, and the reviewers' verdicts (no open blockers).
-- **The tech lead merges into the integration branch** with `just ship <pr>` (waits for CI, then `just merge`, then pulls), which refuses if the merge-check fails. A hook blocks any raw `gh pr merge` that skips the check, and blocks all agents from pushing or committing to the integration or release branch.
+- **The tech lead merges into the integration branch** with `just ship <pr>`: it waits for CI inside the script (no agent turns spent polling), refuses if the merge-check fails, merges, and updates the integration branch and code map. Docs-only PRs need no reviewer; the tech lead reads the diff. A hook blocks any raw `gh pr merge` that skips the check, and blocks all agents from pushing or committing to the integration or release branch.
 - **The release branch (`main`) moves only when you approve.** Promotion and release PRs go through `just promote <pr>`, and Claude Code asks you for permission every time.
 - **Branch protection** is the real safeguard on GitHub: `just protect-branches` shows the settings (PR required, CI checks required, no force-push) and applies them with `--apply` after you approve. Solo repos keep 0 required approvals, because GitHub doesn't let you approve your own PRs. Your approval is the Claude Code prompt instead.
 
@@ -132,7 +134,8 @@ Under the hood it's `.claude/kit/new_agent.py` (install / `--update` / `--retire
 | `dev-gate.sh` | A developer can't finish while `just gate` fails or tests are missing (one retry; then it must report FAIL). |
 | `after-git-sync.sh` + SessionStart | Keep the code map current. |
 | `agent-context.sh` (SessionStart, SubagentStart) | Gives every agent the owner rules and the work mode at start. |
-| `budget-meter.sh` (SubagentStop, Stop) | Measures real token usage of every agent run and of the manager's session. |
+| `budget-meter.sh` (SubagentStop, Stop) | Measures real token usage of every agent run (cold start and work) and of the manager's session. |
+| `agent-reuse.sh` (PreToolUse on agent launches) | Blocks the first fresh launch of a tech lead, architect or consulting agent that already ran this session and names the warm one to continue. |
 | Gate record | Every full gate pass on a clean tree is recorded per commit; local merges (`merge --branch`) require one. |
 
 Connectivity: `just db-check` loads `.env` inside the app and prints only `OK`/`FAILED <category>` per configured store.
@@ -166,7 +169,7 @@ AGENT-KIT.md                  this file
 .claude/settings.json         manager as main agent, permissions, hooks
 .claude/agents/               19 agents: manager, tech-lead, architect, dev-data, dev-quant, dev-backtest, dev-execution, dev-api, dev-ui, dev-core,
                               cicd, tester, code-reviewer, security-reviewer, build-runner, prototyper (+ pack extras)
-.claude/skills/               20 skills
+.claude/skills/               21 skills
 .claude/rules/                path-scoped rules
 .claude/hooks/                secrets, write-scope, git guard, developer gate, map refresh
 .agents/                      team.md, project.md, decisions.md, templates/ (committed)

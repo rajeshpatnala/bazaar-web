@@ -9,25 +9,10 @@ Bazaar is a local-only, single-user web app on the owner's Mac (Rust workspace w
 
 ## 1. Default stack (verified 2026-11-18; pin in `[workspace.dependencies]`, re-check with `cargo search` before bumping)
 
-| Concern | Choice | Note |
-|---|---|---|
-| Language | Rust edition 2024, current stable pinned in `rust-toolchain.toml` | check blog.rust-lang.org for the latest stable when bumping |
-| Runtime | `tokio` 1.54, one multi-thread runtime | `bazaar-server` and `bazaar-cli` each own exactly one |
-| Money / price | `rust_decimal` 1.43 | never `f64` for rupees |
-| Time | `chrono` 0.4.45 + `chrono-tz` 0.10 (`Asia/Kolkata`) | one time crate per repo; do not add `time` |
-| Errors | `thiserror` per crate; `anyhow` only in `cli`, `server` main and tests | |
-| Config | `serde` + `toml` + `secrecy`; `dotenvy` in the bins only | files in `config/` (dir from `--config-dir` / `BAZAAR_CONFIG_DIR`), data in `BAZAAR_DATA_DIR`; secrets from the Keychain (env fallback) |
-| Secrets | `keyring-core` + `apple-native-keyring-store` (macOS Keychain); `.env` via `dotenvy` as dev fallback | behind the `SecretStore` trait, held as `SecretString`; call `keyring_core::set_default_store` at startup; compile-check against the pinned version (`bz-security`) |
-| Web server | `axum` 0.8, `tower-http` 0.7, `utoipa` 6 + `utoipa-axum` 0.3, `rand`, `subtle` (launch token; in-memory sessions) | `crates/server` is a thin composition root bound to 127.0.0.1 only, see `bz-web-api`; keeps its own literal `version`, equal to `web/package.json` |
-| HTTP / WS | `reqwest` 0.13 (`default-features = false`, features `json`, `rustls`), `tokio-tungstenite` 0.30 | one shared client; timeouts on everything |
-| SQL | `sqlx` 0.9 (SQLite, feature `chrono`) | app state, journal, audit, paper account |
-| Columnar | `duckdb` (pinned with `~`), `polars` 0.55, `arrow`/`parquet` 60 | candles and backtest data; see `bz-market-data`; added in the commit that first uses them |
-| Observability | `tracing`, `tracing-subscriber` | |
-| Tests | `proptest` 1.12, `criterion` 0.8, `insta` 1.49, `wiremock` 0.6 | see `bz-testing` |
-| UI | React 19.3, Vite 8, TypeScript `~6.0` strict (not 7 yet: tooling; `bz-repo-structure` manifests), React Router, TanStack Query 5, `openapi-fetch` + `openapi-typescript`, `lightweight-charts` 5.3 (ESM only), MSW, Vitest 5, Playwright, ESLint 10 | `pnpm`, project in `web/`; API types generated from the server's OpenAPI document (`bz-web-ui`) |
-| Delivery | none: local only, `just run` from the repo | no Docker, no deploy target |
-
-Versions come from the blueprint research. If a build fails on a version, check crates.io or npm for the current release before guessing; record a deliberate downgrade in `DECISIONS.md`.
+Rust 2024 workspace on tokio; `rust_decimal` for money; `chrono` + `chrono-tz` (Asia/Kolkata); `thiserror` per crate;
+axum 0.8 server on 127.0.0.1; `reqwest` (rustls) + `tokio-tungstenite`; `sqlx` SQLite; DuckDB/Parquet/polars for candles;
+`tracing`; React 19 + TypeScript + Vite UI in `web/` with generated OpenAPI types. Local only, no Docker.
+Exact versions and choices per concern: `references/default-stack.md` - read it before adding or bumping a dependency.
 
 ## 2. Golden rules
 
@@ -72,22 +57,13 @@ Versions come from the blueprint research. If a build fails on a version, check 
 
 ## 5. Configuration
 
-- Files in `config/` (eight; schema owners in `bz-repo-structure` section 4): `charges.toml`, `risk.toml`, `strategies.toml`, `watchlists.toml`, `events.toml`, `calendar.toml`, `data.toml`, `compliance.toml`. Each starts with `schema_version`, `verified_on = "YYYY-MM-DD"` and `source = "<url | circular no. | owner>"`. Corporate actions are store data (`bazaar-cli import-actions <csv>`), not a config file.
-- Load with `serde` + `#[serde(deny_unknown_fields)]`, then a `validate()` that checks ranges and cross-field rules. Fail at startup naming the key, never the value of a secret.
-- The loader resolves the directories as `--config-dir` flag, else `BAZAAR_CONFIG_DIR`, else `./config`; and `--data-dir`, else `BAZAAR_DATA_DIR`, else `./data`. Both are paths, not secrets, and are the only env-driven config besides secrets (`BAZAAR_PORT`, `RUST_LOG` are read by the server entrypoint). Credentials never live in `config/`.
-- Defaults for the user profile (capital 1,00,000, 1% risk per trade, 3% daily loss, paper mode) live in the shipped `config/*.toml`, not in code. Code reads config; it does not carry the numbers.
-- Charge rates, STT/CTT, exchange fees, brokerage and Kite API fees: never type them from memory or a blog. Fill `charges.toml` from zerodha.com/charges and exchange circulars, set `verified_on`, and put the URLs in `source`. Third-party figures conflict (the F&O STT changed on 1 April 2026), so a rate without a dated official source is rejected in review.
-- Staleness: a file whose `verified_on` is older than its configured limit shows a warning badge and a `warn!`; it is never silently trusted for live decisions.
-- Execution mode is `[mode] execution_mode` in `risk.toml`, `paper` by default, never set by env var or CLI flag. Key names come from `bz-trading-discipline` only. `auto` is locked; changing the default or unlocking it is an ADR (`bz-architecture`).
-- Refreshable market data (instrument master, holiday list, ban list) is data, not config: it lives in the store with a `fetched_at` and is refreshed daily (`bz-market-data`).
+In short: Files in `config/` (eight; schema owners in `bz-repo-structure` section 4): `charges.toml`, `risk.toml`, `strategies.toml`, `watchlists.toml`, `events.toml`, `calendar.toml`, `data.toml`, `compliance.toml`. Each starts with ...
+Full detail, examples and patterns: `references/configuration.md` - read it before changing this area.
 
 ## 6. Secrets
 
-- **Agents never open `.env`, key files, credential files, secret mounts or token caches.** To learn whether configuration and connections work, run `just db-check` (prints `OK <check>` / `FAILED <check> <category>` for `sqlite`, `duckdb`, `kite-session`, `instruments`, `audit-chain`; no secrets). Add new keys to `.env.example` as a name with an empty value and document them in the README; there is no mode variable.
-- Resolution order inside the program: macOS Keychain (`keyring-core` store behind `SecretStore`) first, then environment variables loaded from a local untracked `.env` by `dotenvy` in the bin entrypoints only (never in libraries or tests). Everything sits behind the `SecretStore` trait, so code asks for a named secret and does not care where it came from; tests use an in-memory fake store.
-- Typed `Secrets` struct of `secrecy::SecretString`; expose with `expose_secret()` at the single call site that builds a request header, and nowhere else.
-- Kite `api_secret`, `request_token`, `access_token`, the launch token, session cookies and any Telegram bot token: never in logs, `Debug`, error text, URLs, API responses, WebSocket messages, panic messages, snapshots or fixtures. The Kite access token expires daily; it lives in memory and in the Keychain via `SecretStore`, never in SQLite, `data/`, the repo or the browser (`bz-security`).
-- Fixtures are recorded from real APIs only after scrubbing; use obviously fake values (`"test-access-token"`). Details in `bz-security` and `bz-market-data`.
+In short: **Agents never open `.env`, key files, credential files, secret mounts or token caches.** To learn whether configuration and connections work, run `just db-check` (prints `OK <check>` / `FAILED <check> <category>` for `sqlite`, `duckdb`, ...
+Full detail, examples and patterns: `references/secrets.md` - read it before changing this area.
 
 ## 7. Observability
 
@@ -110,13 +86,7 @@ Versions come from the blueprint research. If a build fails on a version, check 
 
 ## 9. Performance
 
-- Measure first: `criterion` benches for indicators, the backtest loop and a full-universe scan; keep baselines when changing hot code.
-- Indicators are streaming (O(1) update per bar) with a batch driver over the same implementation. No re-computing a window from scratch per bar.
-- Scans over the universe use `rayon` on a blocking thread; each strategy evaluation borrows a slice view, no per-bar `Vec` allocation or clone in hot loops; pre-size collections.
-- Push filters and aggregates into DuckDB/Polars (`SELECT` only the symbols, date range and columns needed); keep one DuckDB connection per task, reuse prepared statements.
-- Tick fan-out to the UI is throttled (coalesce per instrument, e.g. a few updates per second) before it is sent over the WebSocket; a slow client is dropped or skipped, never buffered without bound.
-- Cache the instrument master and calendar in memory with a daily refresh; never parse the instrument CSV per request.
-- Do not optimise at the cost of correctness: Decimal on money paths is not negotiable; a faster `f64` ledger is a defect.
+Measure before optimising; details and targets: `references/performance.md`.
 
 ## 10. TypeScript side (summary; depth in `bz-web-ui`)
 

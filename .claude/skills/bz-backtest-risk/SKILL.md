@@ -38,65 +38,8 @@ Open on demand: `references/charges-toml.md` (schema, loader, computation order,
 
 ## 3. Event-driven loop
 
-Per symbol (or per portfolio for multi-symbol runs, bars merged in timestamp order):
-
-```
-for i in 0..bars.len():
-  1. fills:   orders queued at bar i-1 close execute at bar i open (+slippage), subject to circuit/volume checks
-  2. exits:   for open positions (including ones just filled), test stop/target against bar i high/low (pessimistic ties)
-  3. forced:  intraday (MIS) square-off at the configured time; expiry settlement for derivatives
-  4. mark:    equity = cash + positions marked at bar i close, minus accrued charges
-  5. decide:  view = DataView over candles[..=i]; strategy.on_bar(&view, &ctx) -> Option<Signal>   (ctx: StrategyContext built from the portfolio snapshot)
-  6. size + gate: size_position(...) then DecisionGate.evaluate(...); passing intents queue for bar i+1
-end: unfilled orders are dropped; open positions close at last close, flagged `open_at_end`
-```
-
-### 3.1 The data-window design
-
-`DataView` is defined once, in `bazaar_core` (this skill owns the design; `bz-quant`'s `Strategy::on_bar(&mut self, &DataView, &StrategyContext) -> Option<Signal>` and the engine both use it).
-
-```rust
-/// Read-only window over history that ends at the decision bar. There is deliberately no
-/// way to see a later candle: the slice itself stops here.
-pub struct DataView<'a> {
-    candles: &'a [Candle],
-}
-
-impl<'a> DataView<'a> {
-    /// Engine-only constructor (strategy crates never call it; see the scan in section 11).
-    pub fn ending_at(all: &'a [Candle], i: usize) -> Option<Self> {
-        all.get(..=i).map(|candles| Self { candles })
-    }
-    pub fn last(&self) -> Option<&Candle> { self.candles.last() }
-    pub fn len(&self) -> usize { self.candles.len() }
-    pub fn is_empty(&self) -> bool { self.candles.is_empty() }
-    /// Last `n` candles, oldest first (fewer while warming up).
-    pub fn lookback(&self, n: usize) -> &[Candle] {
-        &self.candles[self.candles.len().saturating_sub(n)..]
-    }
-    /// Completed higher-timeframe candles only; one still forming at `last()` is excluded.
-    pub fn htf(&self, tf: Timeframe) -> Vec<Candle> {
-        match self.last() {
-            Some(now) => resample_completed(self.candles, tf, now.close_time),
-            None => Vec::new(),
-        }
-    }
-}
-```
-
-Rules that keep it honest:
-
-- `Candle` carries `close_time` (IST). `last()` is the decision bar's close; anything stamped later does not exist yet. No `.expect`/`.unwrap` in production code (workspace lints).
-- The engine owns the full series and the loop; strategies only ever hold a `&DataView`. No `Arc<Vec<Candle>>` handed to strategies, no accessor returning the backing store, no index arithmetic exposed.
-- Higher timeframe, news, results dates and corporate-action facts are time-stamped by **when they became known**, and the view filters on that.
-- Indicators are fed bar by bar by the engine (streaming drivers from `bz-quant`); batch precomputation over the full series is allowed only for values proven causal by the same property test.
-- Fundamentals and universe membership are point-in-time. Current index constituents applied to past dates is survivorship bias: mark such results "survivorship-biased" in `BacktestResult` and show it.
-
-### 3.2 Data adjustments
-
-- Signals and indicators use corporate-action-adjusted prices (factor table from `bz-market-data`). Costs, tick rounding and lot checks use the raw traded price/lot size as of that date; keep both series available (the `Candle` adjusted flag says which one a slice is) and test that a split does not create a phantom gap signal.
-- Lot sizes, tick sizes and expiry dates are looked up per date from the instrument master snapshot; never constants.
-- Circuit-locked bars (no two-way trade at the limit) produce no fill; wide-range illiquid bars get a participation cap (`max_participation_pct` of bar volume) with partial fill or rejection.
+In short: Covers: The data-window design; Data adjustments.
+Full detail, examples and patterns: `references/event-driven-loop.md` - read it before changing this area.
 
 ## 4. Slippage
 
@@ -143,44 +86,8 @@ Computed from net trades and the mark-to-market equity curve:
 
 ## 8. Position sizing (risk crate)
 
-Risk rupees divided by stop distance, floored to whole lots, with a cost and slippage buffer so a stopped-out trade cannot exceed the limit.
-
-```rust
-pub struct SizingInput {
-    pub capital: Decimal,
-    pub risk_pct: Decimal,            // e.g. 1 means 1 percent
-    pub side: Side,
-    pub entry: Decimal,
-    pub stop: Decimal,
-    pub lot_size: u32,                // 1 for cash equity, from the instrument master otherwise
-    pub buffer_per_unit: Decimal,     // slippage + expected per-unit charges at the stop, >= 0
-}
-
-pub struct Sized { pub qty: u64, pub lots: u64, pub risk_rupees: Decimal, pub risk_budget: Decimal }
-
-pub fn size_position(i: &SizingInput) -> Result<Sized, SizingError> {
-    if i.lot_size == 0 || i.capital <= Decimal::ZERO || i.buffer_per_unit < Decimal::ZERO {
-        return Err(SizingError::InvalidInput);
-    }
-    let stop_ok = match i.side { Side::Buy => i.stop < i.entry, Side::Sell => i.stop > i.entry };
-    if !stop_ok { return Err(SizingError::StopOnWrongSide); }
-
-    let budget = i.capital * i.risk_pct / dec!(100);
-    let per_unit = (i.entry - i.stop).abs() + i.buffer_per_unit;
-    let lot = Decimal::from(i.lot_size);
-    let mut lots = (budget / (per_unit * lot)).floor().to_u64().ok_or(SizingError::Overflow)?;
-    // Decimal division rounds at 28 digits; re-check so rounding can never push us over budget.
-    while lots > 0 && Decimal::from(lots) * lot * per_unit > budget { lots -= 1; }
-    if lots == 0 { return Err(SizingError::BudgetBelowOneLot { budget, one_lot_risk: per_unit * lot }); }
-    let qty = lots * u64::from(i.lot_size);
-    Ok(Sized { qty, lots, risk_rupees: Decimal::from(qty) * per_unit, risk_budget: budget })
-}
-```
-
-- Options: a bought option's risk is premium x qty (defined); size from the premium stop or the full premium, whichever the strategy spec says. Spreads and condors: risk is the structure's maximum loss from the payoff engine (`bz-quant`), not a stop distance. Naked short options are never sized automatically; they need the margin and worst-case warning path in `bz-trading-discipline`.
-- Cash and margin cap: after sizing, cap by available cash (equity) or by margin from the broker margin API (F&O). If margin cannot be fetched, F&O sizing returns an error; never estimate margin by hand.
-- `BudgetBelowOneLot` surfaces to the user as "this setup needs more capital than your risk limit allows" with the rupee figures.
-- Portfolio limits (max open positions, total open risk, sector concentration, correlation, daily loss) are gate rules; sizing only enforces the per-trade budget.
+In short: Risk rupees divided by stop distance, floored to whole lots, with a cost and slippage buffer so a stopped-out trade cannot exceed the limit.
+Full detail, examples and patterns: `references/position-sizing.md` - read it before changing this area.
 
 ## 9. DecisionGate (summary)
 
@@ -188,57 +95,8 @@ A pure, deterministic pre-trade checklist that evaluates every rule, fails close
 
 ## 10. Tests (what and how)
 
-All tests are deterministic, fixture-driven, offline: bars from `fixtures/` (recorded bhavcopy or Kite JSON samples) or generated by proptest strategies; charges from the synthetic test rates; a fake clock passed in. Unit tests ship in the same PR as the code (`bz-testing`).
-
-The look-ahead proof: two series share a prefix and differ afterwards; every decision and fill that happens inside the prefix must be identical.
-
-```rust
-fn candles_from_steps(steps: &[Step]) -> Vec<Candle> {
-    let mut close = 10_000i64;                                    // paise
-    steps.iter().enumerate().map(|(i, s)| {
-        let open = close;
-        close = (open + s.delta).max(100);
-        Candle::for_test(                                          // `test-util` feature of bazaar-core
-            i, paise(open), paise(open.max(close) + s.up), paise((open.min(close) - s.dn).max(1)), paise(close), s.vol)
-    }).collect()
-}
-
-fn arb_step() -> impl Strategy<Value = Step> {
-    (-300i64..=300, 0i64..=100, 0i64..=100, 1u64..=1_000_000)
-        .prop_map(|(delta, up, dn, vol)| Step { delta, up, dn, vol })
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
-    #[test]
-    fn lookahead_future_bars_never_change_past_decisions(
-        prefix in prop::collection::vec(arb_step(), 40..80),
-        tail_a in prop::collection::vec(arb_step(), 1..40),
-        tail_b in prop::collection::vec(arb_step(), 1..40),
-    ) {
-        let n = prefix.len();
-        let a = run(&cfg(), || BreakoutStrategy::default(), &candles_from_steps(&[prefix.clone(), tail_a].concat()));
-        let b = run(&cfg(), || BreakoutStrategy::default(), &candles_from_steps(&[prefix, tail_b].concat()));
-        prop_assert_eq!(&a.decisions[..n], &b.decisions[..n]);        // signal, size and gate verdict per bar
-        let inside = |r: &BacktestResult| r.fills.iter().filter(|f| f.bar_index < n).cloned().collect::<Vec<_>>();
-        prop_assert_eq!(inside(&a), inside(&b));
-    }
-}
-```
-
-Use a strategy that actually reacts to the window (a Donchian breakout or EMA cross plus a stop), and add the same test per strategy via a shared helper in `bz-quant`'s test support. Every look-ahead test name starts with `lookahead_` so `just lookahead` (nextest filter `test(/lookahead_/)`, `--no-tests=fail`) finds it and cannot pass vacuously. Commit `proptest-regressions/`; if the installed proptest exposes a fixed RNG seed option, set it in CI so runs are reproducible.
-
-Other required tests:
-
-- **Sizing** (proptest): `risk_rupees <= risk_budget`; `qty % lot_size == 0`; more capital never lowers qty; a wider stop never raises qty; one-lot-too-big returns `BudgetBelowOneLot`; stop on the wrong side errors.
-- **Cost model**: see `references/charges-toml.md` (synthetic arithmetic, contract-note goldens, loader errors).
-- **Engine**: entry fills at next open, never at signal close; stop and target in one bar resolves to stop; gap through stop fills at open; MIS square-off time; circuit bar gives no fill; open-at-end handling; zero-trade series yields empty stats without panic.
-- **Metrics**: hand-computed small trade lists (win rate, PF with no losers is `None`, R, drawdown, monthly table in IST).
-- **Walk-forward**: window boundaries and embargo on a tiny fixture; holdout untouched by tuning (the tuner receives no holdout bars).
-- **Gate**: per `references/decision-gate.md`.
-- **Golden backtest**: a committed fixture run per strategy whose stats JSON is diffed (`insta`); an intentional change is reviewed, not auto-accepted. Time-box with `criterion` benchmarks for the loop on a year of 1-minute bars.
-
-Commands: `cargo nextest run -p bazaar-backtest -p bazaar-risk`, then `just gate`. Connection checks only via `just db-check`; backtests read fixtures or stored data through the store port, never a live API.
+In short: All tests are deterministic, fixture-driven, offline: bars from `fixtures/` (recorded bhavcopy or Kite JSON samples) or generated by proptest strategies; charges from the synthetic test rates; a fake clock passed in. Unit tests ship in the ...
+Full detail, examples and patterns: `references/tests.md` - read it before changing this area.
 
 ## 11. Red flags (security and correctness)
 
