@@ -331,6 +331,8 @@ dependencies = [
  "axum-extra",
  "bazaar-broker",
  "bazaar-core",
+ "chrono",
+ "chrono-tz",
  "clap",
  "dotenvy",
  "getrandom 0.4.3",

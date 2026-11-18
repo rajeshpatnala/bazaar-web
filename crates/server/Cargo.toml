@@ -37,6 +37,9 @@ default = []
 live-trading = ["dep:bazaar-broker", "bazaar-broker/live-trading"]
 
 [dev-dependencies]
+chrono.workspace = true
+chrono-tz.workspace = true
+bazaar-core = { workspace = true, features = ["test-util"] }
 http-body-util.workspace = true
 tower = { workspace = true, features = ["util"] }
 insta.workspace = true
