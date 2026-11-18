@@ -282,6 +282,14 @@ version = "0.1.0"
 [[package]]
 name = "bazaar-indicators"
 version = "0.1.0"
+dependencies = [
+ "bazaar-core",
+ "chrono",
+ "chrono-tz",
+ "proptest",
+ "rust_decimal",
+ "thiserror",
+]
 
 [[package]]
 name = "bazaar-options"

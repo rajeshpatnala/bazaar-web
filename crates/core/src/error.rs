@@ -29,6 +29,9 @@ pub enum DomainError {
     /// A decimal string could not be parsed.
     #[error("invalid decimal amount: {0}")]
     InvalidAmount(String),
+    /// A candle broke an invariant (`high >= low`, open/close inside the range).
+    #[error("invalid candle: {0}")]
+    InvalidCandle(&'static str),
     /// Arithmetic overflowed.
     #[error("arithmetic overflow")]
     Overflow,

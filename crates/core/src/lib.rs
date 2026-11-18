@@ -5,6 +5,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod calendar;
+pub mod candle;
 pub mod clock;
 pub mod config;
 pub mod disclaimer;
