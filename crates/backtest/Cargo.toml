@@ -1,0 +1,17 @@
+[package]
+name = "bazaar-backtest"
+description = "Event-driven backtester, cost model and walk-forward."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bazaar-core.workspace = true
+bazaar-indicators.workspace = true
+bazaar-risk.workspace = true
+bazaar-strategies.workspace = true

@@ -1,0 +1,7 @@
+# Wall-clock reads are banned; time comes from the `Clock` trait.
+# `SystemClock` in bazaar-core is the single allowed call site.
+disallowed-methods = [
+  { path = "chrono::Utc::now", reason = "use bazaar_core::clock::Clock" },
+  { path = "chrono::Local::now", reason = "use bazaar_core::clock::Clock" },
+  { path = "std::time::SystemTime::now", reason = "use bazaar_core::clock::Clock" },
+]

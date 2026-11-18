@@ -1,0 +1,23 @@
+[package]
+name = "bazaar-cli"
+description = "Headless composition root (clap): check-connections, imports, backtest."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bazaar-core.workspace = true
+bazaar-paper.workspace = true
+bazaar-scanner.workspace = true
+bazaar-store.workspace = true
+bazaar-broker = { workspace = true, optional = true }
+clap.workspace = true
+
+[features]
+default = []
+live-trading = ["dep:bazaar-broker", "bazaar-broker/live-trading"]

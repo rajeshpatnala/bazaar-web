@@ -1,0 +1,18 @@
+[package]
+name = "bazaar-scanner"
+description = "Runs strategies over the universe; scores, ranks and explains recommendations."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bazaar-core.workspace = true
+bazaar-backtest.workspace = true
+bazaar-regime.workspace = true
+bazaar-risk.workspace = true
+bazaar-strategies.workspace = true
