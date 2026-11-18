@@ -15,7 +15,7 @@ description: Git and PR workflow for the agent team - integration and release br
 
 Both names live in `.agents/team.md` -> Branches. Nobody pushes to the integration or release branch, and nobody commits on them; the branch guard hook blocks it for every agent.
 
-**Policy - never wipe them:** no agent deletes, renames, force-moves (`branch -f`, `checkout -B`), force-pushes, mirror/prune-pushes or resets the integration or release branch, locally or on GitHub (`gh api` included), and nobody deletes, archives or renames the repository. Merges never delete them; work branches are kept after merging too unless `delete_merged_branches` is `yes` in team.md. If a situation seems to require it, stop and ask the user. GitHub branch protection (`just protect-branches`) is the authoritative safeguard.
+**Policy - never wipe them:** no agent deletes, renames, force-moves (`branch -f`, `checkout -B`), force-pushes, mirror/prune-pushes or resets the integration or release branch, locally or on GitHub (`gh api` included), and nobody deletes, archives or renames the repository. Merges never delete them (`just merge` only deletes work branches). If a situation seems to require it, stop and ask the user. GitHub branch protection (`just protect-branches`) is the authoritative safeguard.
 
 ## 2. Roles
 
@@ -24,7 +24,7 @@ Both names live in `.agents/team.md` -> Branches. Nobody pushes to the integrati
 | Developers, cicd | create work branches, commit, push their branch, open/update PRs | merge, push to protected branches, force-push others' branches |
 | Testers | push test commits to the work branch they're assigned | merge, push to protected branches |
 | Reviewers (code, security) | read the PR diff, write findings files | commit, push, merge |
-| Tech lead | `just ship <pr>` into the integration branch; open promotion PRs; revert via PR | merge into the release branch, merge without a passing merge-check |
+| Tech lead | `just merge <pr>` into the integration branch; open promotion PRs; revert via PR | merge into the release branch, merge without a passing merge-check |
 | Manager | read git/PR state, run `just merge-check` to report status | commit code, merge |
 | User | approve `just promote` prompts, approve on GitHub | - |
 
@@ -81,7 +81,7 @@ No GitHub remote or `gh`: keep the branch local and report "PR: local branch <na
 
 ## 6. Reviews and merging (tech lead)
 
-Reviews happen **on the PR, before merging**: code reviewer, security reviewer and tester(s) read the PR diff as soon as the author hands off, and record a verdict in `.agents/reviews/<feature-id>/<pr-N|branch>/` (paths printed by `just review-pack`) (`Verdict: APPROVE` / `PASS` / `SIGN-OFF`).
+Reviews happen **on the PR, before merging**: code reviewer, security reviewer and tester(s) read the PR diff as soon as the author hands off, and record a verdict in `.agents/reviews/<feature-id>/` (`Verdict: APPROVE` / `PASS` / `SIGN-OFF`).
 
 `just merge-check <pr>` is the gate and the **only** source for saying a PR is green. It verifies:
 - the PR targets the integration branch (or is a back-merge from the release branch), is open and not a draft
@@ -91,28 +91,22 @@ Reviews happen **on the PR, before merging**: code reviewer, security reviewer a
 
 ```bash
 just merge-check <pr>        # status for anyone (manager reports this, never memory)
-just pr-wait <pr>            # wait for CI inside the script (free); PASSED / FAILED / STILL RUNNING
-just ship <pr>               # tech lead: wait for CI, merge-check, squash-merge, update the integration branch, codemap
-                             # (keeps the branch unless team.md delete_merged_branches = yes)
+just merge <pr>              # tech lead: runs merge-check, then squash-merges and deletes the branch
 # local fallback without GitHub:
 just merge --branch feat/F12-orders --title "feat(api): orders endpoint"
 ```
 
 After merging, refresh the main checkout so the code map updates: `git switch "$(just base)" && git pull --ff-only`. Merge order for parallel work: smallest/most foundational first; remaining branches rebase (their developers resolve conflicts). If the integration branch breaks: revert via a PR (`git revert <sha>` on a `fix/` branch).
 
-**Restore a deleted branch** (it is recoverable): the PR still knows its last commit.
-`sha=$(gh pr view <pr> --json headRefOid -q .headRefOid)` then `git push origin $sha:refs/heads/<branch>` (or locally
-`git branch <branch> $sha`). Without a PR: `git reflog` in the checkout that had it. Ask the user before re-pushing.
-
 ## 7. Promotions and releases (user-approved)
 
 1. When the user wants a release, the tech lead opens a promotion PR: `gh pr create --base main --head "$(just base)" --title "chore(release): promote $(just base) to main"`.
 2. The manager asks the user; `just promote <pr>` merges it (Claude Code shows the user a permission prompt; a merge commit keeps the feature commits for the changelog).
 3. release-please opens a release PR on the release branch (version bump + `CHANGELOG.md`). Same path: user approves -> `just promote <pr>` -> tag `vX.Y.Z`, GitHub release, image.
-4. Back-merge the release commit: PR from the release branch into the integration branch, `just ship <pr>` (CI only).
+4. Back-merge the release commit: PR from the release branch into the integration branch, `just merge <pr>` (CI only).
 
 Never hand-edit generated changelog entries; never tag by hand while release-please is active. No GitHub: `just changelog` + annotated tag by the tech lead after the user approves. Production deploys need explicit human approval.
 
 ## 8. Dependencies
 
-New dependency in a PR requires: why existing ones aren't enough, maintenance health, license policy, transitive count, and isolation behind our own type if it's an integration. Versions pinned in one place, per `bz-repo-structure`.
+New dependency in a PR requires: why existing ones aren't enough, maintenance health, license policy, transitive count, and isolation behind our own type if it's an integration. Versions pinned in one place, per `fe-repo-foundation`.

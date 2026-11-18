@@ -5,7 +5,7 @@ description: Code review procedure for this repo - scope, red-flag scan, generic
 
 # Code Review
 
-Reviewers **do not edit source code**. Findings go to `.agents/reviews/<feature-id>/<pr-N|branch>/code-review.md` (the exact path `just review-pack` prints)
+Reviewers **do not edit source code**. Findings go to `.agents/reviews/<feature-id>/code-review.md`
 (template `.agents/templates/review-findings.md`); a short summary goes to the manager, who passes it
 to the tech lead for triage. Security issues you notice are recorded too, tagged `security`, and the
 security reviewer owns the deep check.
@@ -14,7 +14,7 @@ Reviews run **per branch as soon as its developer hands off** (or on a draft PR 
 
 ## 1. Procedure
 
-1. Acceptance criteria are in the review pack; for the slice scope run `just plan <feature-id> --slice <n>` (not the whole plan).
+1. Read the feature plan (`.agents/plans/<feature-id>.md`) - acceptance criteria and slice scope.
 2. Get the diff only: `git fetch -q && git diff --stat origin/$(just base)...<branch>` then `git diff origin/$(just base)...<branch> -- <files>`. Don't read unrelated files; use `.agents/codemap.md` to locate context.
 3. Confirm the gate result from the developer's handoff; if missing, ask the manager for a build-runner check instead of running long builds yourself.
 4. Read tests first, then code from the core outwards (domain/business logic first, integrations and entry points last).
@@ -25,7 +25,7 @@ Reviews run **per branch as soon as its developer hands off** (or on a draft PR 
 ## 2. Red-flag scan
 
 ```bash
-rg -n 'unwrap\(|expect\(|todo!|unimplemented!|println!|dbg!|#\[allow|unsafe|\bf(32|64)\b.*(price|pnl|amount|charge|capital|risk|qty|inr|rupee)|(price|pnl|amount|charge|capital|risk|inr|rupee)\w*\s*:\s*f(32|64)|lot_size\s*[:=]\s*\d|tick_size\s*[:=]\s*\d|Weekday::(Tue|Thu)|skip_gate|bypass|auto_approve|default\s*=\s*\[[^\]]*live-trading|access_token|api_secret|request_token|innerHTML|dangerouslySetInnerHTML|: any\b|as any|@ts-ignore|console\.log|SELECT \*|format!\(.*(SELECT|INSERT|UPDATE|DELETE)|std::thread::sleep|unbounded_channel|Utc::now\(\)|Local::now\(\)|reqwest::get\(|CorsLayer::permissive|allow_origin\(Any\)|0\.0\.0\.0|SameSite=None|danger_accept_invalid_certs|SameSite::None' <changed files>
+rg -n 'innerHTML|outerHTML|insertAdjacentHTML|document\.write|dangerouslySetInnerHTML|eval\(|new Function|javascript:|postMessage|localStorage|sessionStorage|: any\b|as any|@ts-ignore|@ts-expect-error|eslint-disable|console\.log|(VITE|NEXT_PUBLIC|PUBLIC)_[A-Z_]*(SECRET|PRIVATE|TOKEN|PASSWORD)|useEffect\(\(\) => \{\s*set' <changed files>
 ```
 
 Each hit must be justified or becomes a finding.
@@ -37,23 +37,18 @@ Each hit must be justified or becomes a finding.
 - **Security basics:** no secrets in code/logs; parameterised queries; input validated at the edge (deep check: security reviewer).
 - **Tests:** unit tests present for every new behaviour and error path (missing = blocker); deterministic; mocks only.
 - **Records:** a feature PR adds or updates `docs/features/F<n>-*.md` with what it built; a `fix/B<n>` PR has a regression test that fails without the fix and a `docs/bugs/B<n>-*.md` with root cause (missing or wrong = major). Never accept secrets or real customer data in a record.
-- **Architecture:** layering/dependency rules from `bz-architecture` respected; code in the right module; ADR for irreversible choices.
+- **Architecture:** layering/dependency rules from `fe-app-architecture` respected; code in the right module; ADR for irreversible choices.
 - **Readability:** names, small functions, docs on public items, comments explain why.
 
 ### Stack-specific checklist
 
-- **Money and numbers:** `Decimal` for every ₹ value, quantity and charge; `f64` only inside indicator/pricing math with explicit conversion and tick rounding; no silent truncation.
-- **Time:** IST via `Clock`; no `Utc::now()`/`Local::now()` in domain code; session and expiry logic from the calendar and instrument master, never hardcoded weekdays or dates.
-- **Market facts and rates:** lot/tick sizes, expiries, ban list, holidays, circuits and charges loaded, not literals; config changes carry `source` + `verified_on`.
-- **Look-ahead (`bz-backtest-risk`):** decisions see data up to the bar close only; fills at next bar/tick; look-ahead test present for new strategy or backtest logic.
-- **Costs:** every P&L path applies the full `CostModel` and slippage.
-- **Gate and execution (`bz-execution`, `bz-trading-discipline`):** no path to an `Executor` without the DecisionGate; gate re-run at approval; kill switch/circuit breaker checked before send; `live-trading` not default; audit log append-only.
-- **Recommendations (`bz-quant`):** all hard-rule-6 fields; "low evidence" below ~30 trades; Why text in plain English; disclaimer visible.
-- **Data (`bz-market-data`):** official sources only; reconnect with backoff and resubscribe; stale-data flag; rate limits respected; tokens never logged.
-- **Async:** no blocking in async; no lock across `.await`; timeouts on outbound calls; bounded channels.
-- **API (`bz-web-api`):** thin handlers, DTOs separate from domain, problem+json errors, Host/Origin guards, session required (except `/healthz`, `/auth`, Kite callback), CSRF on non-GET, no order-placing route, input validation and body limits, WebSocket throttled, OpenAPI updated and UI types regenerated.
-- **UI (`bz-web-ui`):** generated API types only, no `innerHTML`, strict CSP respected, MSW in tests, disclaimer and every recommendation field visible.
-- **Tests:** reference values for formulas; fixtures not live APIs; property tests for backtester invariants.
+- **Playbooks:** the change follows the Best practices of every `fe-*` skill it touches; load the matching skill when the diff needs it (`fe-team-workflow` -> `references/reviewing.md` has the front-end review checklist).
+- **Behaviour:** loading, empty and error states; races and stale data; URL holds shareable state (filters, tabs).
+- **Data:** every API response parsed with Zod at the boundary; server data in TanStack Query, not copied into global stores; no `any`.
+- **UI:** design-system components and tokens only (no raw colours or spacing); accessible names, roles, keyboard and focus; user-facing strings as messages when the app is translated.
+- **Security:** no unsanitized HTML or URL sinks, no secrets behind public env prefixes, CSRF on cookie writes (`fe-security`).
+- **Performance:** no heavy dependency or widget without lazy loading; budgets in `fe-performance` still met.
+- **Tests:** user-centric Testing Library tests, network mocked with MSW, no flaky waits (`fe-testing`).
 
 ## 4. Severity
 
@@ -65,15 +60,14 @@ Each hit must be justified or becomes a finding.
 | nit | Preference | No |
 | question | Need clarification | Until answered |
 
-Each finding: id (`CR-<pr>-<n>`, the prefix `review-pack` prints), severity (`question` for anything a person must
-decide - design, wording, policy, limits - never dressed up as a fix), file:line, issue, why it matters, concrete fix (code if short).
+Each finding: id (`CR-<feature>-<n>`), severity, file:line, issue, why it matters, concrete fix (code if short).
 
 ## 5. Summary returned to the manager
 
 ```
 Review <feature-id> <branch>: REQUEST CHANGES | APPROVE | APPROVE WITH MINORS
 blockers: CR-12-1, CR-12-3 | major: CR-12-2 | minor: 4 | nit: 2
-findings: .agents/reviews/<feature-id>/<pr-N|branch>/code-review.md
+findings: .agents/reviews/<feature-id>/code-review.md
 ```
 
 On re-review, update each finding's status (`fixed` / `not fixed` / `deferred by tech lead`) instead of writing a new file.

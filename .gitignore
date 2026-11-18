@@ -81,3 +81,14 @@ __pycache__/
 
 # --- agent-kit ---
 .agents/.claude-path
+
+# --- agent-kit ---
+dist/
+playwright-report/
+test-results/
+storybook-static/
+.turbo/
+.next/
+*.tsbuildinfo
+.env.local
+.env.*.local

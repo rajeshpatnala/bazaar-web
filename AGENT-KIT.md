@@ -1,8 +1,8 @@
-# Bazaar Rust web trading app AI Agent Kit for Claude Code
+# Frontend (React + TypeScript) AI Agent Kit for Claude Code
 
 **New here? Read `AGENT-GUIDE.md`**: who does what, and example requests. In short, you talk to the manager in plain words and it picks the agents.
 
-A drop-in team of Claude Code sub-agents that plans, designs, builds, tests, reviews, merges and releases Bazaar Rust web trading app projects. You talk to the **manager**; it coordinates everyone else within a token budget.
+A drop-in team of Claude Code sub-agents that plans, designs, builds, tests, reviews, merges and releases Frontend (React + TypeScript) projects. You talk to the **manager**; it coordinates everyone else within a token budget.
 
 ## Install
 
@@ -25,7 +25,7 @@ A drop-in team of Claude Code sub-agents that plans, designs, builds, tests, rev
 - Claude Code is too old for the `agent` setting: update it, or start it with `claude --agent manager`.
 `just doctor` in the repo flags the first two.
 
-The tools you need are `git`, `jq`, `python3`, `just` and `just`, `cargo`, `node`, `pnpm`; `cargo-nextest`, `cargo-deny`, `cargo-llvm-cov`, `git-cliff` and an authenticated `gh` are recommended.
+The tools you need are `git`, `jq`, `python3`, `just` and `node`, `pnpm`; `playwright`, `git-cliff` and an authenticated `gh` are recommended.
 
 **Upgrading:** run the new kit's installer against the same repo. See [Upgrading](#upgrading) below.
 
@@ -36,7 +36,7 @@ You ──▶ manager (main session: plans, launches, tracks board + budget, rep
           ├──▶ tech-lead (plan, slices, answers questions, triage, merges, releases) ──▶ architect when needed
           │
           ├──▶ developers, as many as there are slices, all in parallel, each in its own worktree:
-          │      dev-data   dev-quant   dev-backtest   dev-execution   dev-api   dev-ui   dev-core   cicd   (+ any agent you add)
+          │      dev-ui   dev-auth   dev-perf   dev-a11y   dev-platform   dev-app   cicd   (+ any agent you add)
           │
           │    as EACH developer hands off (others keep building):
           ├──▶ build-runner gate ─▶ code-reviewer + security-reviewer + tester(s) in parallel on that branch
@@ -51,23 +51,20 @@ You ──▶ manager (main session: plans, launches, tracks board + budget, rep
 - **Previews before taste work.** Requests judged by look or feel get up to three cheap previews you pick from before anything is built (`preview_first`).
 - **No developer limit for L work.** The tech lead slices it as finely as is safe; the manager launches one developer per slice in parallel. Developers are reused for the next step in the same area instead of starting cold.
 - **Owner rules.** Corrections you give once ("cards fit the screen") go into `.agents/owner-rules.md`; a hook hands them to every agent, and the whole product is checked for the same problem.
-- **Small cold starts.** Every fresh agent first reads its instructions, handbooks, CLAUDE.md levels and notebook; reviewers skip CLAUDE.md and the notebook, and `just start-report <agent>` shows what each one reads and how big it is.
-- **Envelope reviews.** A small PR is reviewed by one tool-free Claude call that applies every required checklist at once (`just envelope <pr>`), instead of launching up to four reviewer agents. Big or always-full changes still get the reviewer agents.
 - **Tiered verification.** Each slice: T0 (gate) + T1 (one quick look at what changed). Once per feature: T2, the full matrix, by one tester.
 - **Preflight.** `just preflight` checks branches, `gh` and worktrees before work starts. If worktrees fail, `in-place` mode runs one developer at a time in your checkout, with the same reviews and gates (`--diff` / `--branch`). The manager never swaps a kit agent for a general-purpose one.
 - **Pipelined reviews.** Code review, security review and testing start on each branch the moment its developer finishes, overlapping with developers still building. Big slices get an early checkpoint review on a draft PR.
 - **Unit tests are mandatory.** Developers write them in the same PR; a hook blocks a developer from finishing if production code changed without new tests (`No-Tests: <reason>` commit trailer for genuine exceptions).
-- **Developer specialties** (all also have `bz-core`, `bz-testing`, `git-workflow`):
+- **Developer specialties** (all also have `fe-standards`, `fe-testing`, `git-workflow`):
 
 | Agent | Unique skill | Typical slices |
 |---|---|---|
-| dev-data | `bz-market-data` | broker adapters, WebSocket client, bhavcopy, instrument master, corporate actions, storage |
-| dev-quant | `bz-quant` | indicators, options math, regime, strategies, scanner and scoring |
-| dev-backtest | `bz-backtest-risk` | backtester, cost model, slippage, metrics, walk-forward, sizing, DecisionGate rules |
-| dev-execution | `bz-execution` | order pipeline, approvals, paper account and fills, kill switch, rate limits, audit log, broker crate |
-| dev-api | `bz-web-api` | endpoints, WebSocket, auth and sessions, OpenAPI, error mapping, static UI serving |
-| dev-ui | `bz-web-ui` | screens, charts, Why panels, approval dialog, settings, API client |
-| dev-core | `bz-repo-structure` | core types, IST calendar, config, cli, wiring, refactors, general |
+| dev-ui | `fe-design-system` | tokens, components, Storybook, CSS |
+| dev-auth | `fe-auth-realtime` | auth, sessions, guards, real-time |
+| dev-perf | `fe-performance` | budgets, RUM, bundle, images, fonts |
+| dev-a11y | `fe-a11y-i18n` | a11y, i18n, focus, translations |
+| dev-platform | `fe-cicd-observability` | runtime config, flags, Sentry, deploy scripts |
+| dev-app | `fe-app-architecture` | features, pages, data, forms, foundation, general |
 | cicd | `ci-cd` | workflows, Docker, release automation, Dependabot |
 
 - **Tech lead, code reviewer, security reviewer** preload all developer skills.
@@ -75,7 +72,7 @@ You ──▶ manager (main session: plans, launches, tracks board + budget, rep
 ## Budget
 
 - `.agents/team.md` → **Budget**: `per_task_tokens` (default 3M), `per_day_tokens` (default 15M), `warn_percent` (80), optional `usd_per_million_tokens` for dollar estimates.
-- **Measured automatically.** A hook reads each agent's transcript when it finishes and books its real usage against the current task (`just budget-task F12`); another measures the manager's own session. Nothing is estimated unless marked `--estimate`. Before each batch the manager checks the projection (`just budget-check F12 dev-data:2 code-reviewer:2`) from those measurements.
+- **Measured automatically.** A hook reads each agent's transcript when it finishes and books its real usage against the current task (`just budget-task F12`); another measures the manager's own session. Nothing is estimated unless marked `--estimate`. Before each batch the manager checks the projection (`just budget-check F12 dev-ui:2 code-reviewer:2`) from those measurements.
 - `just budget-report F12` breaks a task down per agent; large tasks end with a 5-line retrospective (tokens by phase, rework, what you corrected).
 - WARN → it tells you and continues; OVER LIMIT → it stops and asks (raise limit, fewer agents, lower effort, or smaller scope). Every report ends with budget used.
 - `just budget` shows today's usage any time. Two numbers per run: *tokens* (the agent's context at its last step, as Claude Code shows it; limits use this) and *processed* (everything sent and received over all its steps, cache reads included, which bill at ~10%). Claude Code's `/usage` stays the authority on cost.
@@ -83,9 +80,9 @@ You ──▶ manager (main session: plans, launches, tracks board + budget, rep
 ## Branches, reviews and merging
 
 - **Integration branch** (default `develop`, set in `team.md` -> Branches; the manager asks you on first run): every work branch starts here and every feature PR targets it.
-- **Reviews happen on the PR, before merging.** Code review, security review and testing start on each PR as soon as its author hands off, including CI/infra PRs. Verdicts go to one folder per PR, `.agents/reviews/<feature>/<pr-N|branch>/`, so slices never overwrite each other.
+- **Reviews happen on the PR, before merging.** Code review, security review and testing start on each PR as soon as its author hands off, including CI/infra PRs. Verdicts go to `.agents/reviews/<feature>/`.
 - **`just merge-check <pr>`** is the gate and the only source for "it's green". It checks the target branch, the Conventional Commit title, every GitHub CI check, and the reviewers' verdicts (no open blockers).
-- **The tech lead merges into the integration branch** with `just ship <pr>`: it waits for CI inside the script (no agent turns spent polling), refuses if the merge-check fails, merges, and updates the integration branch and code map. Docs-only PRs need no reviewer; the tech lead reads the diff. A hook blocks any raw `gh pr merge` that skips the check, and blocks all agents from pushing or committing to the integration or release branch.
+- **The tech lead merges into the integration branch** with `just merge <pr>`, which refuses if the merge-check fails. A hook blocks any raw `gh pr merge` that skips the check, and blocks all agents from pushing or committing to the integration or release branch.
 - **The release branch (`main`) moves only when you approve.** Promotion and release PRs go through `just promote <pr>`, and Claude Code asks you for permission every time.
 - **Branch protection** is the real safeguard on GitHub: `just protect-branches` shows the settings (PR required, CI checks required, no force-push) and applies them with `--apply` after you approve. Solo repos keep 0 required approvals, because GitHub doesn't let you approve your own PRs. Your approval is the Claude Code prompt instead.
 
@@ -134,8 +131,7 @@ Under the hood it's `.claude/kit/new_agent.py` (install / `--update` / `--retire
 | `dev-gate.sh` | A developer can't finish while `just gate` fails or tests are missing (one retry; then it must report FAIL). |
 | `after-git-sync.sh` + SessionStart | Keep the code map current. |
 | `agent-context.sh` (SessionStart, SubagentStart) | Gives every agent the owner rules and the work mode at start. |
-| `budget-meter.sh` (SubagentStop, Stop) | Measures real token usage of every agent run (cold start and work) and of the manager's session. |
-| `agent-reuse.sh` (PreToolUse on agent launches) | Blocks the first fresh launch of a tech lead, architect or consulting agent that already ran this session and names the warm one to continue. |
+| `budget-meter.sh` (SubagentStop, Stop) | Measures real token usage of every agent run and of the manager's session. |
 | Gate record | Every full gate pass on a clean tree is recorded per commit; local merges (`merge --branch`) require one. |
 
 Connectivity: `just db-check` loads `.env` inside the app and prints only `OK`/`FAILED <category>` per configured store.
@@ -167,7 +163,7 @@ Change a value, run `just agents-sync`, restart Claude Code. Or ask the manager 
 CLAUDE.md                     agent guide (every agent loads it)
 AGENT-KIT.md                  this file
 .claude/settings.json         manager as main agent, permissions, hooks
-.claude/agents/               20 agents: manager, tech-lead, architect, dev-data, dev-quant, dev-backtest, dev-execution, dev-api, dev-ui, dev-core,
+.claude/agents/               16 agents: manager, tech-lead, architect, dev-ui, dev-auth, dev-perf, dev-a11y, dev-platform, dev-app,
                               cicd, tester, code-reviewer, security-reviewer, build-runner, prototyper (+ pack extras)
 .claude/skills/               21 skills
 .claude/rules/                path-scoped rules
@@ -194,13 +190,8 @@ Run the new kit's installer against your repo (once per repo that uses this kit)
 | Kit agents, skills, hooks, `.claude/kit/` scripts, rules, `.agents/templates/`, `AGENT-KIT.md`, `AGENT-GUIDE.md`, `AGENT-SETTINGS.md` | Replaced. Any you changed are backed up to `.agents/backup-<date>/` first |
 | `CLAUDE.md`, `.gitignore`, `justfile`, `.claude/settings.json` | Merged: your lines stay, new kit lines are added |
 | `.agents/team.md` | Kept. New settings are added with their defaults; your values stay; model/effort/turns are re-applied to the agents |
-| `.agents/stack.json` | Merged: new kit keys (review routing, never-break rules, developer paths) are added; values you changed stay |
 | `project.md`, `decisions.md`, board, plans, reviews, bug drafts, agents you hired, your code | Never touched |
 | Your own `Dockerfile`, CI workflows and similar | Kept; the kit's version is saved beside them as `*.kit` to compare |
-
-**Sending the kit for feedback or an upgrade:** `just export-kit` zips only the kit (agents, skills, hooks, `.agents`
-notes and records, CI, kit docs) and prints its size and contents - never your code, `data/`, build output, worktrees,
-backups or `.env` files. `just export-kit --list` shows the file list without zipping.
 
 After upgrading:
 1. Restart Claude Code in the repo.

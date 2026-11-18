@@ -5,7 +5,7 @@ description: Stack-independent security review procedure - secrets handling (age
 
 # Security review (procedure)
 
-Stack-specific rules live in the stack's security skill (listed in the agent's skills). Findings go to `.agents/reviews/<feature-id>/<pr-N|branch>/security.md` (the exact path `just review-pack` prints) (template `.agents/templates/security-findings.md`); a short summary goes to the manager; the tech lead triages; developers fix; you verify.
+Stack-specific rules live in the stack's security skill (listed in the agent's skills). Findings go to `<ABS_REPO>/.agents/reviews/<feature-id>/security.md` (template `.agents/templates/security-findings.md`); a short summary goes to the manager; the tech lead triages; developers fix; you verify.
 
 ## 1. Secrets (all stacks)
 
@@ -40,4 +40,4 @@ Stack-specific rules live in the stack's security skill (listed in the agent's s
 | medium | Defence-in-depth gap | Tech lead decides |
 | low / info | Hardening | No |
 
-Each finding: id `SEC-<pr>-<n>` (prefix from `review-pack`), severity (`question` when a person must decide), category, file:line, issue, impact, concrete fix, how to verify.
+Each finding: id `SEC-<feature>-<n>`, severity, category, file:line, issue, impact, concrete fix, how to verify.

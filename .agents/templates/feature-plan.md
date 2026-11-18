@@ -23,8 +23,8 @@ Size: M | L   Estimate: <tokens>   Status: draft | approved | in progress | done
 ## Slices (L only)
 | slice | developer type | scope (modules/files owned) | depends on | order |
 |---|---|---|---|---|
-| 0 | dev-core | shared contracts: domain types, ports, DTOs | - | 1 |
-| 1 | dev-data | | 0 | 2 (parallel) |
+| 0 | dev-app | shared contracts: domain types, ports, DTOs | - | 1 |
+| 1 | dev-ui | | 0 | 2 (parallel) |
 
 ## Feature record
 <!-- draft of docs/features/F<n>-<slug>.md (template: .agents/templates/feature-record.md): Status, Summary, Owner area,

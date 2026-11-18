@@ -1,21 +1,17 @@
+# Minimal starting point. `cicd` upgrades it to the reference workflow in fe-cicd-observability (references/ci.md).
 name: ci
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main, develop]
-  workflow_dispatch:
 
 permissions:
   contents: read
 
-# One group per ref, so a run never cancels another ref's runs. Only PR runs are cancelled when superseded;
-# pushes to develop/main always finish (their macOS test would otherwise be cancelled by the next push).
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
-env:
-  CARGO_TERM_COLOR: always
+  cancel-in-progress: true
 
 jobs:
   pr-title:
@@ -24,136 +20,31 @@ jobs:
     permissions:
       pull-requests: read
     steps:
-      - uses: amannn/action-semantic-pull-request@v5
+      - uses: amannn/action-semantic-pull-request@v5   # Conventional Commit PR titles -> changelog
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  lint:
+  verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - if: hashFiles('Cargo.toml') != ''
-        uses: dtolnay/rust-toolchain@stable
-        with: { components: "rustfmt, clippy" }
-      - if: hashFiles('Cargo.toml') != ''
-        uses: Swatinem/rust-cache@v2
-      - if: hashFiles('Cargo.toml') != ''
-        run: cargo fmt --all -- --check
-      - if: hashFiles('Cargo.toml') != ''
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - if: hashFiles('crates/broker/Cargo.toml') != ''
-        name: gated broker crate is lint-clean (no live calls)
-        run: cargo clippy -p bazaar-broker --features live-trading -- -D warnings
-
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - if: hashFiles('Cargo.toml') != ''
-        uses: dtolnay/rust-toolchain@stable
-        with: { components: "llvm-tools-preview" }
-      - if: hashFiles('Cargo.toml') != ''
-        uses: Swatinem/rust-cache@v2
-      - if: hashFiles('Cargo.toml') != ''
-        uses: taiki-e/install-action@v2
-        with: { tool: "cargo-nextest,cargo-llvm-cov" }
-      - if: hashFiles('Cargo.toml') != ''
-        run: cargo llvm-cov nextest --workspace --no-tests=pass --lcov --output-path lcov.info --fail-under-lines 75
-      - if: hashFiles('Cargo.toml') != ''
-        run: cargo test --doc --workspace
-
-  web:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: web
-    steps:
-      - uses: actions/checkout@v5
-      - if: hashFiles('web/package.json') != ''
-        name: pinned tool versions (packageManager, .nvmrc)
-        run: |
-          node -e "if(!require('./web/package.json').packageManager){console.log('::error::add packageManager (e.g. pnpm@10.x) to web/package.json; pnpm/action-setup needs it');process.exit(1)}"
-          test -f web/.nvmrc || { echo '::error::add web/.nvmrc with the Node major (setup-node reads it)'; exit 1; }
-      - if: hashFiles('web/package.json') != ''
+      - if: hashFiles('package.json') != ''
         uses: pnpm/action-setup@v4
-        with: { package_json_file: web/package.json }
-      - if: hashFiles('web/package.json') != ''
+      - if: hashFiles('package.json') != ''
         uses: actions/setup-node@v5
         with:
-          node-version-file: web/.nvmrc
+          node-version-file: .nvmrc
           cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
-      - if: hashFiles('web/package.json') != ''
+      - if: hashFiles('package.json') != ''
         run: pnpm install --frozen-lockfile
-      - if: hashFiles('web/package.json') != ''
-        run: pnpm typecheck
-      - if: hashFiles('web/package.json') != ''
-        run: pnpm lint
-      - if: hashFiles('web/package.json') != ''
-        run: pnpm test:ci
-      - if: hashFiles('web/package.json') != ''
-        run: pnpm audit --prod
-      - if: hashFiles('web/package.json') != ''
-        run: pnpm build
-      - if: hashFiles('web/playwright.config.ts') != ''
-        run: pnpm exec playwright install --with-deps chromium
-      - if: hashFiles('web/playwright.config.ts') != ''
-        run: pnpm e2e
+      - if: hashFiles('package.json') != ''
+        run: pnpm verify
 
-  test-macos:
-    # Manual-only by default: macOS runners queue for a long time, so this job never runs automatically; the Linux
-    # `test` job is the PR gate. It compiles the Keychain store (the owner's platform). Run it from
-    # Actions > ci > Run workflow. To run it after every merge instead: if: github.event_name == 'push'.
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v5
-      - if: hashFiles('Cargo.toml') != ''
-        uses: dtolnay/rust-toolchain@stable
-      - if: hashFiles('Cargo.toml') != ''
-        uses: Swatinem/rust-cache@v2
-      - if: hashFiles('Cargo.toml') != ''
-        uses: taiki-e/install-action@v2
-        with: { tool: cargo-nextest }
-      - if: hashFiles('Cargo.toml') != ''
-        run: cargo nextest run --workspace --no-tests=pass
-
-  secrets-scan:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@v5
-        with: { fetch-depth: 0 }
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  deny:
+  audit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - if: hashFiles('Cargo.lock') != ''
-        uses: EmbarkStudios/cargo-deny-action@v2
-
-  # Permanent guard (not a bypass): the steps run only once the generated API schema (web/src/api/schema.d.ts) is
-  # committed, together with the server `openapi` command and the web `gen:api` script; the job switches itself on then.
-  openapi-drift:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != '' && hashFiles('web/src/api/schema.d.ts') != ''
-        uses: dtolnay/rust-toolchain@stable
-      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != '' && hashFiles('web/src/api/schema.d.ts') != ''
-        uses: Swatinem/rust-cache@v2
-      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != '' && hashFiles('web/src/api/schema.d.ts') != ''
+      - if: hashFiles('pnpm-lock.yaml') != ''
         uses: pnpm/action-setup@v4
-        with: { package_json_file: web/package.json }
-      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != '' && hashFiles('web/src/api/schema.d.ts') != ''
-        name: regenerate UI types and fail on drift
-        run: |
-          cargo run -q -p bazaar-server -- openapi > web/openapi.json
-          pnpm -C web install --frozen-lockfile
-          pnpm -C web gen:api
-          git diff --exit-code -- web/src/api/schema.d.ts
+      - if: hashFiles('pnpm-lock.yaml') != ''
+        run: pnpm audit --prod --audit-level high

@@ -42,7 +42,8 @@
       "Bash(gh pr:*)",
       "Read(./.env.example)",
       "Edit(./.agents/reviews/**)",
-      "Write(./.agents/reviews/**)"
+      "Write(./.agents/reviews/**)",
+      "Bash(pnpm:*)"
     ],
     "deny": [
       "Read(./.env)",

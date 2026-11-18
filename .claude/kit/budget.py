@@ -7,19 +7,15 @@ session the same way. Limits come from the "Budget" table in .agents/team.md.
 
 Two numbers per run:
   tokens     the agent's context at its last step (what Claude Code shows per agent; budgets and caps use this)
-  processed  everything sent and received over all its steps, cache reads included
-  start      the context of its first step: what it loaded before doing any work (the cold start)
-  start_cached  the part of that start read from the prompt cache (shared prefix of an earlier run, ~10% of the price)
-  cost_eq    what the run costs in "plain input tokens": fresh input x1, cache writes x1.25, cache reads x0.1,
-             output x5 - the number to compare runs by money, not by size
+  processed  everything sent and received over all its steps, cache reads included (closer to what is billed;
+             cache reads cost ~10% of normal input)
 
   budget.py task <id>                            set the task that automatic rows are booked against
   budget.py add <task> <agent> <tokens> [--estimate] [note]
                                                  manual row (only for runs the hooks could not measure);
                                                  --estimate marks a guess, shown separately
   budget.py status [task]                        compact status (task + today + manager overhead)
-  budget.py report [task]                        per-agent breakdown (tokens, cold start, work) for reports and retros
-  budget.py starts                               typical cold-start size per agent type (what to slim)
+  budget.py report [task]                        per-agent breakdown for reports and retrospectives
   budget.py check <task> <agent>:<count>...      can we afford the next launches?
                                                  exit 0 ok, 1 over warn threshold, 2 over limit
   budget.py hook-subagent | hook-session         used by the hooks (JSON on stdin)
@@ -34,8 +30,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 LEDGER = ROOT / ".agents" / "budget.csv"
 TEAM = ROOT / ".agents" / "team.md"
-FIELDS = ["date", "time", "task", "agent", "tokens", "note", "source", "processed", "start", "session", "start_cached", "cost_eq"]
-WEIGHTS = {"input_tokens": 1.0, "cache_creation_input_tokens": 1.25, "cache_read_input_tokens": 0.1, "output_tokens": 5.0}
+FIELDS = ["date", "time", "task", "agent", "tokens", "note", "source", "processed"]
 CURRENT_TASK = ROOT / ".agents" / "current-task"
 SESSIONS = ROOT / ".agents" / "budget-sessions.json"
 
@@ -74,8 +69,6 @@ def rows() -> list:
     for r in out:
         r["source"] = r.get("source") or "manual"
         r["processed"] = r.get("processed") or ""
-        r["start"] = r.get("start") or ""
-        r["session"] = r.get("session") or ""
     return out
 
 
@@ -98,10 +91,9 @@ def write_row(row: dict) -> None:
         w.writerow(row)
 
 
-def transcript_usage(path: str, with_start: bool = False) -> tuple:
-    """(context at last step, processed over all steps, steps[, start]) from a Claude Code transcript (JSONL).
-    start = the context of the first step: what the agent loaded before doing any work (its cold-start cost)."""
-    seen, last, steps, start = {}, 0, 0, 0
+def transcript_usage(path: str) -> tuple:
+    """(context at last step, processed over all steps, steps) from a Claude Code transcript (JSONL)."""
+    seen, last, steps = {}, 0, 0
     try:
         with open(pathlib.Path(path).expanduser(), errors="replace") as f:
             for line in f:
@@ -117,62 +109,11 @@ def transcript_usage(path: str, with_start: bool = False) -> tuple:
                     continue
                 total = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens",
                                                             "cache_read_input_tokens", "output_tokens"))
-                if not seen:
-                    start = total - int(u.get("output_tokens") or 0)
                 seen[msg.get("id") or len(seen)] = total
                 last = total
     except OSError:
-        return (0, 0, 0, 0) if with_start else (0, 0, 0)
-    return (last, sum(seen.values()), len(seen), start) if with_start else (last, sum(seen.values()), len(seen))
-
-
-def transcript_detail(path: str) -> dict:
-    """Like transcript_usage, plus the cache split of the first step and a cost-equivalent over all steps."""
-    seen, out = {}, {"ctx": 0, "processed": 0, "steps": 0, "start": 0, "start_cached": 0, "cost_eq": 0}
-    try:
-        with open(pathlib.Path(path).expanduser(), errors="replace") as f:
-            for line in f:
-                if '"usage"' not in line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except ValueError:
-                    continue
-                msg = obj.get("message") or {}
-                u = msg.get("usage") if isinstance(msg, dict) else None
-                if obj.get("type") != "assistant" or not u:
-                    continue
-                n = {k: int(u.get(k) or 0) for k in WEIGHTS}
-                if not seen:
-                    out["start"] = n["input_tokens"] + n["cache_creation_input_tokens"] + n["cache_read_input_tokens"]
-                    out["start_cached"] = n["cache_read_input_tokens"]
-                seen[msg.get("id") or len(seen)] = n  # streamed parts of one message repeat its usage: keep the last
-                out["ctx"] = sum(n.values())
-    except OSError:
-        return out
-    out["steps"] = len(seen)
-    out["processed"] = sum(sum(n.values()) for n in seen.values())
-    out["cost_eq"] = int(sum(sum(WEIGHTS[k] * v for k, v in n.items()) for n in seen.values()))
-    return out
-
-
-def first_prompt_chars(path: str) -> int:
-    """Size of the task message an agent was launched with (first user message in its transcript)."""
-    try:
-        with open(pathlib.Path(path).expanduser(), errors="replace") as f:
-            for line in f:
-                if '"user"' not in line:
-                    continue
-                obj = json.loads(line)
-                if obj.get("type") != "user":
-                    continue
-                c = (obj.get("message") or {}).get("content")
-                if isinstance(c, list):
-                    c = " ".join(x.get("text", "") for x in c if isinstance(x, dict))
-                return len(c or "")
-    except (OSError, ValueError):
-        pass
-    return 0
+        return 0, 0, 0
+    return last, sum(seen.values()), len(seen)
 
 
 def current_task() -> str:
@@ -230,7 +171,7 @@ def manager_today(today: str):
     todays = [v for v in s.values() if v.get("last") == today]
     if not todays:
         return None
-    return max(v["context"] for v in todays), sum(v["processed"] for v in todays), sum(v.get("cost_eq", 0) for v in todays)
+    return max(v["context"] for v in todays), sum(v["processed"] for v in todays)
 
 
 def estimate(agent: str, history: list) -> int:
@@ -265,23 +206,17 @@ def main(argv: list) -> int:
         except ValueError:
             return 0
         path = data.get("agent_transcript_path") or ""
-        det = transcript_detail(path) if path else {"ctx": 0}
-        if not det["ctx"]:
+        ctx, processed, steps = transcript_usage(path) if path else (0, 0, 0)
+        if not ctx:
             return 0
-        ctx, processed, steps, start = det["ctx"], det["processed"], det["steps"], det["start"]
         now = dt.datetime.now()
         agent, aid = data.get("agent_type") or "agent", data.get("agent_id", "?")
         row = {"date": now.date().isoformat(), "time": now.strftime("%H:%M"), "task": current_task(),
-               "agent": agent, "tokens": ctx, "processed": processed, "source": "auto",
-               "note": f"{steps} steps, prompt {first_prompt_chars(path) // 4} tok, id {aid}",
-               "start": start, "session": data.get("session_id", ""), "start_cached": det["start_cached"],
-               "cost_eq": det["cost_eq"]}
+               "agent": agent, "tokens": ctx, "processed": processed, "source": "auto", "note": f"{steps} steps, id {aid}"}
         old = rows()
         same = [i for i, r in enumerate(old) if r["source"] == "auto" and r["note"].endswith(f"id {aid}")]
         if same:  # an agent continued with SendMessage: its transcript keeps growing, so update its row instead of adding one
             row["task"] = old[same[-1]]["task"]
-            row["start"] = old[same[-1]].get("start") or start
-            row["start_cached"] = old[same[-1]].get("start_cached") or det["start_cached"]
             old[same[-1]] = row
             with LEDGER.open("w", newline="") as f:
                 w = csv.DictWriter(f, fieldnames=FIELDS, extrasaction="ignore")
@@ -296,8 +231,7 @@ def main(argv: list) -> int:
             data = json.load(sys.stdin)
         except ValueError:
             return 0
-        det = transcript_detail(data.get("transcript_path") or "")
-        ctx, processed, steps = det["ctx"], det["processed"], det["steps"]
+        ctx, processed, steps = transcript_usage(data.get("transcript_path") or "")
         if not steps:
             return 0
         try:
@@ -306,8 +240,7 @@ def main(argv: list) -> int:
             sessions = {}
         sid = data.get("session_id") or "session"
         first = sessions.get(sid, {}).get("date", today)
-        sessions[sid] = {"date": first, "last": today, "context": ctx, "processed": processed, "steps": steps,
-                         "cost_eq": det["cost_eq"]}
+        sessions[sid] = {"date": first, "last": today, "context": ctx, "processed": processed, "steps": steps}
         cutoff = (dt.date.today() - dt.timedelta(days=30)).isoformat()
         sessions = {k: v for k, v in sessions.items() if v.get("last", "") >= cutoff}
         SESSIONS.parent.mkdir(parents=True, exist_ok=True)
@@ -350,28 +283,6 @@ def main(argv: list) -> int:
         print(" | ".join(parts))
         return 0
 
-    if cmd == "starts":
-        # typical cold-start size per agent type: what to slim (preloaded skills, CLAUDE.md, memory)
-        by = {}
-        for r in history:
-            if r["start"]:
-                by.setdefault(r["agent"], []).append((int(r["start"]), int(r.get("start_cached") or 0), bool(r.get("start_cached"))))
-        if not by:
-            print("no measured starts yet (runs recorded by the budget hook after this kit version)")
-            return 0
-        print(f"{'agent':20} {'runs':>4} {'avg start':>9} {'max':>8} {'cached':>7} {'start cost-eq':>13}")
-        for agent, xs in sorted(by.items(), key=lambda x: -sum(v[0] for v in x[1]) / len(x[1])):
-            avg = sum(v[0] for v in xs) // len(xs)
-            known = [v for v in xs if v[2] or v[1]]
-            cached = (sum(v[1] for v in known) * 100 // max(sum(v[0] for v in known), 1)) if known else None
-            ceq = sum(v[1] * 0.1 + (v[0] - v[1]) * 1.25 for v in known) // len(known) if known else None
-            print(f"{agent:20} {len(xs):>4} {fmt(avg):>9} {fmt(max(v[0] for v in xs)):>8} "
-                  f"{(str(cached) + '%') if cached is not None else '-':>7} {fmt(ceq) if ceq is not None else '-':>13}")
-        print("start = Claude Code's own prompt + CLAUDE.md + the agent file + preloaded skills + skill list + memory.")
-        print("cached = share of the start read from the prompt cache (paid at ~10%); the rest is written to the cache (x1.25).\n"
-              "Starts of the same agent type within ~5 minutes share their cached prefix; spread-out launches pay it in full.")
-        return 0
-
     if cmd == "report":
         task = args[0] if args else current_task()
         mine = [r for r in history if r["task"] == task]
@@ -380,36 +291,19 @@ def main(argv: list) -> int:
             return 0
         by = {}
         for r in mine:
-            a = by.setdefault(r["agent"], [0, 0, 0, set(), 0, 0, 0])
+            a = by.setdefault(r["agent"], [0, 0, 0, set()])
             a[0] += 1
             a[1] += int(r["tokens"])
             a[2] += int(r["processed"] or 0)
             a[3].add(r["source"])
-            a[4] += int(r["start"] or 0)
-            a[5] += int(r.get("start_cached") or 0)
-            a[6] += int(r.get("cost_eq") or 0)
-        print(f"{'agent':20} {'runs':>4} {'tokens':>9} {'start':>8} {'cached':>7} {'work':>8} {'processed':>10} {'cost-eq':>8}  source")
-        for agent, (n, tok, proc, src, st, sc, ceq) in sorted(by.items(), key=lambda x: -x[1][1]):
-            work = f"{fmt(tok - st):>8}" if st else f"{'-':>8}"
-            cached = f"{sc * 100 // st}%" if st and sc else "-"
-            print(f"{agent:20} {n:>4} {fmt(tok):>9} {fmt(st) if st else '-':>8} {cached:>7} {work} "
-                  f"{fmt(proc) if proc else '-':>10} {fmt(ceq) if ceq else '-':>8}  {','.join(sorted(src))}")
-        total, total_start = sum(v[1] for v in by.values()), sum(v[4] for v in by.values())
-        total_cached, total_ceq = sum(v[5] for v in by.values()), sum(v[6] for v in by.values())
-        print(f"{'total':20} {len(mine):>4} {fmt(total):>9} {fmt(total_start) if total_start else '-':>8} "
-              f"{(str(total_cached * 100 // total_start) + '%') if total_start and total_cached else '-':>7} {'':>8} {'':>10} "
-              f"{fmt(total_ceq) if total_ceq else '-':>8}")
-        if total_start:
-            print(f"cold starts: {fmt(total_start)} of {fmt(total)} ({100 * total_start // max(total, 1)}%; target < 25%) - "
-                  "each fresh launch pays its start again; continuing an agent doesn't")
-            if total_cached:
-                print(f"  of the starts, {100 * total_cached // total_start}% came from the prompt cache (~10% of the price); "
-                      "cost-eq = plain-input-token equivalent (cache reads x0.1, writes x1.25, output x5)")
+        print(f"{'agent':20} {'runs':>4} {'tokens':>9} {'processed':>10}  source")
+        for agent, (n, tok, proc, src) in sorted(by.items(), key=lambda x: -x[1][1]):
+            print(f"{agent:20} {n:>4} {fmt(tok):>9} {fmt(proc) if proc else '-':>10}  {','.join(sorted(src))}")
+        total = sum(v[1] for v in by.values())
+        print(f"{'total':20} {len(mine):>4} {fmt(total):>9}")
         mgr = manager_today(today)
         if mgr:
-            print(f"manager session(s) today: {fmt(mgr[0])} context now, {fmt(mgr[1])} processed"
-                  + (f", cost-eq {fmt(mgr[2])}" if mgr[2] else "")
-                  + " - the manager re-sends its whole context on every step; a long session is usually the biggest cost")
+            print(f"manager session(s) today: {fmt(mgr[0])} context now, {fmt(mgr[1])} processed")
         return 0
 
     if cmd == "check":

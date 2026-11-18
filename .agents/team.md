@@ -30,6 +30,12 @@ New agents you hire get their rows here automatically.
 | quant-reviewer | claude-sonnet-5-5 | high | 40 | 200,000 |
 | prototyper | claude-sonnet-5-5 | medium | 30 | 150,000 |
 | combined-reviewer | claude-sonnet-5-5 | medium | 6 | 80,000 |
+| dev-auth | claude-sonnet-5-5 | medium | 80 | 400,000 |
+| dev-perf | claude-sonnet-5-5 | medium | 80 | 400,000 |
+| dev-a11y | claude-sonnet-5-5 | medium | 80 | 400,000 |
+| dev-platform | claude-sonnet-5-5 | medium | 80 | 400,000 |
+| dev-app | claude-sonnet-5-5 | medium | 80 | 400,000 |
+| fe-auditor | claude-sonnet-5-5 | high | 80 | 1,500,000 |
 
 - `model`: sonnet, opus, haiku, fable, a full model id (e.g. claude-sonnet-5-5), or inherit.
 - `effort`: low | medium | high | xhigh | max - how hard the agent thinks per step.
@@ -62,6 +68,12 @@ New agents you hire get their rows here automatically.
 | quant-reviewer | - | - | none | - |
 | prototyper | - | - | none | - |
 | combined-reviewer | - | - | none | - |
+| dev-auth | - | - | project | - |
+| dev-perf | - | - | project | - |
+| dev-a11y | - | - | project | - |
+| dev-platform | - | - | project | - |
+| dev-app | - | - | project | - |
+| fe-auditor | - | - | project | - |
 
 - `context_window`: 100,000-1,000,000 tokens; the conversation is summarised when it reaches this size.
   Smaller = cheaper turns on long tasks. Needs Claude Code 2.1.296+.
