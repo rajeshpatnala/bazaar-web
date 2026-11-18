@@ -267,9 +267,12 @@ name = "bazaar-data"
 version = "0.1.0"
 dependencies = [
  "bazaar-core",
+ "chrono",
  "csv",
+ "rust_decimal",
  "sha2",
  "tempfile",
+ "thiserror",
 ]
 
 [[package]]
