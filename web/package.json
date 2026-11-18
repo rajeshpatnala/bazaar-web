@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@12.21.0",
   "scripts": {
     "dev": "vite",
     "dev:mock": "VITE_MOCK_API=1 vite --port 5173 --strictPort",
