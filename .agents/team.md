@@ -123,7 +123,7 @@ Code review runs on every PR. Security review and testing scale with risk so sma
 | setting | value |
 |---|---|
 | security_review | sensitive-or-large |
-| tester_review | behaviour-change |
+| tester_review | large |
 | large_pr_lines | 150 |
 | tester_min_source_lines | 20 |
 | review_pack_max_diff_lines | 1200 |
@@ -150,7 +150,7 @@ Set `usd_per_million_tokens` to your blended rate to see dollar estimates.
 
 | setting | value |
 |---|---|
-| per_task_tokens | 3,000,000 |
+| per_task_tokens | 4,000,000 |
 | per_day_tokens | 15,000,000 |
 | warn_percent | 80 |
 | usd_per_million_tokens | - |
