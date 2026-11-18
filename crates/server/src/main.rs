@@ -28,16 +28,26 @@ enum Command {
     /// Print the `OpenAPI` document (needs no config, secrets, data dir or socket).
     Openapi,
     /// Start the server on 127.0.0.1 and print the one-time launch URL.
-    Serve,
+    Serve {
+        /// Loopback port (overrides `BAZAAR_PORT`; default 8787). The host is never configurable.
+        #[arg(long)]
+        port: Option<u16>,
+    },
 }
 
-/// Port from an optional operator-supplied value; the host is never configurable.
-fn parse_port(raw: Option<&str>) -> anyhow::Result<u16> {
-    raw.map_or(Ok(DEFAULT_PORT), |s| {
-        s.trim()
+/// Port: `--port`, else `BAZAAR_PORT`, else the default. Port 0 is rejected (the Host/Origin
+/// allowlist and launch URL are built from the port, so an OS-picked port would never match).
+fn resolve_port(flag: Option<u16>, env: Option<&str>) -> anyhow::Result<u16> {
+    let port = match (flag, env) {
+        (Some(p), _) => p,
+        (None, Some(s)) => s
+            .trim()
             .parse::<u16>()
-            .context("BAZAAR_PORT must be a port number")
-    })
+            .context("BAZAAR_PORT must be a port number")?,
+        (None, None) => DEFAULT_PORT,
+    };
+    anyhow::ensure!(port != 0, "port 0 is not allowed");
+    Ok(port)
 }
 
 /// The bind address: loopback only, asserted before any socket is opened.
@@ -58,23 +68,46 @@ fn open_browser(url: &str) {
     } else {
         "xdg-open"
     };
-    let _ = std::process::Command::new(tool)
+    let child = std::process::Command::new(tool)
         .arg(url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
+    if let Ok(mut child) = child {
+        // Reap the opener so it never lingers as a zombie.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
 }
 
 async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        if let Ok(mut term) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+            tracing::info!("shutdown signal received");
+            return;
+        }
+    }
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("shutdown signal received");
 }
 
-async fn serve() -> anyhow::Result<()> {
-    let _ = dotenvy::dotenv();
+async fn serve(port_flag: Option<u16>) -> anyhow::Result<()> {
+    // Dev fallback file: absent is fine, malformed is an error.
+    match dotenvy::dotenv() {
+        Ok(_) => {}
+        Err(e) if e.not_found() => {}
+        Err(e) => return Err(anyhow::Error::new(e).context("reading dotenv fallback")),
+    }
     init_tracing();
-    let port = parse_port(std::env::var("BAZAAR_PORT").ok().as_deref())?;
+    let port = resolve_port(port_flag, std::env::var("BAZAAR_PORT").ok().as_deref())?;
     let config_dir = std::env::var_os("BAZAAR_CONFIG_DIR")
         .filter(|v| !v.is_empty())
         .map_or_else(|| PathBuf::from("config"), PathBuf::from);
@@ -111,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
             writeln!(std::io::stdout().lock(), "{json}")?;
             Ok(())
         }
-        Command::Serve => serve().await,
+        Command::Serve { port } => serve(port).await,
     }
 }
 
@@ -128,22 +161,21 @@ mod tests {
     }
 
     #[test]
-    fn port_defaults_and_parses() {
-        assert_eq!(parse_port(None).unwrap(), 8787);
-        assert_eq!(parse_port(Some(" 9000 ")).unwrap(), 9000);
-        assert!(parse_port(Some("abc")).is_err());
-        assert!(parse_port(Some("70000")).is_err());
+    fn port_resolution_order_and_zero() {
+        assert_eq!(resolve_port(None, None).unwrap(), 8787);
+        assert_eq!(resolve_port(None, Some(" 9000 ")).unwrap(), 9000);
+        assert_eq!(resolve_port(Some(9100), Some("9000")).unwrap(), 9100);
+        assert!(resolve_port(None, Some("abc")).is_err());
+        assert!(resolve_port(None, Some("70000")).is_err());
+        assert!(resolve_port(None, Some("0")).is_err());
+        assert!(resolve_port(Some(0), None).is_err());
     }
 
     #[test]
     fn cli_parses_both_subcommands() {
         assert!(Cli::try_parse_from(["bazaar-server", "openapi"]).is_ok());
         assert!(Cli::try_parse_from(["bazaar-server", "serve"]).is_ok());
+        assert!(Cli::try_parse_from(["bazaar-server", "serve", "--port", "9000"]).is_ok());
         assert!(Cli::try_parse_from(["bazaar-server", "serve", "--host", "0.0.0.0"]).is_err());
-    }
-
-    #[test]
-    fn web_dist_is_fixed() {
-        assert_eq!(WEB_DIST, "web/dist");
     }
 }
