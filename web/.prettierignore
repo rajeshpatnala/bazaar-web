@@ -1,0 +1,6 @@
+dist
+dist-mock
+coverage
+openapi.json
+src/api/schema.d.ts
+pnpm-lock.yaml
