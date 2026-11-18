@@ -12,17 +12,6 @@ version = "0.1.0"
 [workspace.dependencies]
 # internal: one entry per crate, features enabled by the consumer
 bazaar-core = { path = "crates/core" }
-bazaar-data = { path = "crates/data" }
-bazaar-store = { path = "crates/store" }
-bazaar-indicators = { path = "crates/indicators" }
-bazaar-options = { path = "crates/options" }
-bazaar-regime = { path = "crates/regime" }
-bazaar-strategies = { path = "crates/strategies" }
-bazaar-scanner = { path = "crates/scanner" }
-bazaar-backtest = { path = "crates/backtest" }
-bazaar-risk = { path = "crates/risk" }
-bazaar-execution = { path = "crates/execution" }
-bazaar-paper = { path = "crates/paper" }
 bazaar-broker = { path = "crates/broker" }
 
 # external: versions live ONLY here (F1 set approved by the owner on 2026-11-18)
@@ -60,12 +49,6 @@ insta = { version = "1.49", features = ["json", "redactions"] }
 unsafe_code = "forbid"
 missing_debug_implementations = "warn"
 unreachable_pub = "warn"
-
-# Scaffold: edges and dependencies are declared up front (F1 slice 0) and used as slices land.
-# Remove both lines once F1 is done so unused dependencies are flagged again.
-[workspace.lints.cargo]
-unused_dependencies = "allow"
-unused_workspace_dependencies = "allow"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
