@@ -1,6 +1,6 @@
 //! Bounded, panic-free parser for the Kite instruments CSV.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
 use bazaar_core::error::DomainError;
@@ -23,11 +23,15 @@ const REQUIRED: [&str; 11] = [
     "exchange",
 ];
 
-/// Bounds applied while parsing untrusted input.
+/// Bounds applied while parsing untrusted input. The defaults leave generous headroom over
+/// the Kite master (on the order of 100k rows); change them deliberately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParseLimits {
+    /// Maximum input size; checked on the slice, so the caller must bound the read too.
     pub max_bytes: usize,
+    /// Maximum number of data rows (header excluded).
     pub max_rows: usize,
+    /// Maximum length of one field in bytes; longer rows are rejected.
     pub max_field_len: usize,
 }
 
@@ -44,14 +48,19 @@ impl Default for ParseLimits {
 /// Failures that stop the whole parse (row-level problems are counted, not raised).
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ParseError {
+    /// Input is larger than `ParseLimits::max_bytes`.
     #[error("input is {size} bytes, over the {max} byte limit")]
     TooLarge { size: usize, max: usize },
+    /// More data rows than `ParseLimits::max_rows`.
     #[error("input has more than {max} rows")]
     TooManyRows { max: usize },
+    /// A required header column is absent.
     #[error("required column `{0}` is missing")]
     MissingColumn(&'static str),
+    /// Empty input.
     #[error("input has no header row")]
     NoHeader,
+    /// The header record could not be read.
     #[error("csv header could not be read")]
     Csv,
 }
@@ -65,8 +74,10 @@ pub struct ParsedInstruments {
 
 type Columns = HashMap<&'static str, usize>;
 
-/// Parse and clean `bytes`. Extra columns are ignored; bad rows are counted in the report;
-/// a truncated final row is one rejected row. Never panics.
+/// Parse and clean `bytes`. Extra columns are ignored; bad rows are counted in the report.
+/// A later row repeating an earlier `(exchange, tradingsymbol)` or instrument token is
+/// rejected as `Duplicate` (first wins). If the input does not end in a newline the last
+/// record is rejected as `Truncated`, since it may be cut inside any column. Never panics.
 pub fn parse_instruments(
     bytes: &[u8],
     limits: &ParseLimits,
@@ -101,10 +112,15 @@ pub fn parse_instruments(
         idx.insert(name, *i);
     }
 
+    let complete = bytes.ends_with(b"\n");
+    let mut seen_keys: HashSet<(Exchange, String)> = HashSet::new();
+    let mut seen_tokens: HashSet<u64> = HashSet::new();
+    let mut records = records.peekable();
     let mut instruments = Vec::new();
     let mut report = CleaningReport::default();
     let mut rows = 0usize;
-    for rec in records {
+    while let Some(rec) = records.next() {
+        let is_last = records.peek().is_none();
         rows += 1;
         if rows > limits.max_rows {
             return Err(ParseError::TooManyRows {
@@ -112,11 +128,22 @@ pub fn parse_instruments(
             });
         }
         let Ok(rec) = rec else {
-            report.reject(RejectReason::MissingField);
+            report.reject(RejectReason::InvalidEncoding);
             continue;
         };
+        if is_last && !complete {
+            report.reject(RejectReason::Truncated);
+            continue;
+        }
         match parse_row(&rec, &idx, limits) {
             Ok(ins) => {
+                let key = (ins.exchange.clone(), ins.tradingsymbol.clone());
+                if seen_keys.contains(&key) || seen_tokens.contains(&ins.instrument_token) {
+                    report.reject(RejectReason::Duplicate);
+                    continue;
+                }
+                seen_keys.insert(key);
+                seen_tokens.insert(ins.instrument_token);
                 instruments.push(ins);
                 report.accept();
             }
@@ -140,8 +167,7 @@ fn field<'a>(
     if raw.len() > limits.max_field_len {
         return Err(RejectReason::FieldTooLong);
     }
-    // Invalid UTF-8 cannot be a usable value: treated as a missing field.
-    let s = std::str::from_utf8(raw).map_err(|_| RejectReason::MissingField)?;
+    let s = std::str::from_utf8(raw).map_err(|_| RejectReason::InvalidEncoding)?;
     Ok(s.trim())
 }
 
@@ -153,6 +179,11 @@ fn parse_row(
     let f = |name: &str| field(rec, idx, name, limits);
     let tradingsymbol = f("tradingsymbol")?;
     if tradingsymbol.is_empty() {
+        return Err(RejectReason::MissingField);
+    }
+    let exchange = f("exchange")?;
+    let type_code = f("instrument_type")?;
+    if exchange.is_empty() || type_code.is_empty() {
         return Err(RejectReason::MissingField);
     }
     let instrument_token =
@@ -182,8 +213,8 @@ fn parse_row(
         exchange_token,
         tradingsymbol: tradingsymbol.to_owned(),
         name: f("name")?.to_owned(),
-        exchange: Exchange::parse(f("exchange")?),
-        instrument_type: InstrumentType::parse(f("instrument_type")?),
+        exchange: Exchange::parse(exchange),
+        instrument_type: InstrumentType::parse(type_code),
         segment: f("segment")?.to_owned(),
         expiry,
         strike,
@@ -195,7 +226,8 @@ fn parse_row(
         DomainError::InvalidTick => RejectReason::NonPositiveTick,
         DomainError::InvalidLotSize => RejectReason::NonPositiveLot,
         DomainError::InvalidExpiry => RejectReason::InvalidExpiry,
-        _ => RejectReason::InvalidStrike,
+        DomainError::InvalidStrike => RejectReason::InvalidStrike,
+        _ => RejectReason::MissingField,
     })?;
     Ok(ins)
 }
@@ -269,9 +301,15 @@ mod tests {
         assert_eq!(p.report.accepted, 1);
         assert_eq!(p.report.rejected, 1);
         let all = load("instruments_good.csv");
+        let full = parse_instruments(&all, &ParseLimits::default()).unwrap();
         for n in 0..all.len() {
-            let _ = parse_instruments(&all[..n], &ParseLimits::default());
+            if let Ok(part) = parse_instruments(&all[..n], &ParseLimits::default()) {
+                for ins in &part.instruments {
+                    assert!(full.instruments.contains(ins), "prefix {n} made a row");
+                }
+            }
         }
+        assert_eq!(count(&p.report, RejectReason::Truncated), 1);
     }
 
     #[test]
@@ -325,7 +363,45 @@ mod tests {
         let mut b = load("instruments_good.csv");
         b.extend_from_slice(b"9,9,\xff\xfe,N,0,,0,0.05,1,EQ,NSE,NSE\n");
         let p = parse_instruments(&b, &ParseLimits::default()).unwrap();
-        assert_eq!(p.report.rejected, 1);
+        assert_eq!(count(&p.report, RejectReason::InvalidEncoding), 1);
+    }
+
+    #[test]
+    fn duplicates_are_rejected_first_wins() {
+        let mut b = load("instruments_good.csv");
+        // same key, new token; new key, same token
+        b.extend_from_slice(b"2001,4,TESTEQ,OTHER,0,,0,0.05,1,EQ,NSE,NSE\n");
+        b.extend_from_slice(b"1001,4,NEWSYM,OTHER,0,,0,0.05,1,EQ,NSE,NSE\n");
+        let p = parse_instruments(&b, &ParseLimits::default()).unwrap();
+        assert_eq!((p.report.accepted, p.report.rejected), (5, 2));
+        assert_eq!(count(&p.report, RejectReason::Duplicate), 2);
+        assert_eq!(p.instruments[0].name, "TEST EQUITY");
+    }
+
+    #[test]
+    fn same_symbol_on_another_exchange_is_not_a_duplicate() {
+        let mut b = load("instruments_good.csv");
+        b.extend_from_slice(b"2001,4,TESTEQ,TEST EQUITY,0,,0,0.05,1,EQ,BSE,BSE\n");
+        let p = parse_instruments(&b, &ParseLimits::default()).unwrap();
+        assert_eq!(p.report.accepted, 6);
+    }
+
+    #[test]
+    fn empty_exchange_or_type_is_missing_field() {
+        let mut b = load("instruments_good.csv");
+        b.extend_from_slice(b"2001,4,A,A,0,,0,0.05,1,EQ,NSE,\n");
+        b.extend_from_slice(b"2002,5,B,B,0,,0,0.05,1,,NSE,NSE\n");
+        let p = parse_instruments(&b, &ParseLimits::default()).unwrap();
+        assert_eq!(count(&p.report, RejectReason::MissingField), 2);
+    }
+
+    #[test]
+    fn missing_trailing_newline_rejects_last_row_cut_in_last_column() {
+        let all = load("instruments_good.csv");
+        let cut = &all[..all.len() - 2]; // "...,NSE" -> "...,NS", no newline
+        let p = parse_instruments(cut, &ParseLimits::default()).unwrap();
+        assert_eq!((p.report.accepted, p.report.rejected), (4, 1));
+        assert_eq!(count(&p.report, RejectReason::Truncated), 1);
     }
 
     #[test]

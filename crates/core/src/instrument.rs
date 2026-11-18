@@ -174,6 +174,12 @@ pub enum RejectReason {
     InvalidStrike,
     MissingField,
     FieldTooLong,
+    /// Same `(exchange, tradingsymbol)` or instrument token seen earlier in the file.
+    Duplicate,
+    /// Invalid UTF-8 in a field, or an unreadable csv record.
+    InvalidEncoding,
+    /// The input ended mid-record (no trailing newline), so the last row is untrusted.
+    Truncated,
 }
 
 /// Counts of rows kept and rejected by one parse; rows are never logged, only counted.
