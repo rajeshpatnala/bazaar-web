@@ -3,6 +3,7 @@ on:
   pull_request:
   push:
     branches: [main, develop]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -95,9 +96,11 @@ jobs:
         run: pnpm e2e
 
   test-macos:
-    # macOS runners queue for a long time and PR runs were cancelled before starting; the Linux `test` job is the
-    # PR test gate, so macOS (the owner's platform, compiles the Keychain store) runs only after merge on develop/main.
-    if: github.event_name == 'push'
+    # Owner decision (2026-11-18): manual-only. macOS runners queue for a long time, so this job never runs
+    # automatically; the Linux `test` job is the PR gate. It stays in the plan because it compiles the Keychain
+    # store (the owner's platform). Run it from Actions > ci > Run workflow. To re-enable it after merges,
+    # restore the push condition: if: github.event_name == 'push'.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
