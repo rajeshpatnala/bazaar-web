@@ -1,0 +1,3 @@
+schema_version = 1
+placeholder = true
+source = "synthetic fixture: placeholder file"

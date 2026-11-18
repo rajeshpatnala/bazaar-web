@@ -35,6 +35,7 @@ Owner area: Cargo.toml, crates/{core,server,cli,...stubs}, config/, fixtures/con
 - `calendar.toml` and `charges.toml` will hold no market data until F2; no WebSocket, no store, cli is a stub, no CI workflow.
 
 ## Deferred
+- CR-F1-3 / SEC-F1-1: `[hard_limits]` live in the owner-editable `config/risk.toml` (owner decision: file-only). The DecisionGate feature adds an enforced check so a raised ceiling cannot slip through.
 - CR-F1-1: slice 9 reverts the workspace cargo lint allows `unused_dependencies` and `unused_workspace_dependencies` (Cargo.toml `[workspace.lints.cargo]`).
 
 ## History

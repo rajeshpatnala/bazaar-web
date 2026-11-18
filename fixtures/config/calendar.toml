@@ -1,0 +1,124 @@
+# Fictional calendar: every time, date and holiday below is made up so that no test depends on a
+# real circular. Weekdays were checked against the 2026 calendar when this file was written.
+schema_version = 1
+verified_on = "2026-01-05"
+source = "synthetic fixture, not a circular"
+covered_years = [2026]
+
+# Equity, non-F&O cash: pre-open then normal, no closing auction.
+[[session]]
+segment = "equity"
+applies_to = "cash_non_fno"
+phase = "pre_open"
+start = "09:40"
+end = "10:00"
+effective_from = "2020-01-01"
+source = "synthetic fixture"
+
+[[session]]
+segment = "equity"
+applies_to = "cash_non_fno"
+phase = "normal"
+start = "10:00"
+end = "14:00"
+effective_from = "2020-01-01"
+source = "synthetic fixture"
+
+# Equity, F&O stock: same normal window plus a closing auction that has a regime change.
+[[session]]
+segment = "equity"
+applies_to = "cash_fno"
+phase = "normal"
+start = "10:00"
+end = "14:00"
+effective_from = "2020-01-01"
+source = "synthetic fixture"
+
+[[session]]
+segment = "equity"
+applies_to = "cash_fno"
+phase = "closing_auction"
+start = "14:00"
+end = "14:20"
+effective_from = "2020-01-01"
+effective_to = "2026-06-30"
+source = "synthetic fixture"
+
+[[session]]
+segment = "equity"
+applies_to = "cash_fno"
+phase = "closing_auction"
+start = "14:00"
+end = "14:30"
+effective_from = "2026-07-01"
+source = "synthetic fixture"
+
+# Derivatives: one window for every derivative kind, plus an earlier end for expiring index contracts.
+[[session]]
+segment = "equity_derivatives"
+applies_to = "derivative"
+phase = "normal"
+start = "10:00"
+end = "14:30"
+effective_from = "2020-01-01"
+source = "synthetic fixture"
+
+[[session]]
+segment = "equity_derivatives"
+applies_to = "derivative_expiring_index"
+phase = "normal"
+start = "10:00"
+end = "14:10"
+effective_from = "2020-01-01"
+source = "synthetic fixture"
+
+# Wildcard row: applies_to = "all" covers every instrument kind of the segment.
+[[session]]
+segment = "currency"
+applies_to = "all"
+phase = "normal"
+start = "09:00"
+end = "16:00"
+effective_from = "2020-01-01"
+source = "synthetic fixture"
+
+# A Thursday holiday for equity and its derivatives (expiry shift case).
+[[holiday]]
+date = "2026-03-12"
+segments = ["equity", "equity_derivatives"]
+kind = "trading"
+name = "Fictional Thursday holiday"
+
+# A Monday holiday for equity only: the currency segment stays open.
+[[holiday]]
+date = "2026-06-15"
+segments = ["equity"]
+kind = "trading"
+name = "Fictional equity-only holiday"
+
+# A clearing holiday does not close trading.
+[[holiday]]
+date = "2026-04-02"
+segments = ["equity"]
+kind = "clearing"
+name = "Fictional clearing holiday"
+
+# A Saturday special session with live data.
+[[special_session]]
+date = "2026-11-07"
+segments = ["equity", "equity_derivatives"]
+kind = "muhurat"
+start = "18:00"
+end = "19:00"
+live_data = true
+source = "synthetic fixture"
+
+# A Saturday mock session: never feeds analytics.
+[[special_session]]
+date = "2026-05-02"
+segments = ["equity"]
+kind = "mock"
+start = "11:00"
+end = "12:00"
+live_data = false
+source = "synthetic fixture"

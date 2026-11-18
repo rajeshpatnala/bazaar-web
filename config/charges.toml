@@ -1,0 +1,5 @@
+# charges.toml: placeholder. It holds no data and is never reported as fresh (no verified_on on purpose).
+# Replace it with real, dated, sourced content and remove `placeholder`.
+schema_version = 1
+placeholder = true
+source = "placeholder: no data yet; to be filled from official NSE/Zerodha sources by the charges feature (F2, bz-backtest-risk)"
