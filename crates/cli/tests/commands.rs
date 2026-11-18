@@ -174,3 +174,16 @@ async fn data_dir_is_created_owner_only() {
     let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o700);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn existing_data_dir_keeps_its_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    import(tmp.path(), &good(), &clock(2026, 1, 6))
+        .await
+        .unwrap();
+    let mode = std::fs::metadata(tmp.path()).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o755);
+}

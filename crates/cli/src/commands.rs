@@ -50,17 +50,19 @@ pub struct ImportSummary {
     pub written: u64,
 }
 
-/// Create `dir` (and parents) owner-only (0700 on unix) and tighten an existing one.
+/// Make sure `dir` exists. A directory this call creates (with its new parents) is owner-only
+/// (0700 on unix); an existing, user-chosen directory is left exactly as it is.
 fn ensure_data_dir(dir: &Path) -> Result<(), CommandError> {
+    if dir.is_dir() {
+        return Ok(());
+    }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(dir)
-            .map_err(|_| CommandError::DataDir)?;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
             .map_err(|_| CommandError::DataDir)?;
     }
     #[cfg(not(unix))]
@@ -112,6 +114,7 @@ pub async fn import_instruments(
     if parsed.instruments.is_empty() {
         return Err(CommandError::NoValidRows);
     }
+    // Defence in depth: the parser enforces the same cap; this guards the single store transaction.
     if parsed.instruments.len() > limits.max_rows {
         return Err(CommandError::Parse);
     }
