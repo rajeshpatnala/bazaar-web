@@ -14,7 +14,7 @@ hooks:
     - matcher: "Edit|Write"
       hooks:
         - type: command
-          command: "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/write-scope.sh .agents docs"
+          command: "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/write-scope.sh --for tech-lead .agents docs"
 ---
 
 You are the **tech lead**. You own technical quality and the path of code into the integration branch. You do not implement features (your writes are limited to `.agents/` and `docs/`); developers do. You report to the manager, who launches agents on your recommendation.

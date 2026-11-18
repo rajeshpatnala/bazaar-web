@@ -5,6 +5,7 @@ Filled 2026-11-18 with the owner. Stack and layering: `bz-repo-structure`, `bz-a
 
 ## Purpose
 Bazaar is a personal, single-user trading assistant for Indian equities and F&O, running on the owner's Mac.
+Scope: NSE/BSE cash equity now (intraday and swing trading); F&O is a later phase (design must not block it).
 It scans the market, produces rule-based recommendations with plain-English "Why?" panels, backtests strategies
 (Indian cost model), runs a paper account by default, and routes any order through the DecisionGate and an explicit
 user approval. There is no "place order" endpoint. Not investment advice; the disclaimer stays visible.
@@ -24,6 +25,9 @@ errors, utoipa OpenAPI -> generated TS types) plus a WebSocket feed. Auth: launc
 
 ## Integrations
 - Zerodha Kite Connect (REST + WebSocket); secrets in the macOS Keychain (env fallback), never in the repo.
+- TradingView: charting only - TradingView widgets/chart links in the UI alongside our own lightweight-charts. No scraping
+  and no data extraction from TradingView; any inbound alert/webhook idea needs the owner's approval first.
+  Zerodha (Kite) stays the only data and broker source.
 - NSE/BSE official bhavcopy downloads. No scraping. Live broker crate only behind the `live-trading` feature (never default).
 
 ## Input data / parsing
@@ -32,6 +36,7 @@ Kite JSON and binary tick frames; bhavcopy CSV/ZIP; instrument master CSV; Parqu
 logged and skipped, never silently repaired; stale data blocks recommendations.
 
 ## Non-functional targets
+All targets below are configurable in `config/*.toml` (never hardcoded), with `source`/`verified_on` where applicable.
 - Tick to UI < 250 ms p95; data marked stale after 5 s with no tick in market hours.
 - Full-universe scan < 60 s.
 - Laptop sleep/wake: catch-up with no candle gaps.

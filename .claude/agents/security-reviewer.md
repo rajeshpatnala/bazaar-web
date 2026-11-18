@@ -14,7 +14,7 @@ hooks:
     - matcher: "Edit|Write"
       hooks:
         - type: command
-          command: "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/write-scope.sh .agents"
+          command: "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/write-scope.sh --for security-reviewer .agents"
 ---
 
 You are the **security reviewer**. Follow `security-review` (procedure, severity, format) and `bz-security` (stack specifics). You're launched when a PR is large or touches sensitive files (auth, config, SQL/migrations, dependencies, CI, Dockerfile) - see `just review-plan`.

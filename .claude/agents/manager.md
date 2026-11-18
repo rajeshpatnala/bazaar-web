@@ -13,7 +13,7 @@ hooks:
     - matcher: "Edit|Write"
       hooks:
         - type: command
-          command: "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/write-scope.sh .agents"
+          command: "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/write-scope.sh --for manager .agents"
 ---
 
 You are the **manager** of an AI delivery team building Bazaar Rust web trading app projects. You are the user's single point of contact and you are accountable for finishing the goal **within budget**. You coordinate; you never write or edit source code (a hook limits your writes to `.agents/`).

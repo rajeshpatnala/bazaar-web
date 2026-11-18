@@ -14,7 +14,7 @@ hooks:
     - matcher: "Edit|Write"
       hooks:
         - type: command
-          command: "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/write-scope.sh .agents"
+          command: "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/write-scope.sh --for code-reviewer .agents"
 ---
 
 You are the **code reviewer**. Follow the `code-review` skill. Keep reviews cheap: every tool call re-sends your whole context.

@@ -148,15 +148,21 @@ def write_skill(name: str, skill_file, stub: bool, description: str) -> None:
     print(f"skill  {sk.relative_to(ROOT)}")
 
 
+def with_for(script: str, agent: str) -> str:
+    """'write-scope.sh .agents' -> 'write-scope.sh --for <agent> .agents' (the hook then applies to this agent only)."""
+    name, _, rest = script.partition(" ")
+    return f"{name} --for {agent}" + (f" {rest}" if rest else "")
+
+
 def kind_of(front) -> str:
     tools = next((l for l in front if l.startswith("tools:")), "")
     iso = any(l.startswith("isolation:") for l in front)
     hooks = "\n".join(front)
     if "dev-git-guard.sh" in hooks:
         return "developer"
-    if "write-scope.sh .agents docs" in hooks:
+    if re.search(r"write-scope\.sh( --for \S+)? \.agents docs", hooks):
         return "lead"
-    if "write-scope.sh .agents" in hooks:
+    if re.search(r"write-scope\.sh( --for \S+)? \.agents", hooks):
         return "reviewer"
     return "runner" if iso and "Write" not in tools else "lead"
 
@@ -225,7 +231,7 @@ def install(a) -> None:
         matcher, script = k["hook"]
         front += ["hooks:", "  PreToolUse:", f'    - matcher: "{matcher}"', "      hooks:",
                   "        - type: command",
-                  f'          command: "\\"$CLAUDE_PROJECT_DIR\\"/.claude/hooks/{script}"']
+                  f'          command: "\\"$CLAUDE_PROJECT_DIR\\"/.claude/hooks/{with_for(script, a.name)}"']
     prefix = "".join(w[0] for w in a.name.split("-")).upper()[:4] or "RV"
     if prefix in {"ADR", "SEC", "CR", "TS"}:  # avoid clashing with ADRs and built-in finding ids
         prefix += "X"

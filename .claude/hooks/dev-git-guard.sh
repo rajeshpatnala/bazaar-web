@@ -3,6 +3,13 @@
 # no direct commits on main. Only the tech lead merges.
 input=$(cat)
 command -v jq >/dev/null 2>&1 || { echo "dev-git-guard: jq is required" >&2; exit 2; }
+# Agent-attached hooks can also fire for tool calls of OTHER agents (e.g. the manager's hooks while it runs as the
+# main session, or two sub-agents running at once). `--for <agent>` makes this hook apply only to that agent:
+# when the call comes from a different agent (hook input `agent_type`), it is not ours to judge.
+for_agent=""
+if [ "${1:-}" = "--for" ]; then for_agent="${2:-}"; shift 2; fi
+caller=$(jq -r '.agent_type // empty' <<<"$input" 2>/dev/null)
+if [ -n "$for_agent" ] && [ -n "$caller" ] && [ "$caller" != "$for_agent" ]; then exit 0; fi
 cmd=$(jq -r '.tool_input.command // ""' <<<"$input")
 cwd=$(jq -r '.cwd // empty' <<<"$input")
 [ -n "$cwd" ] && cd "$cwd" 2>/dev/null

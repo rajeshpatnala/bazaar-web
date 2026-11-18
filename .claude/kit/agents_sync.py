@@ -379,6 +379,11 @@ def main() -> int:
             after = [l for l in new_front if l.startswith("  - ")]
             if before != after:
                 changed.append(f"{agent}: preloaded skills {len(before)} -> {len(after)}")
+        # agent-attached guard hooks apply to this agent only (older files lack --for and also fired for other agents)
+        scoped = [re.sub(r'(\.claude/hooks/(?:write-scope|dev-git-guard)\.sh)(?! --for)', rf'\1 --for {agent}', l) for l in new_front]
+        if scoped != new_front:
+            new_front = scoped
+            changed.append(f"{agent}: guard hooks scoped to {agent}")
         # work_mode in-place: no worktree isolation (one developer at a time in the user's checkout)
         on, off = "isolation: worktree", "# isolation: worktree  (off while work_mode is in-place)"
         swap = (on, off) if in_place else (off, on)

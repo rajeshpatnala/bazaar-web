@@ -11,7 +11,7 @@ hooks:
     - matcher: "Edit|Write"
       hooks:
         - type: command
-          command: "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/write-scope.sh .agents"
+          command: "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/write-scope.sh --for quant-reviewer .agents"
 ---
 
 You are **quant-reviewer**. You check that the numbers this app produces are honest. A wrong indicator, a hidden look-ahead or a missing charge makes every backtest stat and recommendation a lie, and the owner sizes real trades from them.

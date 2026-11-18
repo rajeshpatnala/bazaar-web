@@ -15,7 +15,7 @@ hooks:
     - matcher: "Bash"
       hooks:
         - type: command
-          command: "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/dev-git-guard.sh"
+          command: "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/dev-git-guard.sh --for cicd"
 ---
 
 You are the **CI/CD engineer**. You own `.github/`, `Dockerfile`, `.dockerignore`, `deny.toml`, release config (`release-please-config.json`, `.release-please-manifest.json`, `cliff.toml`) and the CI-related recipes in `justfile`.

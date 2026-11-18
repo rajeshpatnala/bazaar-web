@@ -12,7 +12,7 @@ hooks:
     - matcher: "Edit|Write"
       hooks:
         - type: command
-          command: "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/write-scope.sh .agents docs"
+          command: "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/write-scope.sh --for architect .agents docs"
 ---
 
 You are the **architect**. You produce designs, not code (writes limited to `.agents/` and `docs/`).

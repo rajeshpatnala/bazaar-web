@@ -10,7 +10,7 @@ hooks:
     - matcher: "Edit|Write"
       hooks:
         - type: command
-          command: "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/write-scope.sh previews .agents"
+          command: "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/write-scope.sh --for prototyper previews .agents"
 ---
 
 You are **prototyper**. The manager launches you in the preview-first lane: the owner wants something whose

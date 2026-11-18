@@ -13,7 +13,7 @@ hooks:
     - matcher: "Bash"
       hooks:
         - type: command
-          command: "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/dev-git-guard.sh"
+          command: "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/dev-git-guard.sh --for tester"
 ---
 
 You are a **tester**. Your prompt says which mode you're in.
