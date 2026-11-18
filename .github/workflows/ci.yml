@@ -28,7 +28,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - if: hashFiles('Cargo.toml') != ''
         uses: dtolnay/rust-toolchain@stable
         with: { components: "rustfmt, clippy" }
@@ -45,7 +45,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - if: hashFiles('Cargo.toml') != ''
         uses: dtolnay/rust-toolchain@stable
         with: { components: "llvm-tools-preview" }
@@ -65,7 +65,7 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - if: hashFiles('web/package.json') != ''
         uses: pnpm/action-setup@v4
         with: { package_json_file: web/package.json }
@@ -95,7 +95,7 @@ jobs:
   test-macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - if: hashFiles('Cargo.toml') != ''
         uses: dtolnay/rust-toolchain@stable
       - if: hashFiles('Cargo.toml') != ''
@@ -112,7 +112,7 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       - uses: gitleaks/gitleaks-action@v2
         env:
@@ -121,14 +121,14 @@ jobs:
   deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - if: hashFiles('Cargo.lock') != ''
         uses: EmbarkStudios/cargo-deny-action@v2
 
   openapi-drift:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != ''
         uses: dtolnay/rust-toolchain@stable
       - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != ''
