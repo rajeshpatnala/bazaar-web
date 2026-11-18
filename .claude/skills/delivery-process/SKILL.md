@@ -13,8 +13,7 @@ version and prints a line only when something is wrong.
 - Branch missing: ask the user which branch their team uses (set it in `team.md` -> Branches) or run `just setup-branches` with their OK.
 - Worktrees fail: fix the cause, or `just work-mode in-place` with the user's OK.
 - No `gh`/remote: reviews use `--branch`/`--diff`, merges use `just merge --branch <b>`.
-- **Never swap a kit agent for a general-purpose agent** to get around a failure: that drops its skills, gate hook,
-  git guard and memory. Stop and tell the user instead.
+- **Never swap a kit agent for a general-purpose agent** to get around a failure (drops skills, hooks, memory): stop and tell the user.
 
 | Work mode | Developers | Reviews and merge |
 |---|---|---|
@@ -62,6 +61,9 @@ Before planning, tell the user the lane, the size and a token estimate in one li
 - In `in-place` mode L work runs one slice at a time; prefer M-style sequencing with the same developer.
 - If a plan's estimate is more than ~3x what the visible change needs, the tech lead shrinks it or justifies it.
 - When in doubt between two sizes, pick the smaller and grow if needed.
+- **Light lane:** a change confined to docs and records (`docs/`, markdown, `.agents/` records; never agent prompts, skills, CLAUDE.md, owner rules, team settings, scripts, source, CI, deps, auth, migrations, Dockerfile)
+  needs no security review and no tester; code review per `light_lane` (default `skip`; `quick` = code review only).
+  merge-check still checks title and CI. Review effort scales with the risk of the paths touched.
 
 ### 2b. Preview-first lane
 
@@ -87,16 +89,22 @@ Skip it only when the owner says "just build it" or the look is already fixed by
 4 Build     L: one developer per independent slice at once (worktrees mode); M: one developer,
             continued between steps; tester writes the T2 plan in parallel; cicd if needed
 5 Review    as each PR/branch is handed off: `just review-plan` -> the reviewers it lists, in parallel
-            (code always; security/tests by size and sensitivity). In-place: `--diff`/`--branch`
+            (by risk of the paths; each with its output path). In-place: `--diff`/`--branch`
 6 Triage    tech lead: fix now / defer / reject. Deferred items go into the feature record
 7 Fix loop  continue the SAME developer with finding ids; re-check by the same reviewers only;
             max rounds from team.md, then ask the user
 8 Verify    after the last slice: ONE tester runs T2 for the whole feature (§4)
-9 Merge     tech lead: `just merge <pr>` (or `--branch`) only when merge-check passes; pull the
-            integration branch; remaining branches rebase
+9 Merge     tech lead: `just ship <pr>` (or `--branch b --title T`): waits for CI, merge-check, merges,
+            pulls; it refuses unless merge-check passes. If ship exits 1 with "merged; <integ> not updated" the PR IS merged and
+            only the sync failed: do not re-run ship, run `git switch "$(just base)" && git pull --ff-only`.
+            Remaining branches rebase
 10 Release  user asks -> promotion PR -> `just promote` (asks the user) -> release PR -> tag
 11 Report   §11; L work adds a 5-line retrospective
 ```
+
+**Plan reviews up front:** run `just review-plan --files a,b,c` on the planned file list before dispatch, so required
+reviews and their output paths are known in advance. **One push per round:** every push re-runs CI and voids "green".
+The manager's main checkout stays on the integration branch; feature branches live in agents' worktrees/branches.
 
 ### Slicing (L only)
 - A slice is independently buildable, testable and mergeable, owns distinct files, <= `max_slice_changed_lines`.
@@ -134,14 +142,19 @@ Branch: just new-branch feat/<id>-<slug>    (in-place: one developer at a time)
 Scope: files/modules you may change
 Acceptance: <= 3 bullets
 Verify: T0 | T0+T1    (never T2 in a slice)
-Return: handoff <= 15 lines, with "Where to look"
+Output: <path printed by `just review-plan`> (reviewers only; file header names branch/PR)
+Return: verdict, blockers, file path; handoff <= 15 lines, with "Where to look"
 ```
-Owner rules and work mode are added to every agent by a hook - don't retype them. Don't restate skills or CLAUDE.md:
-agents already have them, and prompts that repeat them pay twice. Point to paths, never paste content.
+Owner rules and work mode are added to every agent by a hook; agents already have skills and CLAUDE.md. Point to
+paths, never paste content.
 
-**Reuse developers.** Continue the same developer (SendMessage to its id) for fix rounds **and** for the next step
-or slice in the same area when work runs one after another. A fresh launch is only for parallel work or a
-different area: each cold start re-reads the project and its skills (~15-25% of a slice).
+**Reuse over cold start.** Continue an existing agent (SendMessage to its id) for fix rounds, the next step or slice in
+the same area, and command-only steps (`just ship`, rebase). A fresh launch is only for parallel work or a different
+area: a cold start re-reads the project and its skills (~15-25% of a slice).
+
+**One channel per message.** A hand-back is read once, from its completion; the manager doesn't relay or restate it,
+and doesn't re-read files it just wrote or merge-check output it already holds. Handoffs carry verdict, blockers and
+a file path; details live in files.
 
 **Checkpoints.** With `checkpoint_commits | yes`, developers commit on their own branch whenever T0 passes.
 "Undo that step" is then `git revert <sha>` on that branch, not a new agent run.
@@ -184,8 +197,10 @@ confirms; one developer writes the records on `docs/F0-feature-records` (code re
 | minor/nit | same fix round if cheap, else defer |
 | developer disputes | tech lead decides in the round, reason in the findings file |
 
-**Status is checked, never remembered:** "green / ready / CI passed" only from `just merge-check` run just now.
-Every PR or branch gets its reviews before merge, including CI and fix-round updates.
+**Status is checked, never remembered:** "green / ready / CI passed" only from `just merge-check` (or `ship`) run just
+now; `--wait` polls CI in the script. Every PR or branch gets the reviews `review-plan` lists before merge, including
+fix-round updates (light lane: title and CI only unless `light_lane` says `quick`). `just status` = preflight, open
+board rows and merge-check per open PR in one call.
 
 ## 9. Budget (measured automatically)
 
@@ -195,19 +210,25 @@ Every PR or branch gets its reviews before merge, including CI and fix-round upd
 - Before a batch: `just budget-check <id> dev-data:2 code-reviewer:2`. OK -> go. WARN -> go and tell the user.
   OVER LIMIT -> ask the user (raise, fewer agents, lower effort, smaller scope).
 - `just budget` shows OVER AGENT CAP runs; give that agent a smaller next scope or ask to raise its cap.
-- Cheapest levers: right size (§2a), previews before building taste work, reuse developers, T2 once, one
-  `review-pack` per review, no repeated content in prompts.
+- **Efficiency principles:**
+  - Cost scales with risk: size (§2a), light lane, reviews by path sensitivity, T2 once.
+  - Scripts poll, agents think: `--wait`, `ship`, `status` replace agent turns.
+  - Reuse over cold start; one `review-pack` per review.
+  - Plan reviews before dispatch; batch pushes (one CI run per round).
+  - One channel per message: no relays, restating or re-reading; point to paths.
+  - Read narrowly: `just status`, codemap, diffs; previews before taste work.
 - Report as: `agents X (measured) + manager Y` from `just budget-report <id>`.
 
 ## 10. Code map, approvals, hiring
 
-- The codemap refreshes at session start and after merges/pulls/pushes/branch changes; `just codemap` forces it. After a merge: `git switch "$(just base)" && git pull --ff-only`.
+- The codemap refreshes at session start and after merges/pulls/pushes/branch changes; `just codemap` forces it. `just ship` pulls the integration branch after a merge (else `git switch "$(just base)" && git pull --ff-only`).
 - Architecture changes update `docs/architecture.md` (architect) and `.agents/decisions.md` (tech lead) in the same feature.
 - Ask the user before (team.md -> Approvals): starting a plan (if enabled); building look-and-feel work without a picked preview (if enabled); every promotion (always); new dependencies/stores; going over budget (always); real data, credentials, production, deleting data (always).
 - Hiring: follow `agent-hiring`. New agents are found by their descriptions after the next session start.
 
 ## 11. Report to the user (manager)
 
+Fixed compact format, status line first:
 ```
 ## <id> - <done | blocked | needs approval>
 Delivered: PRs/branches, what changed (3-6 bullets)

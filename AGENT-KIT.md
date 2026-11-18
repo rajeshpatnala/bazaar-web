@@ -83,7 +83,7 @@ You ──▶ manager (main session: plans, launches, tracks board + budget, rep
 - **Integration branch** (default `develop`, set in `team.md` -> Branches; the manager asks you on first run): every work branch starts here and every feature PR targets it.
 - **Reviews happen on the PR, before merging.** Code review, security review and testing start on each PR as soon as its author hands off, including CI/infra PRs. Verdicts go to `.agents/reviews/<feature>/`.
 - **`just merge-check <pr>`** is the gate and the only source for "it's green". It checks the target branch, the Conventional Commit title, every GitHub CI check, and the reviewers' verdicts (no open blockers).
-- **The tech lead merges into the integration branch** with `just merge <pr>`, which refuses if the merge-check fails. A hook blocks any raw `gh pr merge` that skips the check, and blocks all agents from pushing or committing to the integration or release branch.
+- **The tech lead merges into the integration branch** with `just ship <pr>` (waits for CI, then `just merge`, then pulls), which refuses if the merge-check fails. A hook blocks any raw `gh pr merge` that skips the check, and blocks all agents from pushing or committing to the integration or release branch.
 - **The release branch (`main`) moves only when you approve.** Promotion and release PRs go through `just promote <pr>`, and Claude Code asks you for permission every time.
 - **Branch protection** is the real safeguard on GitHub: `just protect-branches` shows the settings (PR required, CI checks required, no force-push) and applies them with `--apply` after you approve. Solo repos keep 0 required approvals, because GitHub doesn't let you approve your own PRs. Your approval is the Claude Code prompt instead.
 

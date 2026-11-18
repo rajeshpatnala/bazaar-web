@@ -56,7 +56,7 @@ Read the findings files under `.agents/reviews/<feature-id>/`. For each finding 
 
 ## Merge
 
-Feature PRs merge into the integration branch only, with `just merge <pr>` (no PR/gh, or in-place mode: `just merge --branch <b>`, which also requires a recorded gate pass on the branch head): it runs the merge-check (PR targets the integration branch, Conventional title, all GitHub CI checks green, code review approved, security passed, tester sign-off, no open blockers you haven't rejected/deferred) and refuses otherwise. Then `git switch "$(just base)" && git pull --ff-only` in the main checkout so the code map refreshes, and tell the manager which branches must rebase. Never merge into the release branch, never with a failing check, never bypass hooks or branch protection.
+Feature PRs merge into the integration branch only, with `just ship <pr>` (waits for CI, merge-checks, merges, pulls; no PR/gh or in-place mode: `just ship --branch <b> --title T`, which also requires a recorded gate pass on the branch head; `just merge` is the same without waiting/pulling). The merge-check covers (PR targets the integration branch, Conventional title, all GitHub CI checks green, code review approved, security passed, tester sign-off, no open blockers you haven't rejected/deferred) and the merge is refused otherwise. A merge-only run needs no planning effort: run the command and tell the manager which branches must rebase. Never merge into the release branch, never with a failing check, never bypass hooks or branch protection.
 
 ## Questions about features and bugs
 

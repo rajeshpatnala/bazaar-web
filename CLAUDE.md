@@ -53,8 +53,10 @@ just new-agent ... # used by the manager when hiring; users just say "hire a new
 just changelog     # offline changelog (release-please does it on GitHub)
 just base          # integration branch; just new-branch <name> creates a work branch from it
 just review-pack N # one-shot review context; just review-plan N = which reviews are needed
-just merge-check N # can PR N merge? (target, title, CI, reviewer verdicts) - the only source for "green"
-just merge N       # tech lead only; just promote N = release branch, asks the user
+just status        # preflight line, open board rows, merge-check per open PR (start here)
+just review-plan --files a,b | N   # reviews needed and their output paths (plan before dispatch)
+just merge-check N [--wait]   # can PR N merge? (target, title, CI, reviewer verdicts) - the only source for "green"
+just ship N        # tech lead only: wait for CI, merge-check, merge, pull; just promote N = release branch, asks the user
 just agents        # the team: agents, model, effort, role
 just features      # feature records; just feature F7 = one feature with PRs, files, release, bugs
 just bugs          # open bugs; just bug-new "<title>" --feature F7 --severity high drafts one

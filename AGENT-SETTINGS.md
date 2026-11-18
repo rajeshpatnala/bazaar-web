@@ -131,6 +131,7 @@ If one of these seems to have no effect, it may need to be set in your shell bef
 ### Review policy
 | Setting | Default | Values | What it does |
 |---|---|---|---|
+| `light_lane` | `skip` | `skip`, `quick`, `off` | Docs and records only (never agent prompts, skills, CLAUDE.md, owner rules, team settings, scripts, CI): `skip` = no reviews (title and CI still checked), `quick` = code review only, `off` = normal policy |
 | `security_review` | `sensitive-or-large` | `always`, `sensitive-or-large` | When a security review runs (sensitive = auth, config, SQL/migrations, dependencies, CI, Dockerfile) |
 | `tester_review` | `behaviour-change` | `always`, `behaviour-change`, `large` | When a tester runs |
 | `large_pr_lines` | 150 | number | Size at which a PR counts as large |

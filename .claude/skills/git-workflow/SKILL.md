@@ -24,7 +24,7 @@ Both names live in `.agents/team.md` -> Branches. Nobody pushes to the integrati
 | Developers, cicd | create work branches, commit, push their branch, open/update PRs | merge, push to protected branches, force-push others' branches |
 | Testers | push test commits to the work branch they're assigned | merge, push to protected branches |
 | Reviewers (code, security) | read the PR diff, write findings files | commit, push, merge |
-| Tech lead | `just merge <pr>` into the integration branch; open promotion PRs; revert via PR | merge into the release branch, merge without a passing merge-check |
+| Tech lead | `just ship <pr>` (= `just merge` + wait for CI + pull) into the integration branch; open promotion PRs; revert via PR | merge into the release branch, merge without a passing merge-check |
 | Manager | read git/PR state, run `just merge-check` to report status | commit code, merge |
 | User | approve `just promote` prompts, approve on GitHub | - |
 
@@ -91,7 +91,8 @@ Reviews happen **on the PR, before merging**: code reviewer, security reviewer a
 
 ```bash
 just merge-check <pr>        # status for anyone (manager reports this, never memory)
-just merge <pr>              # tech lead: runs merge-check, then squash-merges and deletes the branch
+just merge-check <pr> --wait # polls CI in the script; no checks reported yet = pending
+just ship <pr>               # tech lead: wait for CI, merge-check, squash-merge, delete branch, pull base
 # local fallback without GitHub:
 just merge --branch feat/F12-orders --title "feat(api): orders endpoint"
 ```
