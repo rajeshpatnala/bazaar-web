@@ -35,7 +35,7 @@ Owner area: Cargo.toml, crates/{core,server,cli,...stubs}, config/, fixtures/con
 - `calendar.toml` and `charges.toml` will hold no market data until F2; no WebSocket, no store, cli is a stub, no CI workflow.
 
 ## Deferred
--
+- CR-F1-1: slice 9 reverts the workspace cargo lint allows `unused_dependencies` and `unused_workspace_dependencies` (Cargo.toml `[workspace.lints.cargo]`).
 
 ## History
 - 2026-11-18: slice 0 scaffold.
