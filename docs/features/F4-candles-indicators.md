@@ -29,6 +29,7 @@ Owner area: `crates/indicators`, `core/src/candle.rs`, `crates/data/src/bars.rs`
 
 ## Deferred
 - TA-Lib/pandas-ta reference CSVs (owner or tester with the tools); F4b indicators.
+- CR-36-3: a test that loads `fixtures/indicators/synthetic_60.csv` and builds `Candle`s (validity); add in the first slice that consumes it.
 - Product question for the owner: weekly/monthly bars (not Kite intervals; out of scope).
 
 ## History
