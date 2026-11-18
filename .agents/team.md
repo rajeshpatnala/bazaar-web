@@ -10,7 +10,7 @@ New agents you hire get their rows here automatically.
 
 | agent | model | effort | max_turns | max_tokens_per_run |
 |---|---|---|---|---|
-| manager | claude-sonnet-5-5 | high | - | - |
+| manager | claude-sonnet-5-5 | medium | - | - |
 | tech-lead | claude-sonnet-5-5 | high | 40 | 200,000 |
 | architect | claude-sonnet-5-5 | high | 30 | 200,000 |
 | dev-data | claude-sonnet-5-5 | medium | 80 | 400,000 |
@@ -130,6 +130,7 @@ Code review runs on every PR. Security review and testing scale with risk so sma
 | require_feature_record | yes |
 | require_bug_record | yes |
 
+| light_lane | skip |
 `security_review`: `always` or `sensitive-or-large` (auth, config, SQL/migrations, dependency/lock files, CI, Dockerfile, or >= large_pr_lines).
 `tester_review`: `always`, `behaviour-change` (feat/fix/perf with >= tester_min_source_lines production lines), or `large`.
 `require_feature_record`: `yes` = a feat/fix/refactor/perf PR for feature F<n> can't merge until `docs/features/F<n>-*.md` exists (on the PR or already merged).

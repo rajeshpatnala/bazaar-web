@@ -55,8 +55,8 @@ new-branch name:
 merge-check pr *args:
     @python3 .claude/kit/kit.py merge-check {{pr}} {{args}}
 
-# review without a PR: just review-pack --diff develop..HEAD (also review-plan / merge-check --branch <b>)
-# which reviews a PR needs (code always; security/tests by size and sensitivity - team.md -> Review policy)
+# review without a PR: just review-pack --diff develop..HEAD (also review-plan / merge-check --branch <b>); merge-check <pr> --wait polls CI
+# which reviews a PR needs and where each goes (by size and sensitivity of paths - team.md -> Review policy); before dispatch: review-plan --files a,b,c
 review-plan pr *args:
     @python3 .claude/kit/kit.py review-plan {{pr}} {{args}}
 
@@ -67,6 +67,14 @@ review-pack pr *args:
 # tech lead: merge-check, then squash-merge a feature PR into the integration branch
 merge pr *args:
     @python3 .claude/kit/kit.py merge {{pr}} {{args}}
+
+# tech lead: wait for CI, merge-check, merge, pull the integration branch - one command (just ship 12; or --branch b --title T)
+ship pr *args:
+    @python3 .claude/kit/kit.py ship {{pr}} {{args}}
+
+# one-screen state: preflight line, open board rows, merge-check line per open PR
+status:
+    @python3 .claude/kit/kit.py status
 
 # promotion/release PR into the release branch - Claude Code asks the user every time
 promote pr:

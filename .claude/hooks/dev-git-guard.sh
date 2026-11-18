@@ -13,7 +13,7 @@ deny() {
 }
 
 grep -Eq 'gh[[:space:]]+pr[[:space:]]+merge' <<<"$cmd" && deny "merging PRs"
-grep -Eq '(just|kit\.py)[[:space:]]+(merge|promote|setup-branches|protect-branches)([[:space:]]|$)' <<<"$cmd" && deny "merging, promoting or changing branch setup (tech lead / user only)"
+grep -Eq '(just|kit\.py)[[:space:]]+(merge|ship|promote|setup-branches|protect-branches)([[:space:]]|$)' <<<"$cmd" && deny "merging, promoting or changing branch setup (tech lead / user only)"
 grep -Eq 'git[[:space:]]+push\b.*([[:space:]]|:)(main|master)([[:space:]]|$)' <<<"$cmd" && deny "pushing to main"
 grep -Eq 'git[[:space:]]+push\b.*[[:space:]](--force|-f)([[:space:]]|$)' <<<"$cmd" && deny "force push (use --force-with-lease on your own branch)"
 
