@@ -5,7 +5,7 @@ use std::future::Future;
 use chrono::NaiveDate;
 use thiserror::Error;
 
-use crate::instrument::{Exchange, Instrument};
+use crate::instrument::{Exchange, Instrument, InstrumentType};
 
 /// Storage failure with a safe, category-only reason: no paths, SQL or row contents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -63,19 +63,25 @@ pub trait InstrumentRepo: Send + Sync {
         tradingsymbol: &str,
     ) -> impl Future<Output = Result<Option<Instrument>, RepoError>> + Send;
 
-    /// Earliest derivative expiry of `underlying` on or after `on_or_after`.
+    /// Earliest expiry on or after `on_or_after` among rows of `exchange` whose `name`
+    /// (the underlying) equals `underlying` (trimmed, case-insensitive) and whose type is
+    /// `kind`. Filtering by `kind` keeps monthly futures apart from option series.
+    ///
+    /// `on_or_after` is a date: the caller passes the calendar's next valid date once the
+    /// session has closed, since the repo has no time of day.
     fn next_expiry(
         &self,
+        exchange: &Exchange,
         underlying: &str,
+        kind: &InstrumentType,
         on_or_after: NaiveDate,
     ) -> impl Future<Output = Result<Option<NaiveDate>, RepoError>> + Send;
 
-    /// True when a cash equity named `tradingsymbol` has a derivative in the master
-    /// (the `cash_fno` eligibility the calendar needs).
-    fn is_cash_fno(
-        &self,
-        tradingsymbol: &str,
-    ) -> impl Future<Output = Result<bool, RepoError>> + Send;
+    /// The `cash_fno` eligibility the calendar needs. Match key: `symbol` (trimmed,
+    /// case-insensitive) is the `tradingsymbol` of a cash `Equity` row AND equals the
+    /// `name` (underlying) of at least one derivative row. Both rows are required, so an
+    /// index (no cash equity row) or a delisted equity (no derivative) is not eligible.
+    fn is_cash_fno(&self, symbol: &str) -> impl Future<Output = Result<bool, RepoError>> + Send;
 
     /// Date of the latest import, `None` for an empty master.
     fn last_fetched_on(&self) -> impl Future<Output = Result<Option<NaiveDate>, RepoError>> + Send;
@@ -124,22 +130,31 @@ mod tests {
         }
         async fn next_expiry(
             &self,
+            e: &Exchange,
             u: &str,
+            k: &InstrumentType,
             from: NaiveDate,
         ) -> Result<Option<NaiveDate>, RepoError> {
             let store = self.rows.lock().map_err(|_| RepoError::Other)?;
             Ok(store
                 .iter()
-                .filter(|r| r.name == u)
+                .filter(|r| &r.exchange == e && &r.instrument_type == k)
+                .filter(|r| r.name.trim().eq_ignore_ascii_case(u.trim()))
                 .filter_map(|r| r.expiry)
                 .filter(|d| *d >= from)
                 .min())
         }
         async fn is_cash_fno(&self, s: &str) -> Result<bool, RepoError> {
             let store = self.rows.lock().map_err(|_| RepoError::Other)?;
-            Ok(store
+            let s = s.trim();
+            let cash = store.iter().any(|r| {
+                r.instrument_type == InstrumentType::Equity
+                    && r.tradingsymbol.eq_ignore_ascii_case(s)
+            });
+            let deriv = store
                 .iter()
-                .any(|r| r.name == s && r.instrument_type.is_derivative()))
+                .any(|r| r.instrument_type.is_derivative() && r.name.eq_ignore_ascii_case(s));
+            Ok(cash && deriv)
         }
         async fn last_fetched_on(&self) -> Result<Option<NaiveDate>, RepoError> {
             Ok(*self.fetched.lock().map_err(|_| RepoError::Other)?)
@@ -182,18 +197,49 @@ mod tests {
     #[test]
     fn port_contract_upsert_is_keyed_and_queries_follow_data() {
         let repo = Fake::default();
-        let rows = [fut("ABC1", d(2026, 1, 29)), fut("ABC2", d(2026, 2, 26))];
+        let mut cash = fut("ABC", d(2026, 1, 1));
+        cash.name = "ABC CORP LTD".into(); // company name differs from the symbol
+        cash.exchange = Exchange::Nse;
+        cash.instrument_type = InstrumentType::Equity;
+        cash.expiry = None;
+        let mut weekly = fut("ABC-W", d(2026, 2, 5));
+        weekly.instrument_type = InstrumentType::Call;
+        weekly.strike = Some(Decimal::new(100, 0));
+        let mut index = fut("NIFTYF", d(2026, 1, 29));
+        index.name = "NIFTY".into(); // no cash row named NIFTY
+        let rows = [
+            fut("ABC1", d(2026, 1, 29)),
+            fut("ABC2", d(2026, 2, 26)),
+            cash,
+            weekly,
+            index,
+        ];
         assert_eq!(block(repo.last_fetched_on()), Ok(None));
         block(repo.upsert_instruments(&rows, d(2026, 1, 5))).unwrap();
         block(repo.upsert_instruments(&rows, d(2026, 1, 6))).unwrap();
-        assert_eq!(repo.rows.lock().unwrap().len(), 2);
+        assert_eq!(repo.rows.lock().unwrap().len(), 5);
         assert_eq!(block(repo.last_fetched_on()), Ok(Some(d(2026, 1, 6))));
+        let nfo = Exchange::Nfo;
+        let fut_k = InstrumentType::Future;
+        // futures skip the weekly option expiry; kind and exchange are filters
         assert_eq!(
-            block(repo.next_expiry("ABC", d(2026, 1, 30))),
+            block(repo.next_expiry(&nfo, "abc", &fut_k, d(2026, 1, 30))),
             Ok(Some(d(2026, 2, 26)))
         );
-        assert_eq!(block(repo.next_expiry("ABC", d(2026, 3, 1))), Ok(None));
-        assert_eq!(block(repo.is_cash_fno("ABC")), Ok(true));
+        assert_eq!(
+            block(repo.next_expiry(&nfo, "ABC", &InstrumentType::Call, d(2026, 1, 30))),
+            Ok(Some(d(2026, 2, 5)))
+        );
+        assert_eq!(
+            block(repo.next_expiry(&nfo, "ABC", &fut_k, d(2026, 3, 1))),
+            Ok(None)
+        );
+        assert_eq!(
+            block(repo.next_expiry(&Exchange::Bfo, "ABC", &fut_k, d(2026, 1, 1))),
+            Ok(None)
+        );
+        assert_eq!(block(repo.is_cash_fno("abc")), Ok(true));
+        assert_eq!(block(repo.is_cash_fno("NIFTY")), Ok(false)); // derivative only
         assert_eq!(block(repo.is_cash_fno("XYZ")), Ok(false));
         assert!(block(repo.get(&Exchange::Nfo, "ABC1")).unwrap().is_some());
         assert!(block(repo.get(&Exchange::Nse, "ABC1")).unwrap().is_none());

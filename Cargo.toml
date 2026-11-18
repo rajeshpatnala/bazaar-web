@@ -41,7 +41,7 @@ subtle = "2.6"
 getrandom = "0.4"
 http-body-util = "0.1"
 
-# reference data (F2, approved by the owner)
+# reference data (F2 set approved by the owner on 2026-11-19; sqlx: sqlite only, no TLS/network drivers)
 sqlx = { version = "0.9", default-features = false, features = ["sqlite", "migrate", "runtime-tokio"] }
 csv = "1.4"
 sha2 = "0.11"

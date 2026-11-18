@@ -17,6 +17,7 @@ Owner area: `config/{calendar,charges}.toml`, `crates/{data,store}`, `core/src/{
 
 ## What was built
 - Slice 0: `core::instrument` (`Instrument`, `InstrumentType`, `Exchange`, `CleaningReport`), `core::ports::InstrumentRepo` + `RepoError`; new workspace deps `sqlx`, `csv`, `sha2`, dev `tempfile` (versions in root `Cargo.toml`).
+- Port contract: `next_expiry(exchange, underlying, kind, on_or_after)` filters by exchange and instrument type; `is_cash_fno(symbol)` needs a cash equity row whose tradingsymbol equals a derivative row's `name`. `Instrument::normalise` (strike 0 to `None` on non-options) then `validate` (expiry/strike by type). The port has no snapshot query yet (slice 4 adds it with the store).
 - Slices 1..7 fill the rest.
 
 ## Decisions

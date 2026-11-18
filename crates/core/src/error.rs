@@ -11,6 +11,12 @@ pub enum DomainError {
     /// Lot size was zero.
     #[error("lot size must be positive")]
     InvalidLotSize,
+    /// A derivative had no expiry, or a non-derivative carried one.
+    #[error("expiry missing or not applicable")]
+    InvalidExpiry,
+    /// An option had no positive strike, or a non-option carried one.
+    #[error("strike missing, not positive, or not applicable")]
+    InvalidStrike,
     /// A price was negative.
     #[error("negative price")]
     NegativePrice,

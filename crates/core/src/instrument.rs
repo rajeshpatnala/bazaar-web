@@ -118,13 +118,45 @@ pub struct Instrument {
 }
 
 impl Instrument {
-    /// Check the invariants the cleaning step enforces: positive tick and lot size.
+    /// Map the source's strike 0 on non-options (futures, equities) to `None`.
+    /// The parser calls this before `validate`.
+    pub fn normalise(&mut self) {
+        let is_option = matches!(
+            self.instrument_type,
+            InstrumentType::Call | InstrumentType::Put
+        );
+        if !is_option && self.strike == Some(Decimal::ZERO) {
+            self.strike = None;
+        }
+    }
+
+    /// Check the invariants the cleaning step enforces: positive tick and lot size, a
+    /// derivative has an expiry (an equity has none), an option has a positive strike and
+    /// nothing else has one. Other types are not checked for expiry or strike.
     pub fn validate(&self) -> Result<(), DomainError> {
         if self.tick_size <= Decimal::ZERO {
             return Err(DomainError::InvalidTick);
         }
         if self.lot_size == 0 {
             return Err(DomainError::InvalidLotSize);
+        }
+        let is_option = matches!(
+            self.instrument_type,
+            InstrumentType::Call | InstrumentType::Put
+        );
+        if self.instrument_type.is_derivative() != self.expiry.is_some()
+            && !matches!(self.instrument_type, InstrumentType::Other(_))
+        {
+            return Err(DomainError::InvalidExpiry);
+        }
+        if !matches!(self.instrument_type, InstrumentType::Other(_)) {
+            let ok = match self.strike {
+                Some(k) => is_option && k > Decimal::ZERO,
+                None => !is_option,
+            };
+            if !ok {
+                return Err(DomainError::InvalidStrike);
+            }
         }
         Ok(())
     }
@@ -138,6 +170,8 @@ pub enum RejectReason {
     NonPositiveLot,
     MalformedNumber,
     MalformedDate,
+    InvalidExpiry,
+    InvalidStrike,
     MissingField,
     FieldTooLong,
 }
@@ -224,6 +258,52 @@ mod tests {
         let mut i = sample();
         i.lot_size = 0;
         assert_eq!(i.validate(), Err(DomainError::InvalidLotSize));
+    }
+
+    fn opt(kind: InstrumentType, strike: Option<Decimal>, expiry: bool) -> Instrument {
+        let mut i = sample();
+        i.instrument_type = kind;
+        i.strike = strike;
+        i.expiry = expiry.then(|| NaiveDate::from_ymd_opt(2026, 1, 29).unwrap());
+        i
+    }
+
+    #[test]
+    fn validate_checks_expiry_and_strike_by_type() {
+        let k = Some(Decimal::new(100, 0));
+        assert_eq!(opt(InstrumentType::Call, k, true).validate(), Ok(()));
+        assert_eq!(opt(InstrumentType::Future, None, true).validate(), Ok(()));
+        let e = Err(DomainError::InvalidExpiry);
+        let s = Err(DomainError::InvalidStrike);
+        assert_eq!(opt(InstrumentType::Future, None, false).validate(), e);
+        assert_eq!(opt(InstrumentType::Equity, None, true).validate(), e);
+        assert_eq!(opt(InstrumentType::Call, None, true).validate(), s);
+        assert_eq!(
+            opt(InstrumentType::Put, Some(Decimal::ZERO), true).validate(),
+            s
+        );
+        assert_eq!(opt(InstrumentType::Future, k, true).validate(), s);
+        assert_eq!(
+            opt(InstrumentType::Equity, Some(Decimal::ZERO), false).validate(),
+            s
+        );
+        let other = InstrumentType::Other("X".into());
+        assert_eq!(opt(other, k, false).validate(), Ok(()));
+    }
+
+    #[test]
+    fn normalise_maps_zero_strike_on_non_options_only() {
+        let mut f = opt(InstrumentType::Future, Some(Decimal::ZERO), true);
+        f.normalise();
+        assert_eq!(f.strike, None);
+        assert_eq!(f.validate(), Ok(()));
+        let mut e = opt(InstrumentType::Equity, Some(Decimal::ZERO), false);
+        e.normalise();
+        assert_eq!(e.validate(), Ok(()));
+        let mut p = opt(InstrumentType::Put, Some(Decimal::ZERO), true);
+        p.normalise();
+        assert_eq!(p.strike, Some(Decimal::ZERO));
+        assert_eq!(p.validate(), Err(DomainError::InvalidStrike));
     }
 
     #[test]
