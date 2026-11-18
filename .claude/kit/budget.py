@@ -1,0 +1,339 @@
+#!/usr/bin/env python3
+"""Token budget ledger for the agent team (used by the manager).
+
+Agent runs are recorded AUTOMATICALLY: a SubagentStop hook reads each agent's own transcript and writes the
+measured numbers here, against the task set with `budget.py task <id>`. A Stop hook measures the manager's own
+session the same way. Limits come from the "Budget" table in .agents/team.md.
+
+Two numbers per run:
+  tokens     the agent's context at its last step (what Claude Code shows per agent; budgets and caps use this)
+  processed  everything sent and received over all its steps, cache reads included (closer to what is billed;
+             cache reads cost ~10% of normal input)
+
+  budget.py task <id>                            set the task that automatic rows are booked against
+  budget.py add <task> <agent> <tokens> [--estimate] [note]
+                                                 manual row (only for runs the hooks could not measure);
+                                                 --estimate marks a guess, shown separately
+  budget.py status [task]                        compact status (task + today + manager overhead)
+  budget.py report [task]                        per-agent breakdown for reports and retrospectives
+  budget.py check <task> <agent>:<count>...      can we afford the next launches?
+                                                 exit 0 ok, 1 over warn threshold, 2 over limit
+  budget.py hook-subagent | hook-session         used by the hooks (JSON on stdin)
+"""
+import csv
+import json
+import datetime as dt
+import pathlib
+import re
+import sys
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+LEDGER = ROOT / ".agents" / "budget.csv"
+TEAM = ROOT / ".agents" / "team.md"
+FIELDS = ["date", "time", "task", "agent", "tokens", "note", "source", "processed"]
+CURRENT_TASK = ROOT / ".agents" / "current-task"
+SESSIONS = ROOT / ".agents" / "budget-sessions.json"
+
+# Fallback estimates (tokens per launch) until the ledger has history for an agent type.
+DEFAULT_ESTIMATES = {
+    "tech-lead": 120_000, "architect": 150_000, "cicd": 150_000, "tester": 120_000,
+    "code-reviewer": 70_000, "security-reviewer": 70_000, "build-runner": 25_000,
+}
+DEVELOPER_ESTIMATE = 200_000
+OTHER_ESTIMATE = 100_000
+
+
+def limits() -> dict:
+    """Read 'setting | value' rows from the Budget section of team.md."""
+    out = {"per_task_tokens": 0, "per_day_tokens": 0, "warn_percent": 80, "usd_per_million_tokens": 0.0}
+    text = TEAM.read_text() if TEAM.exists() else ""
+    section = re.search(r"^## Budget.*?(?=^## |\Z)", text, re.S | re.M)
+    for line in (section.group(0) if section else "").splitlines():
+        cells = [c.strip().strip("`") for c in line.strip().strip("|").split("|")]
+        if len(cells) >= 2 and cells[0] in out:
+            raw = cells[1].replace(",", "").replace("_", "").strip()
+            if raw in ("", "-", "none", "unlimited"):
+                continue
+            try:
+                out[cells[0]] = float(raw) if cells[0] == "usd_per_million_tokens" else int(float(raw))
+            except ValueError:
+                sys.exit(f"budget: bad value for {cells[0]} in team.md: {cells[1]}")
+    return out
+
+
+def rows() -> list:
+    if not LEDGER.exists():
+        return []
+    with LEDGER.open() as f:
+        out = list(csv.DictReader(f))
+    for r in out:
+        r["source"] = r.get("source") or "manual"
+        r["processed"] = r.get("processed") or ""
+    return out
+
+
+def write_row(row: dict) -> None:
+    LEDGER.parent.mkdir(parents=True, exist_ok=True)
+    if LEDGER.exists():
+        with LEDGER.open() as f:
+            header = next(csv.reader(f), [])
+        if header != FIELDS:  # older ledger: rewrite with the new columns
+            old = rows()
+            with LEDGER.open("w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=FIELDS, extrasaction="ignore")
+                w.writeheader()
+                w.writerows(old)
+    new = not LEDGER.exists()
+    with LEDGER.open("a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=FIELDS, extrasaction="ignore")
+        if new:
+            w.writeheader()
+        w.writerow(row)
+
+
+def transcript_usage(path: str) -> tuple:
+    """(context at last step, processed over all steps, steps) from a Claude Code transcript (JSONL)."""
+    seen, last, steps = {}, 0, 0
+    try:
+        with open(pathlib.Path(path).expanduser(), errors="replace") as f:
+            for line in f:
+                if '"usage"' not in line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                msg = obj.get("message") or {}
+                u = msg.get("usage") if isinstance(msg, dict) else None
+                if obj.get("type") != "assistant" or not u:
+                    continue
+                total = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens",
+                                                            "cache_read_input_tokens", "output_tokens"))
+                seen[msg.get("id") or len(seen)] = total
+                last = total
+    except OSError:
+        return 0, 0, 0
+    return last, sum(seen.values()), len(seen)
+
+
+def current_task() -> str:
+    try:
+        return CURRENT_TASK.read_text().strip() or "untracked"
+    except OSError:
+        return "untracked"
+
+
+def stack_json() -> dict:
+    p = ROOT / ".agents" / "stack.json"
+    return json.loads(p.read_text()) if p.exists() else {}
+
+
+def developers() -> set:
+    return {d["name"] for d in stack_json().get("developers", [])}
+
+
+def fmt(n: float) -> str:
+    return f"{n/1e6:.2f}M" if n >= 1e6 else f"{n/1e3:.0f}k"
+
+
+def usage_line(label: str, used: int, limit: int, price: float) -> str:
+    cost = f" ~${used / 1e6 * price:,.2f}" if price else ""
+    if not limit:
+        return f"{label}: {fmt(used)} (no limit){cost}"
+    return f"{label}: {fmt(used)} / {fmt(limit)} ({used * 100 // limit}%){cost}"
+
+
+def agent_caps() -> dict:
+    """max_tokens_per_run per agent from the agent tables in team.md."""
+    caps, header = {}, None
+    for line in (TEAM.read_text() if TEAM.exists() else "").splitlines():
+        s = line.strip()
+        if not s.startswith("|"):
+            header = None
+            continue
+        cells = [c.strip().strip("`") for c in s.strip("|").split("|")]
+        if header is None:
+            header = [c.lower() for c in cells] if cells and cells[0].lower() == "agent" else []
+            continue
+        if not header or "max_tokens_per_run" not in header or set("".join(cells)) <= set("-: "):
+            continue
+        v = dict(zip(header, cells)).get("max_tokens_per_run", "-").replace(",", "").replace("_", "")
+        if v.isdigit():
+            caps[cells[0]] = int(v)
+    return caps
+
+
+def manager_today(today: str):
+    try:
+        s = json.loads(SESSIONS.read_text()) if SESSIONS.exists() else {}
+    except ValueError:
+        return None
+    todays = [v for v in s.values() if v.get("last") == today]
+    if not todays:
+        return None
+    return max(v["context"] for v in todays), sum(v["processed"] for v in todays)
+
+
+def estimate(agent: str, history: list) -> int:
+    seen = [int(r["tokens"]) for r in history if r["agent"] == agent and r.get("source") != "estimate"]
+    if seen:
+        return sum(seen) // len(seen)
+    if agent.startswith("dev-") or agent in developers():
+        return int(stack_json().get("estimates", {}).get("developer", DEVELOPER_ESTIMATE))
+    return DEFAULT_ESTIMATES.get(agent, OTHER_ESTIMATE)
+
+
+def main(argv: list) -> int:
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    cmd, args = argv[0], argv[1:]
+    lim, history = limits(), rows()
+    today = dt.date.today().isoformat()
+
+    if cmd == "task":
+        if not args:
+            print(f"current task: {current_task()}")
+            return 0
+        CURRENT_TASK.parent.mkdir(parents=True, exist_ok=True)
+        CURRENT_TASK.write_text(args[0] + "\n")
+        print(f"agent runs are now booked against {args[0]}")
+        return 0
+
+    if cmd == "hook-subagent":
+        try:
+            data = json.load(sys.stdin)
+        except ValueError:
+            return 0
+        path = data.get("agent_transcript_path") or ""
+        ctx, processed, steps = transcript_usage(path) if path else (0, 0, 0)
+        if not ctx:
+            return 0
+        now = dt.datetime.now()
+        agent, aid = data.get("agent_type") or "agent", data.get("agent_id", "?")
+        row = {"date": now.date().isoformat(), "time": now.strftime("%H:%M"), "task": current_task(),
+               "agent": agent, "tokens": ctx, "processed": processed, "source": "auto", "note": f"{steps} steps, id {aid}"}
+        old = rows()
+        same = [i for i, r in enumerate(old) if r["source"] == "auto" and r["note"].endswith(f"id {aid}")]
+        if same:  # an agent continued with SendMessage: its transcript keeps growing, so update its row instead of adding one
+            row["task"] = old[same[-1]]["task"]
+            old[same[-1]] = row
+            with LEDGER.open("w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=FIELDS, extrasaction="ignore")
+                w.writeheader()
+                w.writerows(old)
+        else:
+            write_row(row)
+        return 0
+
+    if cmd == "hook-session":
+        try:
+            data = json.load(sys.stdin)
+        except ValueError:
+            return 0
+        ctx, processed, steps = transcript_usage(data.get("transcript_path") or "")
+        if not steps:
+            return 0
+        try:
+            sessions = json.loads(SESSIONS.read_text()) if SESSIONS.exists() else {}
+        except ValueError:
+            sessions = {}
+        sid = data.get("session_id") or "session"
+        first = sessions.get(sid, {}).get("date", today)
+        sessions[sid] = {"date": first, "last": today, "context": ctx, "processed": processed, "steps": steps}
+        cutoff = (dt.date.today() - dt.timedelta(days=30)).isoformat()
+        sessions = {k: v for k, v in sessions.items() if v.get("last", "") >= cutoff}
+        SESSIONS.parent.mkdir(parents=True, exist_ok=True)
+        SESSIONS.write_text(json.dumps(sessions, indent=1) + "\n")
+        return 0
+
+    if cmd == "add":
+        estimate_flag = "--estimate" in args
+        args = [a for a in args if a != "--estimate"]
+        if len(args) < 3 or not args[2].replace(",", "").isdigit():
+            sys.exit("usage: budget.py add <task> <agent> <tokens> [--estimate] [note]")
+        now = dt.datetime.now()
+        write_row({"date": now.date().isoformat(), "time": now.strftime("%H:%M"), "task": args[0],
+                   "agent": args[1], "tokens": int(args[2].replace(",", "")), "note": " ".join(args[3:]),
+                   "source": "estimate" if estimate_flag else "manual", "processed": ""})
+        history = rows()
+        cap = agent_caps().get(args[1])
+        used = int(args[2].replace(",", ""))
+        over = cap is not None and used > cap
+        if over:
+            print(f"OVER AGENT CAP: {args[1]} used {fmt(used)}, its max_tokens_per_run is {fmt(cap)}. "
+                  f"Tell the user; give its next launch a smaller scope, or ask the user to raise the cap.")
+        args = [args[0]]
+        cmd = "status"
+
+    if cmd == "status":
+        task = args[0] if args else None
+        day_used = sum(int(r["tokens"]) for r in history if r["date"] == today)
+        parts = []
+        if task:
+            used = sum(int(r["tokens"]) for r in history if r["task"] == task)
+            parts.append(usage_line(f"task {task}", used, lim["per_task_tokens"], lim["usd_per_million_tokens"]))
+        parts.append(usage_line("today", day_used, lim["per_day_tokens"], lim["usd_per_million_tokens"]))
+        est = sum(int(r["tokens"]) for r in history if r["date"] == today and r["source"] == "estimate")
+        if est:
+            parts.append(f"of which estimates {fmt(est)}")
+        mgr = manager_today(today)
+        if mgr:
+            parts.append(f"manager {fmt(mgr[0])} context, {fmt(mgr[1])} processed today")
+        print(" | ".join(parts))
+        return 0
+
+    if cmd == "report":
+        task = args[0] if args else current_task()
+        mine = [r for r in history if r["task"] == task]
+        if not mine:
+            print(f"no runs booked for {task}")
+            return 0
+        by = {}
+        for r in mine:
+            a = by.setdefault(r["agent"], [0, 0, 0, set()])
+            a[0] += 1
+            a[1] += int(r["tokens"])
+            a[2] += int(r["processed"] or 0)
+            a[3].add(r["source"])
+        print(f"{'agent':20} {'runs':>4} {'tokens':>9} {'processed':>10}  source")
+        for agent, (n, tok, proc, src) in sorted(by.items(), key=lambda x: -x[1][1]):
+            print(f"{agent:20} {n:>4} {fmt(tok):>9} {fmt(proc) if proc else '-':>10}  {','.join(sorted(src))}")
+        total = sum(v[1] for v in by.values())
+        print(f"{'total':20} {len(mine):>4} {fmt(total):>9}")
+        mgr = manager_today(today)
+        if mgr:
+            print(f"manager session(s) today: {fmt(mgr[0])} context now, {fmt(mgr[1])} processed")
+        return 0
+
+    if cmd == "check":
+        if len(args) < 2:
+            sys.exit("usage: budget.py check <task> <agent>:<count> ...")
+        task, plan = args[0], args[1:]
+        projected = 0
+        for item in plan:
+            agent, _, count = item.partition(":")
+            est = estimate(agent, history)
+            cap = agent_caps().get(agent)
+            projected += (min(est, cap) if cap else est) * int(count or 1)
+        task_used = sum(int(r["tokens"]) for r in history if r["task"] == task)
+        day_used = sum(int(r["tokens"]) for r in history if r["date"] == today)
+        worst, notes = 0, []
+        for label, used, limit in (("task", task_used, lim["per_task_tokens"]), ("today", day_used, lim["per_day_tokens"])):
+            if not limit:
+                continue
+            pct = (used + projected) * 100 // limit
+            notes.append(f"{label} {fmt(used)} + ~{fmt(projected)} = {pct}% of {fmt(limit)}")
+            if pct >= 100:
+                worst = max(worst, 2)
+            elif pct >= lim["warn_percent"]:
+                worst = max(worst, 1)
+        verdict = {0: "OK", 1: "WARN (tell the user)", 2: "OVER LIMIT (ask the user before launching)"}[worst]
+        print(f"{verdict}: " + ("; ".join(notes) if notes else f"no limits set, projected ~{fmt(projected)}"))
+        return worst
+
+    sys.exit(f"unknown command {cmd!r}; see --help")
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

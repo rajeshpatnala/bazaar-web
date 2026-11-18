@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "agent": "manager",
+  "env": {
+    "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(cargo fmt:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo nextest:*)",
+      "Bash(cargo doc:*)",
+      "Bash(cargo tree:*)",
+      "Bash(cargo deny:*)",
+      "Bash(cargo llvm-cov:*)",
+      "Bash(cargo bench:*)",
+      "Bash(cargo run -q -p bazaar-cli -- check-connections:*)",
+      "Bash(pnpm -C web typecheck:*)",
+      "Bash(pnpm -C web lint:*)",
+      "Bash(pnpm -C web format:*)",
+      "Bash(pnpm -C web test:*)",
+      "Bash(pnpm -C web test:ci:*)",
+      "Bash(pnpm -C web build:*)",
+      "Bash(pnpm -C web audit:*)",
+      "Bash(pnpm -C web install --frozen-lockfile:*)",
+      "Bash(pnpm -s -C web:*)",
+      "Bash(node --version:*)",
+      "Bash(just:*)",
+      "Bash(rg:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git fetch:*)",
+      "Bash(git switch:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git rebase:*)",
+      "Bash(gh pr:*)",
+      "Read(./.env.example)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.local)",
+      "Read(./.env.development)",
+      "Read(./.env.test)",
+      "Read(./.env.staging)",
+      "Read(./.env.production)",
+      "Read(./.envrc)",
+      "Read(./secrets/**)",
+      "Read(**/*.pem)",
+      "Read(**/*.p8)",
+      "Read(**/*.p12)",
+      "Read(**/*.key)",
+      "Edit(./.env)",
+      "Write(./.env)",
+      "Bash(printenv:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git push origin --delete main:*)",
+      "Bash(git push origin --delete develop:*)",
+      "Bash(git push origin :main:*)",
+      "Bash(git push origin :develop:*)",
+      "Bash(git branch -D main:*)",
+      "Bash(git branch -D develop:*)",
+      "Bash(git branch -d main:*)",
+      "Bash(git branch -d develop:*)",
+      "Bash(gh repo delete:*)"
+    ],
+    "ask": [
+      "Bash(just promote:*)",
+      "Bash(just setup-branches:*)",
+      "Bash(just protect-branches:*)",
+      "Bash(python3 .claude/kit/kit.py promote:*)",
+      "Bash(python3 .claude/kit/kit.py setup-branches:*)",
+      "Bash(python3 .claude/kit/kit.py protect-branches:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read|Edit|Write|MultiEdit|NotebookEdit|Glob|Grep|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/guard-secrets.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/branch-guard.sh",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "dev-data|dev-quant|dev-backtest|dev-execution|dev-api|dev-ui|dev-core",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/dev-gate.sh",
+            "timeout": 900
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/budget-meter.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/budget-meter.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/agent-context.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/after-git-sync.sh",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/agent-context.sh",
+            "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "KIT_ROOT=\"$CLAUDE_PROJECT_DIR\" python3 \"$CLAUDE_PROJECT_DIR\"/.claude/kit/kit.py preflight --quiet --cached || true",
+            "timeout": 60
+          },
+          {
+            "type": "command",
+            "command": "KIT_ROOT=\"$CLAUDE_PROJECT_DIR\" python3 \"$CLAUDE_PROJECT_DIR\"/.claude/kit/kit.py codemap >/dev/null 2>&1 || true",
+            "timeout": 60
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/kit/doctor.py --quiet || true",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}
