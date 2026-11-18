@@ -49,7 +49,8 @@ pub struct UpsertSummary {
 /// Rows are keyed by `(exchange, tradingsymbol)`; importing the same rows twice leaves the
 /// store identical. Each import records `fetched_on` and keeps a dated snapshot.
 pub trait InstrumentRepo: Send + Sync {
-    /// Idempotent upsert of `rows` fetched on `fetched_on` (IST date).
+    /// Idempotent upsert of `rows` fetched on `fetched_on` (IST date). One transaction per
+    /// call: the caller bounds `rows` (the parser caps a master at its `max_rows`).
     fn upsert_instruments(
         &self,
         rows: &[Instrument],

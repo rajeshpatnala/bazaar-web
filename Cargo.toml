@@ -13,6 +13,8 @@ version = "0.1.0"
 # internal: one entry per crate, features enabled by the consumer
 bazaar-core = { path = "crates/core" }
 bazaar-broker = { path = "crates/broker" }
+bazaar-data = { path = "crates/data" }
+bazaar-store = { path = "crates/store" }
 
 # external: versions live ONLY here (F1 set approved by the owner on 2026-11-18)
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }

@@ -243,8 +243,15 @@ version = "0.1.0"
 dependencies = [
  "bazaar-broker",
  "bazaar-core",
+ "bazaar-data",
+ "bazaar-store",
+ "chrono",
+ "chrono-tz",
  "clap",
  "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
  "toml",
 ]
 
@@ -294,6 +301,11 @@ dependencies = [
 [[package]]
 name = "bazaar-options"
 version = "0.1.0"
+dependencies = [
+ "bazaar-core",
+ "chrono",
+ "proptest",
+]
 
 [[package]]
 name = "bazaar-paper"
