@@ -4,7 +4,7 @@ const IST = new Intl.DateTimeFormat("en-IN", {
   month: "short",
   hour: "2-digit",
   minute: "2-digit",
-  hour12: false,
+  hourCycle: "h23",
 });
 
 /** UTC epoch seconds -> IST display string, whatever the browser zone is. */

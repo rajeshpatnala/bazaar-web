@@ -2,5 +2,6 @@ dist
 dist-mock
 coverage
 openapi.json
+public
 src/api/schema.d.ts
 pnpm-lock.yaml

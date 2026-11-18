@@ -1,0 +1,4 @@
+# Supply-chain guard: no dependency may run install scripts; new releases wait 24h (minutes).
+# Install with `pnpm install --frozen-lockfile` (just setup / CI).
+onlyBuiltDependencies: []
+minimumReleaseAge: 1440
