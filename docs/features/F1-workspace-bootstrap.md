@@ -67,6 +67,7 @@ Owner area: Cargo.toml, crates/{core,server,cli,...stubs}, config/, fixtures/con
 - SEC-25-2: `onSessionEnded` is a single module-level slot (last registration wins); use a Set if a second consumer appears.
 - TS-25-1: test CSRF header injection in `client.ts` `onRequest` (non-GET gets `X-CSRF-Token`; no token throws) with a temporary msw POST handler, at the latest in the first mutating slice.
 - TS-25-2 (optional): assert PAPER vs non-paper differ by class or data attribute, not only text and `data-mode`.
+- RISK-29-3 / QUAN-29-1: the broker feature restricts `broker -> data` to `data::kite::session` (cargo-deny `wrappers` or a module-level check) and keeps order endpoints out of `data`. Re-adding crate edges in F2 needs an `allowed()` update (QUAN-29-2).
 
 ## History
 - 2026-11-18: slice 0 scaffold.

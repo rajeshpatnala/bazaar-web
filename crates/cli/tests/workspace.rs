@@ -64,7 +64,13 @@ fn config_holds_exactly_the_eight_files() {
 #[test]
 fn rust_and_ts_disclaimers_are_byte_equal() {
     let ts = std::fs::read_to_string(root().join("web/src/shared/disclaimer.ts")).unwrap();
-    let start = ts.find('"').unwrap() + 1;
-    let end = ts.rfind('"').unwrap();
-    assert_eq!(&ts[start..end], bazaar_core::disclaimer::DISCLAIMER);
+    let decl = ts
+        .split("export const DISCLAIMER")
+        .nth(1)
+        .expect("DISCLAIMER declaration");
+    let start = decl.find('"').unwrap() + 1;
+    let end = start + decl[start..].find('"').unwrap();
+    let text = &decl[start..end];
+    assert!(!text.contains('\\'), "no escapes allowed in the constant");
+    assert_eq!(text, bazaar_core::disclaimer::DISCLAIMER);
 }
