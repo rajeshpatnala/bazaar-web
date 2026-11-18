@@ -15,7 +15,8 @@ Two numbers per run:
                                                  manual row (only for runs the hooks could not measure);
                                                  --estimate marks a guess, shown separately
   budget.py status [task]                        compact status (task + today + manager overhead)
-  budget.py report [task]                        per-agent breakdown for reports and retrospectives
+  budget.py report [task]                        per-agent breakdown (tokens, cold start, work) for reports and retros
+  budget.py starts                               typical cold-start size per agent type (what to slim)
   budget.py check <task> <agent>:<count>...      can we afford the next launches?
                                                  exit 0 ok, 1 over warn threshold, 2 over limit
   budget.py hook-subagent | hook-session         used by the hooks (JSON on stdin)
@@ -30,7 +31,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 LEDGER = ROOT / ".agents" / "budget.csv"
 TEAM = ROOT / ".agents" / "team.md"
-FIELDS = ["date", "time", "task", "agent", "tokens", "note", "source", "processed"]
+FIELDS = ["date", "time", "task", "agent", "tokens", "note", "source", "processed", "start", "session"]
 CURRENT_TASK = ROOT / ".agents" / "current-task"
 SESSIONS = ROOT / ".agents" / "budget-sessions.json"
 
@@ -69,6 +70,8 @@ def rows() -> list:
     for r in out:
         r["source"] = r.get("source") or "manual"
         r["processed"] = r.get("processed") or ""
+        r["start"] = r.get("start") or ""
+        r["session"] = r.get("session") or ""
     return out
 
 
@@ -91,9 +94,10 @@ def write_row(row: dict) -> None:
         w.writerow(row)
 
 
-def transcript_usage(path: str) -> tuple:
-    """(context at last step, processed over all steps, steps) from a Claude Code transcript (JSONL)."""
-    seen, last, steps = {}, 0, 0
+def transcript_usage(path: str, with_start: bool = False) -> tuple:
+    """(context at last step, processed over all steps, steps[, start]) from a Claude Code transcript (JSONL).
+    start = the context of the first step: what the agent loaded before doing any work (its cold-start cost)."""
+    seen, last, steps, start = {}, 0, 0, 0
     try:
         with open(pathlib.Path(path).expanduser(), errors="replace") as f:
             for line in f:
@@ -109,11 +113,32 @@ def transcript_usage(path: str) -> tuple:
                     continue
                 total = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens",
                                                             "cache_read_input_tokens", "output_tokens"))
+                if not seen:
+                    start = total - int(u.get("output_tokens") or 0)
                 seen[msg.get("id") or len(seen)] = total
                 last = total
     except OSError:
-        return 0, 0, 0
-    return last, sum(seen.values()), len(seen)
+        return (0, 0, 0, 0) if with_start else (0, 0, 0)
+    return (last, sum(seen.values()), len(seen), start) if with_start else (last, sum(seen.values()), len(seen))
+
+
+def first_prompt_chars(path: str) -> int:
+    """Size of the task message an agent was launched with (first user message in its transcript)."""
+    try:
+        with open(pathlib.Path(path).expanduser(), errors="replace") as f:
+            for line in f:
+                if '"user"' not in line:
+                    continue
+                obj = json.loads(line)
+                if obj.get("type") != "user":
+                    continue
+                c = (obj.get("message") or {}).get("content")
+                if isinstance(c, list):
+                    c = " ".join(x.get("text", "") for x in c if isinstance(x, dict))
+                return len(c or "")
+    except (OSError, ValueError):
+        pass
+    return 0
 
 
 def current_task() -> str:
@@ -206,17 +231,20 @@ def main(argv: list) -> int:
         except ValueError:
             return 0
         path = data.get("agent_transcript_path") or ""
-        ctx, processed, steps = transcript_usage(path) if path else (0, 0, 0)
+        ctx, processed, steps, start = transcript_usage(path, with_start=True) if path else (0, 0, 0, 0)
         if not ctx:
             return 0
         now = dt.datetime.now()
         agent, aid = data.get("agent_type") or "agent", data.get("agent_id", "?")
         row = {"date": now.date().isoformat(), "time": now.strftime("%H:%M"), "task": current_task(),
-               "agent": agent, "tokens": ctx, "processed": processed, "source": "auto", "note": f"{steps} steps, id {aid}"}
+               "agent": agent, "tokens": ctx, "processed": processed, "source": "auto",
+               "note": f"{steps} steps, prompt {first_prompt_chars(path) // 4} tok, id {aid}",
+               "start": start, "session": data.get("session_id", "")}
         old = rows()
         same = [i for i, r in enumerate(old) if r["source"] == "auto" and r["note"].endswith(f"id {aid}")]
         if same:  # an agent continued with SendMessage: its transcript keeps growing, so update its row instead of adding one
             row["task"] = old[same[-1]]["task"]
+            row["start"] = old[same[-1]].get("start") or start
             old[same[-1]] = row
             with LEDGER.open("w", newline="") as f:
                 w = csv.DictWriter(f, fieldnames=FIELDS, extrasaction="ignore")
@@ -283,6 +311,21 @@ def main(argv: list) -> int:
         print(" | ".join(parts))
         return 0
 
+    if cmd == "starts":
+        # typical cold-start size per agent type: what to slim (preloaded skills, CLAUDE.md, memory)
+        by = {}
+        for r in history:
+            if r["start"]:
+                by.setdefault(r["agent"], []).append(int(r["start"]))
+        if not by:
+            print("no measured starts yet (runs recorded by the budget hook after this kit version)")
+            return 0
+        print(f"{'agent':20} {'runs':>4} {'avg start':>9} {'max':>8}")
+        for agent, xs in sorted(by.items(), key=lambda x: -sum(x[1]) / len(x[1])):
+            print(f"{agent:20} {len(xs):>4} {fmt(sum(xs) // len(xs)):>9} {fmt(max(xs)):>8}")
+        print("start = Claude Code's own prompt + CLAUDE.md + the agent file + preloaded skills + skill list + memory.")
+        return 0
+
     if cmd == "report":
         task = args[0] if args else current_task()
         mine = [r for r in history if r["task"] == task]
@@ -291,16 +334,21 @@ def main(argv: list) -> int:
             return 0
         by = {}
         for r in mine:
-            a = by.setdefault(r["agent"], [0, 0, 0, set()])
+            a = by.setdefault(r["agent"], [0, 0, 0, set(), 0])
             a[0] += 1
             a[1] += int(r["tokens"])
             a[2] += int(r["processed"] or 0)
             a[3].add(r["source"])
-        print(f"{'agent':20} {'runs':>4} {'tokens':>9} {'processed':>10}  source")
-        for agent, (n, tok, proc, src) in sorted(by.items(), key=lambda x: -x[1][1]):
-            print(f"{agent:20} {n:>4} {fmt(tok):>9} {fmt(proc) if proc else '-':>10}  {','.join(sorted(src))}")
-        total = sum(v[1] for v in by.values())
-        print(f"{'total':20} {len(mine):>4} {fmt(total):>9}")
+            a[4] += int(r["start"] or 0)
+        print(f"{'agent':20} {'runs':>4} {'tokens':>9} {'start':>8} {'work':>8} {'processed':>10}  source")
+        for agent, (n, tok, proc, src, st) in sorted(by.items(), key=lambda x: -x[1][1]):
+            work = f"{fmt(tok - st):>8}" if st else f"{'-':>8}"
+            print(f"{agent:20} {n:>4} {fmt(tok):>9} {fmt(st) if st else '-':>8} {work} {fmt(proc) if proc else '-':>10}  {','.join(sorted(src))}")
+        total, total_start = sum(v[1] for v in by.values()), sum(v[4] for v in by.values())
+        print(f"{'total':20} {len(mine):>4} {fmt(total):>9} {fmt(total_start) if total_start else '-':>8}")
+        if total_start:
+            print(f"cold starts: {fmt(total_start)} of {fmt(total)} ({100 * total_start // max(total, 1)}%) - "
+                  "each fresh launch pays its start again; continuing an agent doesn't")
         mgr = manager_today(today)
         if mgr:
             print(f"manager session(s) today: {fmt(mgr[0])} context now, {fmt(mgr[1])} processed")

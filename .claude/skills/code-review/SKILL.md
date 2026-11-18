@@ -5,7 +5,7 @@ description: Code review procedure for this repo - scope, red-flag scan, generic
 
 # Code Review
 
-Reviewers **do not edit source code**. Findings go to `.agents/reviews/<feature-id>/code-review.md`
+Reviewers **do not edit source code**. Findings go to `.agents/reviews/<feature-id>/<pr-N|branch>/code-review.md` (the exact path `just review-pack` prints)
 (template `.agents/templates/review-findings.md`); a short summary goes to the manager, who passes it
 to the tech lead for triage. Security issues you notice are recorded too, tagged `security`, and the
 security reviewer owns the deep check.
@@ -72,7 +72,7 @@ Each finding: id (`CR-<feature>-<n>`), severity, file:line, issue, why it matter
 ```
 Review <feature-id> <branch>: REQUEST CHANGES | APPROVE | APPROVE WITH MINORS
 blockers: CR-12-1, CR-12-3 | major: CR-12-2 | minor: 4 | nit: 2
-findings: .agents/reviews/<feature-id>/code-review.md
+findings: .agents/reviews/<feature-id>/<pr-N|branch>/code-review.md
 ```
 
 On re-review, update each finding's status (`fixed` / `not fixed` / `deferred by tech lead`) instead of writing a new file.

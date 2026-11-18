@@ -55,8 +55,8 @@ new-branch name:
 merge-check pr *args:
     @python3 .claude/kit/kit.py merge-check {{pr}} {{args}}
 
-# review without a PR: just review-pack --diff develop..HEAD (also review-plan / merge-check --branch <b>); merge-check <pr> --wait polls CI
-# which reviews a PR needs and where each goes (by size and sensitivity of paths - team.md -> Review policy); before dispatch: review-plan --files a,b,c
+# review without a PR: just review-pack --diff develop..HEAD (also review-plan / merge-check --branch <b>)
+# which reviews a PR needs (code always; security/tests by size and sensitivity - team.md -> Review policy)
 review-plan pr *args:
     @python3 .claude/kit/kit.py review-plan {{pr}} {{args}}
 
@@ -64,17 +64,33 @@ review-plan pr *args:
 review-pack pr *args:
     @python3 .claude/kit/kit.py review-pack {{pr}} {{args}}
 
-# tech lead: merge-check, then squash-merge a feature PR into the integration branch
-merge pr *args:
-    @python3 .claude/kit/kit.py merge {{pr}} {{args}}
+# small PRs: all required reviews in one tool-free Claude call instead of reviewer agents (exit 3 = launch them)
+envelope pr *args:
+    @python3 .claude/kit/kit.py envelope {{pr}} {{args}}
 
-# tech lead: wait for CI, merge-check, merge, pull the integration branch - one command (just ship 12; or --branch b --title T)
+# what an agent reads before it starts working, and how big each part is (no agent = summary of all)
+start-report *agent:
+    @python3 .claude/kit/kit.py start-report {{agent}}
+
+# apply the default triage decisions to a PR's findings; lists only what needs the tech lead
+triage feature *args:
+    @python3 .claude/kit/kit.py triage {{feature}} {{args}}
+
+# one-shot status for the manager: checkout, work mode, budget, board, open PRs with CI, bugs
+status:
+    @python3 .claude/kit/kit.py status
+
+# wait for a PR's CI inside the script (free); exit 0 passed, 1 failed, 2 still running
+pr-wait pr *args:
+    @python3 .claude/kit/kit.py pr-wait {{pr}} {{args}}
+
+# tech lead's merge in one command: wait for CI, merge-check, merge, update the integration branch, refresh codemap
 ship pr *args:
     @python3 .claude/kit/kit.py ship {{pr}} {{args}}
 
-# one-screen state: preflight line, open board rows, merge-check line per open PR
-status:
-    @python3 .claude/kit/kit.py status
+# tech lead: merge-check, then squash-merge a feature PR into the integration branch
+merge pr *args:
+    @python3 .claude/kit/kit.py merge {{pr}} {{args}}
 
 # promotion/release PR into the release branch - Claude Code asks the user every time
 promote pr:
@@ -120,6 +136,10 @@ budget task="":
 # set the task that measured agent runs are booked against (the manager does this when work starts)
 budget-task task:
     @python3 .claude/kit/budget.py task {{task}}
+
+# typical cold-start size per agent type (what every fresh launch pays before working)
+budget-starts:
+    @python3 .claude/kit/budget.py starts
 
 # per-agent breakdown of a task's measured usage (for reports and retrospectives)
 budget-report task="":

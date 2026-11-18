@@ -14,7 +14,8 @@ except ValueError:
 parts = []
 rules = root / ".agents" / "owner-rules.md"
 if rules.exists():
-    lines = [l.strip() for l in rules.read_text(errors="replace").splitlines() if re.match(r"^\s*-\s+\S", l)]
+    text = re.sub(r"<!--.*?-->", "", rules.read_text(errors="replace"), flags=re.S)  # examples in comments are not rules
+    lines = [l.strip() for l in text.splitlines() if re.match(r"^\s*-\s+\S", l)]
     if lines:
         parts.append("Owner rules (standing decisions by the project owner; they apply to every task, everywhere in the app):\n"
                      + "\n".join(lines[:30]))

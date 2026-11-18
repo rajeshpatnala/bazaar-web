@@ -132,6 +132,13 @@ def main() -> int:
             notes.append("kit files are not committed yet - sessions in a worktree or the cloud won't see the manager; "
                          "commit them on a branch (git switch -c chore/agent-kit && git add -A && git commit -m \"chore: add agent kit\")")
 
+    # agent notebooks: read in full (first 200 lines / 25 KB) on every start of that agent
+    for mf in sorted((ROOT / ".claude" / "agent-memory").glob("*/MEMORY.md")):
+        n = len(mf.read_text(errors="replace").splitlines())
+        if n > 40:
+            notes.append(f"{mf.parent.name}'s memory notebook is {n} lines (limit 40); it is read on every start of that agent - "
+                         f"ask the manager to trim it, or set memory to none for {mf.parent.name} in team.md")
+
     # instruction files every agent reads on every call: keep them small
     for name, limit in (("CLAUDE.md", 12_000), ("AGENTS.md", 12_000)):
         f = ROOT / name
@@ -156,7 +163,7 @@ def main() -> int:
         if problems or missing_req:
             cmd = "just doctor" if shutil.which("just") else "python3 .claude/kit/doctor.py"
             print("Kit health: " + "; ".join(problems) + f". Run `{cmd}` for fixes.")
-        backfill = [n for n in notes if any(k in n for k in ("backfill the feature records", "not committed yet", " KB; every agent", "still the template"))]
+        backfill = [n for n in notes if any(k in n for k in ("backfill the feature records", "not committed yet", " KB; every agent", "still the template", "memory notebook"))]
         for n in backfill:
             print("Kit note: " + n + ".")
         return 1 if problems else 0

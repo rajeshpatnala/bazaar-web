@@ -1,0 +1,8 @@
+# 9. Startup, serving, sleep
+
+(From `bz-web-api` SKILL.md; open when the task touches this area.)
+
+
+`main.rs`: `dotenvy::dotenv().ok()` (before clap so `.env` reaches flag defaults; empty values count as unset; harmless for `openapi`) -> parse the CLI (`openapi` returns here) -> tracing -> load and validate config (fail fast) -> `SecretStore`/Keychain -> `build_state` -> `expire_stale()` approvals, audit-chain verify, mark interrupted jobs -> start feed, coalescer, jobs -> bind `SocketAddr::from(([127, 0, 0, 1], port))` (a fixed loopback constant, no address option; after bind assert `local_addr().ip().is_loopback()` and exit with a clear message if the port is taken) -> mint the launch token, write the launch URL once to stdout with `writeln!` (not `tracing`, so it never lands in a log file; no `println!`): `http://127.0.0.1:<port>/auth?token=<t>`, or `http://localhost:5173/auth?token=<t>` in debug builds; unless `--no-open`, run `open <url>` best effort -> `axum::serve(...).with_graceful_shutdown(shutdown.cancelled())`, where Ctrl-C or SIGTERM cancels the token -> drain, flush the store, exit 0.
+
+After the Mac sleeps or wakes: assume sockets and the Kite feed are dead and timers fired late. Compute staleness from the injected `Clock` and `last_tick_at` when reading, never from a timer having run; `expire_stale()` also runs on every approval read and approve so TTLs hold across sleep; the feed adapter reconnects and gap-fills (`bz-market-data`); the hub publishes `data_status` (delayed) then `resync`; browsers reconnect on their own. `GET /status` must be truthful immediately after wake (kite token day, feed state, stale threshold).

@@ -52,13 +52,13 @@ New agents you hire get their rows here automatically.
 | dev-ui | - | - | project | - |
 | dev-core | - | - | project | - |
 | tester | - | - | project | - |
-| code-reviewer | - | - | project | - |
-| security-reviewer | - | - | project | - |
+| code-reviewer | - | - | none | - |
+| security-reviewer | - | - | none | - |
 | cicd | - | - | project | - |
 | build-runner | - | - | none | - |
 | market-strategist | - | - | project | - |
-| risk-guardian | - | - | project | - |
-| quant-reviewer | - | - | project | - |
+| risk-guardian | - | - | none | - |
+| quant-reviewer | - | - | none | - |
 | prototyper | - | - | none | - |
 
 - `context_window`: 100,000-1,000,000 tokens; the conversation is summarised when it reaches this size.
@@ -108,6 +108,8 @@ then there is no fixed cap on developers - the budget is the governor.
 | checkpoint_commits | yes |
 | preview_first | yes |
 
+| reuse_roles | tech-lead, architect, market-strategist |
+| reuse_window_minutes | 90 |
 - `work_mode`: `worktrees` (developers in parallel, each in its own git worktree) or `in-place` (one developer at a
   time in this checkout, for repos where worktrees fail). `just preflight` recommends one; `just work-mode <mode>` switches.
 - `small_max_files`: work touching at most this many files in one area is size S (no plan, one developer, gate only).
@@ -131,6 +133,11 @@ Code review runs on every PR. Security review and testing scale with risk so sma
 | require_bug_record | yes |
 
 | light_lane | skip |
+| light_review_docs | yes |
+| envelope_reviews | yes |
+| envelope_max_lines | 150 |
+| envelope_max_diff_chars | 60000 |
+| envelope_command | claude |
 `security_review`: `always` or `sensitive-or-large` (auth, config, SQL/migrations, dependency/lock files, CI, Dockerfile, or >= large_pr_lines).
 `tester_review`: `always`, `behaviour-change` (feat/fix/perf with >= tester_min_source_lines production lines), or `large`.
 `require_feature_record`: `yes` = a feat/fix/refactor/perf PR for feature F<n> can't merge until `docs/features/F<n>-*.md` exists (on the PR or already merged).

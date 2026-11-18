@@ -67,3 +67,6 @@ previews/
 # tooling output
 lcov.info
 junit.xml
+
+# --- agent-kit ---
+.agents/.reuse-nudged

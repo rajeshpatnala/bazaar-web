@@ -11,12 +11,20 @@
   kit.py new-branch <name>    create a work branch from the latest integration branch
   kit.py merge-check <pr> [--feature ID] | --branch <b> --feature ID
                               verify a PR may merge: target branch, title, CI checks, reviewer verdicts
-  kit.py merge-check <pr> --wait [--timeout N]   poll CI in the script (pending, not failure) before checking
   kit.py merge <pr>           tech lead: merge-check, then squash-merge into the integration branch
-  kit.py ship <pr> | --branch <b> --title T   tech lead: wait for CI, merge-check, merge, pull the integration branch
-  kit.py status               preflight line, open board rows, merge-check line per open PR
   kit.py promote <pr>         user-approved: merge a promotion/release PR into the release branch
-  kit.py review-plan <pr> | --branch <b> | --files a,b [--feature ID] [--kind K]   reviews needed + output path of each
+  kit.py review-plan <pr> | --branch <b>   which reviews this PR needs (size/sensitivity policy in team.md)
+  kit.py triage <feature> [--ref pr-N|branch] [--dry-run]   apply the default triage decisions; list only what
+                              needs the tech lead's judgment (disputes, conflicts, unclear fixes)
+  kit.py envelope <pr> | --branch <b> | --diff <base>..<head> [--feature ID] [--dry-run]
+                              small PRs: review by one tool-free Claude call (all required reviews in one
+                              "envelope") instead of launching reviewer agents; writes the normal findings files
+  kit.py docs "<topic>" | --list [skill]   the library: print the one handbook section that matches
+                              (e.g. docs "greeks", docs "bz-quant: tests"); --list shows every section
+  kit.py start-report [agent] what an agent reads before it starts working, and how big each part is
+  kit.py status               one compact status: checkout, work mode, task budget, board, open PRs and CI, bugs
+  kit.py pr-wait <pr> [--timeout 540]     wait (in the script, free) until CI finishes; one line: passed/failed/pending
+  kit.py ship <pr> | --branch <b> --title <t>   wait for CI, merge-check, merge, update the integration branch, codemap
   kit.py preflight [--quiet] [--cached]   can the team work here? branches, remote, gh, worktrees -> work mode
   kit.py work-mode [worktrees|in-place]   show or set how developers work (team.md -> Parallelism), then agents-sync
   kit.py agents               list the team's agents (name, model, effort, role) and the main-session agent
@@ -232,7 +240,7 @@ def test_check(base: str = None) -> int:
         return 0
     if not base:
         base = base_ref()
-    names = set(git("diff", "--name-only", "--no-renames", f"{base}...HEAD").split()) | set(git("diff", "--name-only", "--no-renames").split())
+    names = set(git("diff", "--name-only", f"{base}...HEAD").split()) | set(git("diff", "--name-only").split())
     tests = [n for n in names if matches(n, tc.get("test_globs", []))]
     src = [n for n in names if matches(n, tc.get("source_globs", [])) and n not in tests]
     if not src:
@@ -345,7 +353,7 @@ def codemap(out: str = None) -> int:
         for b in git("for-each-ref", "--format=%(refname:short)", "refs/heads").split():
             if b in (integ, rel) or subprocess.run(["git", "merge-base", "--is-ancestor", b, base], cwd=ROOT).returncode == 0:
                 continue
-            changed = [l.split("\t") for l in git("diff", "--name-status", "--no-renames", f"{base}...{b}").splitlines() if l]
+            changed = [l.split("\t") for l in git("diff", "--name-status", f"{base}...{b}").splitlines() if l]
             changed = [(c[0][0], c[-1]) for c in changed if matches(c[-1], src_globs)][:15]
             if not changed:
                 continue
@@ -374,8 +382,13 @@ def codemap(out: str = None) -> int:
 
 SENSITIVE_DEFAULT = ["**/auth/**", "**/*auth*", "**/*security*", "**/*secret*", "**/*token*", "**/*crypt*",
                      "**/*permission*", "**/config/**", "**/*config*", "**/settings*", "**/migrations/**", "**/*.sql",
-                     ".github/**", ".claude/**", "**/CLAUDE.md", "**/Dockerfile", "Dockerfile", ".env.example", "**/deny.toml", "**/*.lock"]
+                     ".github/**", "**/Dockerfile", "Dockerfile", ".env.example", "**/deny.toml", "**/*.lock"]
 TEST_KINDS = ("feat", "fix", "refactor", "perf", "test")
+# docs-only changes get a light review (team.md -> Review policy -> light_review_docs). Files that steer agents,
+# CI or settings are never "light", even when they are markdown.
+LIGHT_GLOBS = ["docs/**", "**/*.md", "*.md", "**/*.rst", "**/*.txt", "LICENSE*", "**/*.png", "**/*.jpg", "**/*.svg"]
+NEVER_LIGHT = [".claude/**", ".agents/**", ".github/**", "CLAUDE.md", "AGENTS.md", "**/CLAUDE.md", "**/AGENTS.md",
+               "**/requirements*.txt", "**/constraints*.txt"]
 
 
 def pr_refs(info: dict) -> tuple:
@@ -387,49 +400,16 @@ def pr_refs(info: dict) -> tuple:
     return b, h
 
 
-def opt_value(argv: list, flag: str) -> str:
-    """Value after a flag; a clean exit instead of a traceback when it is missing."""
-    i = argv.index(flag)
-    if i + 1 >= len(argv):
-        sys.exit(f"kit: {flag} needs a value")
-    return argv[i + 1]
-
-
-def check_pr_arg(arg: str) -> str:
-    if not (arg.isascii() and arg.isdigit()):
-        sys.exit("kit: PR number must be ASCII digits (use --branch for local branches)")
-    return arg
-
-
-def head_branch(name: str) -> str:
-    if name.startswith("-"):
-        sys.exit(f"kit: invalid branch name {name!r}")
-    if subprocess.run(["git", "rev-parse", "--verify", "-q", f"refs/heads/{name}"], cwd=ROOT, capture_output=True).returncode:
-        sys.exit(f"kit: no such branch {name!r}")
-    return name
-
-
 def diff_stats(base: str, head: str) -> list:
     out = []
-    for line in git("diff", "--numstat", "--no-renames", f"{base}...{head}").splitlines():
+    for line in git("diff", "--numstat", f"{base}...{head}").splitlines():
         a, d, path = (line.split("\t") + ["", "", ""])[:3]
         out.append((int(a) if a.isdigit() else 0, int(d) if d.isdigit() else 0, path))
     return out
 
 
-LIGHT_GLOBS = [".agents/**", "docs/**", "**/*.md", "*.md"]
-LIGHT_EXCLUDE = [".claude/**", "CLAUDE.md", "**/CLAUDE.md", ".agents/owner-rules.md", ".agents/team.md", ".agents/scripts/**", ".agents/templates/**", ".agents/project.md", ".github/**"]
-REVIEW_FILES = {"code": "code-review.md", "security": "security.md", "tests": "tests-<area>.md"}
-
-
 def required_reviews(kind: str, stats: list) -> tuple:
     s = stack()
-    light = team_setting("light_lane", "skip").strip().lower()
-    if light not in ("skip", "quick", "off"):
-        print(f"kit: light_lane '{light}' is not skip|quick|off; treated as off", file=sys.stderr)
-        light = "off"
-    if light != "off" and stats and all(matches(p, LIGHT_GLOBS) and not matches(p, LIGHT_EXCLUDE) for _, _, p in stats):
-        return (["code"] if light == "quick" else []), [f"light lane: only docs/records ({light})"]
     large = int(team_setting("large_pr_lines", "150"))
     sec_policy = team_setting("security_review", "sensitive-or-large").lower()
     test_policy = team_setting("tester_review", "behaviour-change").lower()
@@ -440,6 +420,9 @@ def required_reviews(kind: str, stats: list) -> tuple:
     total = sum(a + d for a, d, _ in stats)
     src_lines = sum(a + d for a, d, p in stats if matches(p, src_globs) and not matches(p, test_globs))
     sens = [p for _, _, p in stats if matches(p, sensitive)]
+    if team_setting("light_review_docs", "yes").lower() == "yes" and stats and not sens \
+            and all(matches(p, LIGHT_GLOBS) and not matches(p, NEVER_LIGHT) for _, _, p in stats):
+        return ["light"], [f"docs only ({len(stats)} files, {total} lines): no reviewer launch; tech lead reads the diff"]
     req, why = ["code"], [f"{total} changed lines ({src_lines} production)"]
     if sec_policy == "always" or sens or total >= large:
         req.append("security")
@@ -448,31 +431,29 @@ def required_reviews(kind: str, stats: list) -> tuple:
                                or (test_policy == "large" and total >= large)):
         req.append("tests")
         why.append(f"tests: {test_policy}")
+    for dr in domain_reviews():  # stack-specific reviewers chosen by the paths touched (stack.json -> domain_reviews)
+        hit = [p for _, _, p in stats if matches(p, dr.get("globs", []))]
+        if hit:
+            req.append(dr["name"])
+            why.append(f"{dr['name']} ({dr['agent']}): {', '.join(hit[:3])}")
     return req, why
+
+
+def domain_reviews() -> list:
+    return [d for d in stack().get("domain_reviews", []) if d.get("name") and d.get("agent")]
+
+
+def review_file(name: str) -> str:
+    base = {"code": "code-review.md", "security": "security.md", "tests": "tests-<area>.md"}
+    return base.get(name) or next((d.get("file", f"{name}.md") for d in domain_reviews() if d["name"] == name), f"{name}.md")
 
 
 def current_branch() -> str:
     return git("rev-parse", "--abbrev-ref", "HEAD").strip()
 
 
-def review_paths(req: list, fid: str) -> list:
-    d = f".agents/reviews/{fid or '<feature-id>'}"
-    return [f"  {r} -> {d}/{REVIEW_FILES[r]}" for r in req]
-
-
 def review_plan(argv: list, show: bool = True) -> tuple:
     integ, _ = branches()
-    if "--files" in argv:
-        # plan before dispatch: reviews implied by the planned file list (~10 lines per file; sizes unknown)
-        files = [f for f in argv[argv.index("--files") + 1].split(",") if f]
-        kind = argv[argv.index("--kind") + 1] if "--kind" in argv else "feat"
-        fid = argv[argv.index("--feature") + 1] if "--feature" in argv else ""
-        stats = [(10, 0, f) for f in files]
-        req, why = required_reviews(kind, stats)
-        if show:
-            print(f"reviews needed for {len(files)} planned files: {', '.join(req) or 'none'}  ({'; '.join(why)})")
-            print("\n".join(review_paths(req, fid)))
-        return req, why, "", "", "", kind, fid, stats
     if "--diff" in argv:
         # local review without a PR: --diff <base>..<head> or --diff <base> (head = HEAD); used in in-place mode
         rng = argv[argv.index("--diff") + 1]
@@ -488,25 +469,664 @@ def review_plan(argv: list, show: bool = True) -> tuple:
         stats = diff_stats(base, headref)
         req, why = required_reviews(kind, stats)
         if show:
-            print(f"reviews needed for {rng}: {', '.join(req) or 'none'}  ({'; '.join(why)})")
-            print("\n".join(review_paths(req, fid)))
+            print(f"reviews needed for {rng}: {', '.join(req)}  ({'; '.join(why)})")
         return req, why, base, headref, head, kind, fid, stats
     if "--branch" in argv:
-        head = head_branch(opt_value(argv, "--branch"))
+        head = argv[argv.index("--branch") + 1]
         base, headref = base_ref(), head
     else:
         info = pr_info(argv[0])
         head = info["headRefName"]
         base, headref = pr_refs(info)
     kind, fid = classify(head)
-    if "--feature" in argv:
-        fid = argv[argv.index("--feature") + 1]
     stats = diff_stats(base, headref)
     req, why = required_reviews(kind, stats)
     if show:
-        print(f"reviews needed for {head}: {', '.join(req) or 'none'}  ({'; '.join(why)})")
-        print("\n".join(review_paths(req, fid)))
+        print(f"reviews needed for {head}: {', '.join(req)}  ({'; '.join(why)})")
     return req, why, base, headref, head, kind, fid, stats
+
+# ---------------------------------------------------------------- envelope reviews (no reviewer agents)
+
+ENVELOPE_EXCLUDE = ["**/migrations/**", "**/*.sql", ".github/**", "**/Dockerfile", "Dockerfile", "**/*.lock", ".env.example",
+                    "**/auth/**", "**/*secret*", "**/*crypt*", ".claude/**", "CLAUDE.md", "AGENTS.md", "**/CLAUDE.md",
+                    "**/package.json", "**/Cargo.toml", "**/pyproject.toml", "**/requirements*.txt", "**/go.mod", "**/pom.xml",
+                    "**/build.gradle*"]  # new dependencies always get the full security reviewer
+ID_PREFIX = {"code": "CR", "security": "SEC", "tests": "TS"}
+SEVERITIES = {"security": "critical | high | medium | low | info"}
+VERDICTS = {"security": ("PASS", "BLOCK")}
+
+
+def skill_sections(skill: str, pattern: str) -> str:
+    f = ROOT / ".claude" / "skills" / skill / "SKILL.md"
+    if not f.exists():
+        return ""
+    text = re.sub(r"^---\n.*?\n---\n", "", f.read_text(errors="replace"), count=1, flags=re.S)
+    parts = re.split(r"(?m)^(## .*)$", text)
+    rx = re.compile(pattern, re.I)
+    return "".join(parts[i] + parts[i + 1] for i in range(1, len(parts), 2) if rx.search(parts[i])).strip()
+
+
+def envelope_checklist(name: str) -> str:
+    roles = stack().get("skill_roles", {})
+    if name == "code":
+        return "\n\n".join(x for x in (skill_sections("code-review", r"red-flag|checklist|severity"),
+                                       skill_sections(roles.get("core", ""), r"golden rules")) if x)
+    if name == "security":
+        return "\n\n".join(x for x in (skill_sections("security-review", r"secrets|baseline|severity"),
+                                       skill_sections(roles.get("security", ""), r"golden rules|red.flag")) if x)
+    dr = next((d for d in domain_reviews() if d["name"] == name), {})
+    out = [skill_sections(c["skill"], c.get("sections", ".")) for c in dr.get("envelope_checklist", [])]
+    return "\n\n".join(x for x in out if x) or f"Review as {dr.get('agent', name)} would: correctness of this area."
+
+
+def agent_model_effort(names: list) -> tuple:
+    team = (ROOT / ".agents" / "team.md").read_text() if (ROOT / ".agents" / "team.md").exists() else ""
+    order = ["low", "medium", "high", "xhigh", "max"]
+    model, effort = "", "medium"
+    for n in names:
+        m = re.search(rf"^\|\s*{re.escape(n)}\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|", team, re.M)
+        if m:
+            model = model or (m.group(1) if m.group(1) not in ("-", "inherit") else "")
+            if m.group(2) in order and order.index(m.group(2)) > order.index(effort):
+                effort = m.group(2)
+    return model, effort
+
+
+def envelope_schema() -> dict:
+    finding = {"type": "object", "properties": {k: {"type": "string"} for k in ("severity", "file_line", "issue", "why", "fix")},
+               "required": ["severity", "file_line", "issue", "fix"]}
+    prev = {"type": "object", "properties": {"id": {"type": "string"}, "status": {"type": "string", "enum": ["fixed", "not fixed"]}},
+            "required": ["id", "status"]}
+    review = {"type": "object", "properties": {"name": {"type": "string"}, "verdict": {"type": "string"},
+                                               "previous": {"type": "array", "items": prev}, "findings": {"type": "array", "items": finding}},
+              "required": ["name", "verdict", "findings"]}
+    return {"type": "object", "properties": {"need_full_review": {"type": "boolean"}, "reason": {"type": "string"},
+                                             "reviews": {"type": "array", "items": review}},
+            "required": ["need_full_review", "reviews"]}
+
+
+ENVELOPE_SYSTEM = """You are an independent code reviewer for a software team. Everything you may use is in the message:
+the change (diff with surrounding lines), the checklists to apply, project rules, and earlier findings if this is a
+re-review. You have no tools and cannot open files.
+
+Rules:
+- Review only the change and what it affects. Report real problems with a concrete reason; no style preferences.
+- Apply each requested review's checklist and severity scale exactly. One entry in "reviews" per requested review,
+  with "name" exactly as given.
+- Verdict per review: code and domain reviews APPROVE or REQUEST CHANGES; security PASS or BLOCK. A blocking finding
+  (blocker/major, or security critical/high) means REQUEST CHANGES / BLOCK.
+- file_line is "path:line" using new-file line numbers from the diff.
+- Re-review: give every earlier finding id a status (fixed / not fixed) in "previous", and add only new findings.
+- If you cannot judge something important without seeing code that is not in the message (a caller, a type, a test
+  file), set need_full_review to true and name what is missing in "reason". Never guess about code you cannot see.
+"""
+
+
+def envelope(argv: list) -> int:
+    if not argv:
+        sys.exit("usage: kit.py envelope <pr> | --branch <b> | --diff <base>..<head> [--feature ID] [--dry-run]")
+    dry = "--dry-run" in argv
+    req, why, base, headref, head, kind, fid, stats = review_plan(argv, show=False)
+    feature = argv[argv.index("--feature") + 1] if "--feature" in argv else fid
+    pr_no = argv[0] if argv and not argv[0].startswith("--") else ""
+    ref = review_ref(pr=pr_no, branch=head)
+    total = sum(a + d for a, d, _ in stats)
+    limit = int(team_setting("envelope_max_lines", "150"))
+    excl = ENVELOPE_EXCLUDE + stack().get("envelope_exclude_globs", [])
+    blocked = [p for _, _, p in stats if matches(p, excl)]
+    covered = [r for r in req if r != "tests" and r != "light"]
+    agents = {"code": "code-reviewer", "security": "security-reviewer", "tests": "tester", **{d["name"]: d["agent"] for d in domain_reviews()}}
+    if not feature:
+        sys.exit("kit: pass --feature <id> (branch name has no feature id)")
+    if "light" in req or not covered:
+        print(f"envelope: nothing to review by envelope ({', '.join(req) or 'none'} required)")
+        return 0
+    reasons = []
+    if team_setting("envelope_reviews", "yes").lower() != "yes":
+        reasons.append("envelope_reviews is off in team.md")
+    if total > limit:
+        reasons.append(f"{total} changed lines > envelope_max_lines {limit}")
+    if blocked:
+        reasons.append("files that always get full reviewers: " + ", ".join(blocked[:4]))
+    cmd0 = team_setting("envelope_command", "claude")
+    if not shutil.which(cmd0):
+        reasons.append(f"`{cmd0}` not found on PATH")
+    if reasons:
+        print(f"envelope: not eligible ({'; '.join(reasons)}). Launch the reviewers instead: "
+              + ", ".join(agents.get(r, r) for r in covered))
+        return 3
+    d_out = ROOT / ".agents" / "reviews" / feature / ref
+    rules = ROOT / ".agents" / "owner-rules.md"
+    owner = re.sub(r"<!--.*?-->", "", rules.read_text(errors="replace"), flags=re.S) if rules.exists() else ""
+    owner = "\n".join(l for l in owner.splitlines() if re.match(r"^\s*-\s+\S", l))
+    plan = ROOT / ".agents" / "plans" / f"{feature}.md"
+    acc = ""
+    if plan.exists():
+        m = re.search(r"^## Acceptance criteria\s*\n(.*?)(?=^## |\Z)", plan.read_text(), re.S | re.M)
+        acc = m.group(1).strip() if m else ""
+    max_chars = int(team_setting("envelope_max_diff_chars", "60000"))
+    diff = git("diff", "-U12", f"{base}...{headref}")
+    if len(diff) > max_chars:
+        print(f"envelope: not eligible (diff with context is {len(diff)} chars > {max_chars}). Launch the reviewers instead: "
+              + ", ".join(agents.get(r, r) for r in covered))
+        return 3
+    parts = [f"# Change to review\nBranch {head} -> {base}; feature {feature}; {len(stats)} files, {total} changed lines.",
+             "Requested reviews: " + ", ".join(covered)]
+    if acc:
+        parts.append("## Acceptance criteria\n" + acc)
+    if owner:
+        parts.append("## Owner rules (apply everywhere)\n" + owner)
+    for r in covered:
+        sev = SEVERITIES.get(r, "blocker | major | minor | nit")
+        v = VERDICTS.get(r, ("APPROVE", "REQUEST CHANGES"))
+        parts.append(f"## Review '{r}' ({agents.get(r, r)}): severities {sev}; verdict {v[0]} or {v[1]}\n" + envelope_checklist(r))
+        f = d_out / review_file(r)
+        if f.exists():
+            _, rows = findings(f)
+            open_rows = [x for x in rows if x.get("status", "").lower() in OPEN]
+            if open_rows:
+                parts.append(f"### Earlier findings for '{r}' (give each a status in 'previous')\n" + "\n".join(
+                    f"- {x.get('id')} [{x.get('severity')}] {x.get('file:line')}: {x.get('issue')}" for x in open_rows))
+    parts.append("## Diff\n```diff\n" + diff + "\n```")
+    message = "\n\n".join(parts)
+    if dry:
+        print(message)
+        print(f"\n[envelope: ~{len(message) // 4:,} tokens of content; would write {', '.join(str(d_out / review_file(r)) for r in covered)}]")
+        return 0
+    model, effort = agent_model_effort([agents.get(r, r) for r in covered])
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        sp = pathlib.Path(td) / "system.md"
+        sp.write_text(ENVELOPE_SYSTEM)
+        base_cmd = [shutil.which(cmd0), "-p", "--tools", "", "--system-prompt-file", str(sp), "--output-format", "json",
+                    "--json-schema", json.dumps(envelope_schema()), "--no-session-persistence", "--effort", effort]
+        if model:
+            base_cmd += ["--model", model]
+        env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
+        r = None
+        for extra in (["--safe-mode"], ["--settings", json.dumps({"disableAllHooks": True})]):
+            r = subprocess.run(base_cmd + extra, input=message, capture_output=True, text=True, cwd=ROOT, env=env, timeout=900)
+            if r.returncode == 0 or "safe-mode" not in (r.stderr + r.stdout).lower():
+                break
+    try:
+        out = json.loads(r.stdout)
+    except (ValueError, AttributeError):
+        out = {}
+    data = out.get("structured_output") if isinstance(out, dict) else None
+    if r.returncode != 0 or not isinstance(data, dict):
+        print(f"envelope: the review call failed ({(r.stderr or r.stdout or '').strip()[-300:]}). Launch the reviewers instead: "
+              + ", ".join(agents.get(x, x) for x in covered))
+        return 3
+    u = out.get("usage") or {}
+    inp = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+    used = inp + int(u.get("output_tokens") or 0)
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("kit_budget", ROOT / ".claude" / "kit" / "budget.py")
+        b = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(b)
+        now = dt.datetime.now()
+        b.write_row({"date": now.date().isoformat(), "time": now.strftime("%H:%M"), "task": b.current_task(),
+                     "agent": "envelope-review", "tokens": used, "processed": used, "source": "auto", "start": inp,
+                     "session": "", "note": f"{ref}: {', '.join(covered)}"})
+    except Exception:  # noqa: BLE001
+        pass
+    if data.get("need_full_review"):
+        print(f"envelope: the reviewer needs more context ({data.get('reason', '?')}). Launch the reviewers instead: "
+              + ", ".join(agents.get(x, x) for x in covered) + f"  [{used:,} tokens]")
+        return 3
+    d_out.mkdir(parents=True, exist_ok=True)
+    summary = []
+    for rv in data.get("reviews", []):
+        name = rv.get("name", "")
+        if name not in covered:
+            continue
+        f = d_out / review_file(name)
+        prefix = ID_PREFIX.get(name, name.upper()[:4]) + f"-{feature}-"
+        rows, round_no = [], 1
+        if f.exists():
+            _, rows = findings(f)
+            m = re.search(r"^Round:\s*(\d+)", f.read_text(), re.M)
+            round_no = int(m.group(1)) + 1 if m else 2
+            status = {p.get("id"): p.get("status") for p in rv.get("previous", [])}
+            for x in rows:
+                if x.get("id") in status and x.get("status", "").lower() in OPEN:
+                    x["status"] = status[x["id"]]
+        nums = [int(n) for x in rows for n in re.findall(r"-(\d+)$", x.get("id", ""))]
+        nxt = max(nums, default=0)
+        for fd in rv.get("findings", []):
+            nxt += 1
+            rows.append({"id": f"{prefix}{nxt}", "severity": fd.get("severity", "").lower(), "file:line": fd.get("file_line", ""),
+                         "issue": fd.get("issue", ""), "why it matters": fd.get("why", ""), "suggested fix": fd.get("fix", ""),
+                         "status": "open", "tech-lead decision": ""})
+        block = {"critical", "high"} if name == "security" else {"blocker", "major", "critical", "high"}
+        yes, no = VERDICTS.get(name, ("APPROVE", "REQUEST CHANGES"))
+        model_ok = str(rv.get("verdict", "")).upper().startswith(("APPROVE", "PASS"))
+        still_open = [x for x in rows if x.get("status", "").lower() in OPEN]
+        verdict = no if open_blockers(rows, block) else yes if (model_ok or not still_open) else no
+        cols = ["id", "severity", "file:line", "issue", "why it matters", "suggested fix", "status", "tech-lead decision"]
+        clean = lambda s: str(s).replace("|", "/").replace("\n", " ").strip()
+        table = ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
+        table += ["| " + " | ".join(clean(x.get(c, "")) for c in cols) + " |" for x in rows]
+        f.write_text(f"# {feature} - {name} review ({agents.get(name, name)}, by envelope) - {head}\n\n"
+                     f"Verdict: {verdict}\nRound: {round_no}\nReviewed by: envelope (one tool-free Claude call)\n\n" + "\n".join(table) + "\n")
+        n_open = len([x for x in rows if x.get("status", "").lower() in OPEN])
+        summary.append(f"{name} {verdict} ({n_open} open)")
+    missing = [x for x in covered if x not in {rv.get("name") for rv in data.get("reviews", [])}]
+    print(f"envelope {ref}: " + "; ".join(summary) + f"  [{used:,} tokens, no reviewer agents]"
+          + (f"; missing from the answer: {', '.join(missing)} - launch those reviewers" if missing else "")
+          + (" ; tester still required (runs tests)" if "tests" in req else ""))
+    print(f"files: {d_out.relative_to(ROOT)}/  -> next: `just triage {feature} --ref {ref}` if anything is open")
+    return 0 if not missing else 3
+
+# ---------------------------------------------------------------- the library: one section on request
+
+def _clean_heading(h: str) -> str:
+    h = re.sub(r"^#+\s*", "", h)
+    h = re.sub(r"^\d+[a-z]?(\.\d+)*\.?\s*", "", h)
+    return re.sub(r"\s+", " ", re.sub(r"\(.*?\)|`", "", h)).strip(" :-")
+
+
+def doc_sections() -> list:
+    """Every '## ' section of every skill and reference file (long sections also split at '### ')."""
+    out = []
+    for f in sorted((ROOT / ".claude" / "skills").glob("*/SKILL.md")) + sorted((ROOT / ".claude" / "skills").glob("*/references/*.md")):
+        skill = f.parent.name if f.name == "SKILL.md" else f.parent.parent.name
+        where = "SKILL" if f.name == "SKILL.md" else f.stem
+        text = re.sub(r"^---\n.*?\n---\n", "", f.read_text(errors="replace"), count=1, flags=re.S)
+        lines = text.splitlines()
+        fence, heads = False, []
+        for i, l in enumerate(lines):
+            if l.lstrip().startswith("```"):
+                fence = not fence
+            elif not fence and l.startswith("## "):
+                heads.append(i)
+        if not heads:  # a reference file without '## ' sections is one section, titled by its '# ' line
+            title = next((i for i, l in enumerate(lines) if l.startswith("# ")), None)
+            heads = [title] if title is not None else []
+            if title is not None:
+                lines[title] = "## " + lines[title][2:]
+        for k, i in enumerate(heads):
+            j = heads[k + 1] if k + 1 < len(heads) else len(lines)
+            body = lines[i:j]
+            if re.search(r"^(Full detail|In short:).*references/", "\n".join(body), re.M) and len(body) <= 8:
+                continue  # a stub that points to a reference file: the reference itself is indexed
+            out.append((skill, where, lines[i], "\n".join(body), f, i + 1))
+            if len("\n".join(body)) > 6000:
+                subs = [x for x in range(i + 1, j) if lines[x].startswith("### ")]
+                for m, s in enumerate(subs):
+                    e = subs[m + 1] if m + 1 < len(subs) else j
+                    out.append((skill, where, lines[s], "\n".join(lines[s:e]), f, s + 1))
+    return out
+
+
+def docs_cmd(argv: list) -> int:
+    secs = doc_sections()
+    if not argv:
+        sys.exit('usage: kit.py docs "<topic>"  |  docs "<skill>: <topic>"  |  docs --list [skill]')
+    if argv[0] == "--list":
+        want = argv[1] if len(argv) > 1 else ""
+        cur = None
+        for skill, where, head, body, f, line in secs:
+            if want and skill != want:
+                continue
+            if (skill, where) != cur:
+                cur = (skill, where)
+                print(f"\n{skill}" + ("" if where == "SKILL" else f" > {where}"))
+            print(f"  {_clean_heading(head)}  (~{len(body) // 4} tok)")
+        return 0
+    query = " ".join(a for a in argv if not a.startswith("--")).lower()
+    only = ""
+    m = re.match(r"^\s*([a-z0-9-]+)\s*:\s*(.+)$", query)
+    if m and any(s[0] == m.group(1) for s in secs):
+        only, query = m.group(1), m.group(2)
+    for short, longer in stack().get("docs_synonyms", {}).items():  # e.g. {"iv": "implied volatility"}
+        if re.search(rf"\b{re.escape(short.lower())}\b", query):
+            query += " " + longer.lower()
+    words = [w for w in re.findall(r"[a-z0-9&+#.-]{2,}", query) if w not in ("the", "and", "for", "how", "to", "of", "in", "a")]
+    if not words:
+        sys.exit("kit: give a topic, e.g. docs \"greeks\"")
+    scored = []
+    for sec in secs:
+        skill, where, head, body, f, line = sec
+        if only and skill != only:
+            continue
+        h, name, b = _clean_heading(head).lower(), f"{skill} {where}".lower(), body.lower()
+        def hit(w, s):  # short words (iv, pr, ui) must match whole words, not inside "live"
+            return bool(re.search(rf"\b{re.escape(w)}\b", s)) if len(w) <= 3 else w in s
+        def count(w, s):
+            return len(re.findall(rf"\b{re.escape(w)}\b", s)) if len(w) <= 3 else s.count(w)
+        score = sum(4 * hit(w, h) + 2 * hit(w, name) + min(count(w, b), 5) * 0.3 for w in words)
+        score += 5 * (query in h) + 0.1 * (head.startswith("## "))
+        if score > 0:
+            scored.append((score, -len(body), sec))
+    if not scored:
+        print(f'docs: nothing matches "{query}". Try fewer words, or `just docs --list` to see every section.')
+        return 1
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    skill, where, head, body, f, line = scored[0][2]
+    alts = [f'"{_clean_heading(s[2][2])}" ({s[2][0]})' for s in scored[1:5] if s[2][3] != body]
+    lines = body.splitlines()
+    limit = int(team_setting("docs_max_lines", "120"))
+    print(f"{skill} > {'' if where == 'SKILL' else where + ' > '}{_clean_heading(head)}   "
+          f"({len(lines)} lines, ~{len(body) // 4} tok; {f.relative_to(ROOT)}:{line})")
+    if alts:
+        print("also: " + "; ".join(alts[:4]))
+    print()
+    print("\n".join(lines[:limit]))
+    if len(lines) > limit:
+        print(f"\n... {len(lines) - limit} more lines: Read {f.relative_to(ROOT)} offset {line + limit} limit {len(lines) - limit}")
+    return 0
+
+# ---------------------------------------------------------------- what an agent reads before it starts
+
+def _tok(chars: int) -> int:
+    return (chars + 3) // 4  # rough: ~4 characters per token
+
+
+def _frontmatter(text: str) -> dict:
+    m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+    fm = m.group(1) if m else ""
+    skills = re.findall(r"^\s+-\s+([\w-]+)\s*$", fm.split("skills:", 1)[1].split("\n", 1)[1] if "skills:" in fm else "", re.M)
+    skills = skills[:len(skills)]
+    return {"skills": [s for s in skills if (ROOT / ".claude" / "skills" / s / "SKILL.md").exists()],
+            "memory": (re.search(r"^memory:\s*(\S+)", fm, re.M) or [None, ""])[1],
+            "omit": bool(re.search(r"^omitClaudeMd:\s*true", fm, re.M)), "body": len(text) - (m.end() if m else 0)}
+
+
+def claude_md_files() -> list:
+    """Every CLAUDE.md level Claude Code gives a sub-agent (that this script can see)."""
+    home = pathlib.Path.home()
+    out = [home / ".claude" / "CLAUDE.md"] + sorted((home / ".claude" / "rules").glob("*.md"))
+    d = ROOT.resolve()
+    ups = []
+    for parent in d.parents:
+        if parent == home or parent == parent.parent:
+            break
+        ups += [parent / "CLAUDE.md", parent / "AGENTS.md"]
+    out += ups + [ROOT / "CLAUDE.md", ROOT / ".claude" / "CLAUDE.md", ROOT / "CLAUDE.local.md", ROOT / "AGENTS.md"]
+    for r in sorted((ROOT / ".claude" / "rules").glob("*.md")):
+        if not re.match(r"^---\n(?:.*\n)*?paths:", r.read_text(errors="replace")):  # rules with paths load only when matching files are read
+            out.append(r)
+    return [f for f in out if f.is_file()]
+
+
+def memory_file(agent: str, scope: str) -> pathlib.Path:
+    base = {"project": ROOT / ".claude" / "agent-memory", "local": ROOT / ".claude" / "agent-memory-local",
+            "user": pathlib.Path.home() / ".claude" / "agent-memory"}.get(scope)
+    return base / agent / "MEMORY.md" if base else pathlib.Path("/nonexistent")
+
+
+def start_parts(agent: str) -> list:
+    f = ROOT / ".claude" / "agents" / f"{agent}.md"
+    fm = _frontmatter(f.read_text(errors="replace"))
+    parts = [("its own instructions (agent file)", fm["body"])]
+    for s in fm["skills"]:
+        parts.append((f"handbook: {s}", len((ROOT / ".claude" / "skills" / s / "SKILL.md").read_text(errors="replace"))))
+    if fm["omit"]:
+        parts.append(("CLAUDE.md levels (skipped: omitClaudeMd)", 0))
+    else:
+        for c in claude_md_files():
+            label = str(c).replace(str(pathlib.Path.home()), "~") if not str(c).startswith(str(ROOT)) else str(c.relative_to(ROOT))
+            parts.append((f"house rules: {label}", len(c.read_text(errors="replace"))))
+    if fm["memory"] and fm["memory"] != "none":
+        mf = memory_file(agent, fm["memory"])
+        mem = "\n".join(mf.read_text(errors="replace").splitlines()[:200])[:25000] if mf.exists() else ""
+        parts.append((f"notebook: {mf.relative_to(ROOT) if str(mf).startswith(str(ROOT)) else mf} ({len(mem.splitlines())} lines)", len(mem)))
+    st = git("status", "--short")[:2000] + git("log", "--oneline", "-5")
+    parts.append(("desk snapshot: git status (approx.)", len(st)))
+    rules = ROOT / ".agents" / "owner-rules.md"
+    if rules.exists():
+        own = "\n".join(l for l in re.sub(r"<!--.*?-->", "", rules.read_text(), flags=re.S).splitlines() if re.match(r"^\s*-\s+\S", l))
+        parts.append(("owner rules (added by the start hook)", len(own)))
+    return parts
+
+
+def measured_start(agent: str) -> tuple:
+    led = ROOT / ".agents" / "budget.csv"
+    if not led.exists():
+        return 0, 0, 0
+    import csv
+    with led.open() as fh:
+        rows = [r for r in csv.DictReader(fh) if r.get("agent") == agent and r.get("start")]
+    if not rows:
+        return 0, 0, 0
+    starts = [int(r["start"]) for r in rows]
+    prompts = [int(m.group(1)) for r in rows for m in [re.search(r"prompt (\d+) tok", r.get("note", ""))] if m]
+    return sum(starts) // len(starts), len(starts), (sum(prompts) // len(prompts) if prompts else 0)
+
+
+def start_report(argv: list) -> int:
+    agents_dir = ROOT / ".claude" / "agents"
+    names = [argv[0]] if argv else sorted(p.stem for p in agents_dir.glob("*.md"))
+    if argv and not (agents_dir / f"{argv[0]}.md").exists():
+        sys.exit(f"kit: no agent {argv[0]!r} (just agents lists them)")
+    if not argv:
+        print(f"{'agent':20} {'known parts':>11} {'measured start':>15}  (just start-report <agent> for the breakdown)")
+        for n in names:
+            known = sum(_tok(c) for _, c in start_parts(n))
+            avg, runs, _ = measured_start(n)
+            print(f"{n:20} {known:>10,}  {(f'{avg:,} ({runs} runs)' if runs else '-'):>15}")
+        return 0
+    n = names[0]
+    parts = start_parts(n)
+    avg, runs, prompt = measured_start(n)
+    print(f"What {n} reads before it starts working (tokens are estimates: ~4 characters per token)\n")
+    for label, chars in parts:
+        print(f"  {_tok(chars):>7,}  {label}")
+    known = sum(_tok(c) for _, c in parts)
+    if prompt:
+        print(f"  {prompt:>7,}  task message from the manager (average of measured runs)")
+        known += prompt
+    print(f"  {'-' * 7}\n  {known:>7,}  known parts")
+    if runs:
+        rest = avg - known
+        print(f"  {avg:>7,}  measured start (average of {runs} runs)")
+        print(f"  {rest:>7,}  the rest: Claude Code's tool manuals and environment details" + (" (plus anything above that was larger at the time)" if rest > 0 else ""))
+    else:
+        print("\n  No measured runs yet: after this agent runs once, the measured start and the rest appear here.")
+    tips = []
+    if any(l.startswith("house rules:") and _tok(c) > 2500 for l, c in parts):
+        tips.append("a CLAUDE.md level is large: every agent reads it on every start; keep it an index and move detail to skills")
+    if any(l.startswith("notebook:") and _tok(c) > 1000 for l, c in parts):
+        tips.append("its notebook is long: trim it, or set memory to none for this agent in team.md")
+    if tips:
+        print("\nTips: " + "; ".join(tips))
+    return 0
+
+# ---------------------------------------------------------------- triage without an agent
+
+AUTO_FIX = {"blocker", "critical", "high", "major", "medium"}
+CHEAP = {"minor", "nit", "low", "info"}
+
+
+def triage(argv: list) -> int:
+    """Apply delivery-process triage defaults to undecided open findings. The tech lead is needed only for what this
+    prints under 'needs the tech lead' (disputed findings, two reviewers suggesting different fixes for the same spot,
+    findings without a clear fix, or unknown severities)."""
+    if not argv or argv[0].startswith("--"):
+        sys.exit("usage: kit.py triage <feature> [--ref pr-N|branch] [--dry-run]")
+    feature, dry = argv[0], "--dry-run" in argv
+    base = ROOT / ".agents" / "reviews" / feature
+    if "--ref" in argv:
+        dirs = [base / argv[argv.index("--ref") + 1]]
+    else:
+        dirs = [base] + sorted(d for d in base.glob("*") if d.is_dir()) if base.exists() else []
+    files = [f for d in dirs if d.exists() for f in sorted(d.glob("*.md")) if f.parent == d]
+    if not files:
+        print(f"triage {feature}: no findings files under {base.relative_to(ROOT)}")
+        return 0
+    pending, spots = [], {}
+    for f in files:
+        _, rows = findings(f)
+        for r in rows:
+            status = r.get("status", "").lower()
+            decision = r.get("tech-lead decision", r.get("decision", "")).strip()
+            if status not in OPEN or decision:
+                continue
+            spot = (r.get("file:line") or "").strip()
+            fix = (r.get("suggested fix") or r.get("fix") or "").strip()
+            pending.append((f, r, spot, fix))
+            if spot:
+                spots.setdefault(spot, set()).add(fix.lower())
+    if not pending:
+        print(f"triage {feature}: nothing undecided")
+        return 0
+    auto, judge = [], []
+    for f, r, spot, fix in pending:
+        sev, status = r.get("severity", "").lower(), r.get("status", "").lower()
+        why = ("disputed by the developer" if status == "disputed"
+               else "reviewers suggest different fixes for the same spot" if spot and len(spots.get(spot, ())) > 1
+               else "no clear fix suggested" if sev in AUTO_FIX and len(fix) < 4
+               else "unknown severity" if sev not in AUTO_FIX | CHEAP else "")
+        (judge if why else auto).append((f, r, "fix now (auto)" if sev in AUTO_FIX else "fix now if cheap (auto)", why))
+    if not dry:
+        by_file = {}
+        for f, r, decision, _ in auto:
+            by_file.setdefault(f, {})[r.get("id", "")] = decision
+        for f, ids in by_file.items():
+            out = []
+            for line in f.read_text().splitlines():
+                cells = line.strip().strip("|").split("|") if line.strip().startswith("|") else []
+                if cells and cells[0].strip() in ids and len(cells) >= 2:
+                    cells[-1] = f" {ids[cells[0].strip()]} "
+                    line = "|" + "|".join(cells) + "|"
+                out.append(line)
+            f.write_text("\n".join(out) + "\n")
+    rel = lambda f: str(f.relative_to(ROOT))
+    print(f"triage {feature}: {len(auto)} decided by the defaults{' (dry run)' if dry else ''}, {len(judge)} need the tech lead")
+    groups = {}
+    for f, r, decision, _ in auto:
+        groups.setdefault(rel(f.parent), []).append(f"{r.get('id', '?')} ({r.get('severity', '?')})")
+    for d, ids in groups.items():
+        print(f"  fix now -> developer of {d}: {', '.join(ids)}")
+    for f, r, _, why in judge:
+        print(f"  needs tech lead: {r.get('id', '?')} in {rel(f)} - {why}")
+    if not judge:
+        print("  no judgment needed: send the fix list straight to the developer(s); no tech-lead launch")
+    return 0
+
+# ---------------------------------------------------------------- waiting, shipping, status
+
+def pr_wait(argv: list, quiet: bool = False) -> int:
+    """Wait for a PR's CI in the script (no agent turns). Exit 0 passed, 1 failed, 2 still pending at timeout."""
+    import time
+    if not argv or argv[0].startswith("--"):
+        sys.exit("usage: kit.py pr-wait <pr> [--timeout seconds] [--interval seconds]")
+    timeout = int(argv[argv.index("--timeout") + 1]) if "--timeout" in argv else 540
+    interval = int(argv[argv.index("--interval") + 1]) if "--interval" in argv else 20
+    start, state, detail = time.time(), "none", ""
+    while True:
+        state, detail = ci_state(pr_info(argv[0]))
+        if state in ("passed", "failed"):
+            break
+        if time.time() - start + interval > timeout:
+            break
+        time.sleep(interval)
+    waited = int(time.time() - start)
+    if state == "none" and team_setting("require_ci_checks", "yes").lower() == "no":
+        state, detail = "passed", "no CI checks (not required)"
+    msg = {"passed": "CI PASSED", "failed": "CI FAILED", "pending": "CI STILL RUNNING", "none": "NO CI REPORTED"}[state]
+    hint = ""
+    if state == "pending":
+        hint = " - run `just pr-wait` again (one call per ~9 minutes is fine)"
+    elif state == "none":
+        hint = (" - if this repo has no CI workflow yet, ask cicd, or set require_ci_checks | no in team.md")
+    if not quiet or state != "passed":
+        print(f"PR {argv[0]}: {msg} after {waited}s ({detail}){hint}")
+    return {"passed": 0, "failed": 1}.get(state, 2)
+
+
+def update_integration_checkout() -> str:
+    """After a merge: fetch; fast-forward the integration branch if this checkout is on it (never switches)."""
+    integ, _ = branches()
+    subprocess.run(["git", "fetch", "-q", "origin"], cwd=ROOT, capture_output=True)
+    if current_branch() == integ and ref_exists(f"origin/{integ}"):
+        r = subprocess.run(["git", "merge", "--ff-only", "-q", f"origin/{integ}"], cwd=ROOT, capture_output=True, text=True)
+        return f"{integ} updated" if r.returncode == 0 else f"{integ} not fast-forwarded ({r.stderr.strip()[:80]})"
+    return f"fetched (checkout is on {current_branch()}, not {integ}: switch with `git switch {integ}` when free)"
+
+
+def ship(argv: list) -> int:
+    """Tech lead's one command: wait for CI, merge-check, merge, update the integration branch, refresh the codemap."""
+    if "--branch" in argv:
+        rc = merge(argv)
+        if rc == 0:
+            codemap()
+            print("shipped: merged locally; codemap refreshed")
+        return rc
+    if not argv or argv[0].startswith("--"):
+        sys.exit("usage: kit.py ship <pr> | --branch <b> --title '<conventional title>'")
+    w = pr_wait([argv[0]] + (["--timeout", argv[argv.index("--timeout") + 1]] if "--timeout" in argv else []), quiet=True)
+    if w == 1:
+        return 1
+    if w == 2:
+        print(f"not shipped: CI still running or not reported - run `just ship {argv[0]}` again later")
+        return 2
+    rc = merge(argv)
+    if rc:
+        return rc
+    note = update_integration_checkout()
+    codemap()
+    print(f"shipped PR {argv[0]}: merged; {note}; codemap refreshed. Ask other open branches to rebase if they touch the same files.")
+    return 0
+
+
+def status_cmd(argv: list) -> int:
+    """Everything the manager needs at session start, in one short output (instead of reading several files)."""
+    integ, rel = branches()
+    dirty = [l for l in git("status", "--porcelain").splitlines() if l and not l[3:].startswith(".agents/")]
+    print(f"checkout: {current_branch() or '?'}{' (uncommitted changes: ' + str(len(dirty)) + ')' if dirty else ''} | "
+          f"integration {integ}, release {rel} | work mode {team_setting('work_mode', 'worktrees')}")
+    pf = ROOT / PREFLIGHT
+    try:
+        pj = json.loads(pf.read_text()) if pf.exists() else {}
+        print("preflight: " + ("; ".join(pj["problems"]) + " (just preflight)" if pj.get("problems") else f"ok ({pj.get('date', '?')})")
+              if pj else "preflight: not run yet (just preflight)")
+    except (ValueError, KeyError):
+        pass
+    r = subprocess.run([sys.executable, str(ROOT / ".claude" / "kit" / "budget.py"), "status"], cwd=ROOT, capture_output=True, text=True)
+    task = (ROOT / ".agents" / "current-task")
+    print(f"task: {task.read_text().strip() if task.exists() else '-'} | budget: {r.stdout.strip() or '-'}")
+    board = ROOT / ".agents" / "board.md"
+    if board.exists():
+        rows, header = [], None
+        for l in board.read_text().splitlines():
+            if not l.strip().startswith("|"):
+                continue
+            cells = [c.strip() for c in l.strip().strip("|").split("|")]
+            if header is None and "status" in [c.lower() for c in cells]:
+                header = [c.lower() for c in cells]
+                continue
+            if header and len(cells) == len(header) and not set("".join(cells)) <= set("-: "):
+                rows.append(dict(zip(header, cells)))
+        done_words = ("merged", "done", "closed", "released", "fixed", "won't fix", "wont fix")
+        open_rows = [r_ for r_ in rows if r_.get("status", "").lower() not in done_words]
+        counts = {}
+        for r_ in rows:
+            counts[r_.get("status", "-") or "-"] = counts.get(r_.get("status", "-") or "-", 0) + 1
+        print(f"board: {len(rows)} rows ({', '.join(f'{k} {v}' for k, v in counts.items()) or 'empty'})")
+        for r_ in open_rows[:8]:
+            print("  - " + " | ".join(v for v in r_.values() if v)[:150])
+        if len(open_rows) > 8:
+            print(f"  ... {len(open_rows) - 8} more open rows in .agents/board.md")
+    if shutil.which("gh") and git("remote").strip():
+        out = subprocess.run(["gh", "pr", "list", "--state", "open", "--limit", "15", "--json",
+                              "number,title,headRefName,baseRefName,isDraft,statusCheckRollup"], cwd=ROOT, capture_output=True, text=True)
+        try:
+            prs = json.loads(out.stdout) if out.returncode == 0 else []
+        except ValueError:
+            prs = []
+        print(f"open PRs: {len(prs)}" + ("" if out.returncode == 0 else " (gh unavailable)"))
+        for pr in prs:
+            state, _ = ci_state(pr)
+            print(f"  #{pr['number']} {pr['headRefName']} -> {pr['baseRefName']}  CI {state}{' (draft)' if pr.get('isDraft') else ''}  {pr['title'][:60]}")
+    bugs = [b for b in records(BUG_DIR) + records(BUG_DRAFTS) if b.get("status", "").lower() in OPEN_BUG]
+    rules = ROOT / ".agents" / "owner-rules.md"
+    n_rules = len([l for l in re.sub(r"<!--.*?-->", "", rules.read_text(), flags=re.S).splitlines()
+                   if re.match(r"^\s*-\s+\S", l)]) if rules.exists() else 0
+    print(f"open bugs: {len({b['id'] for b in bugs})} | features: {len(records(FEATURE_DIR))} | owner rules: {n_rules}")
+    return 0
 
 # ---------------------------------------------------------------- preflight and work mode
 
@@ -567,12 +1187,6 @@ def preflight(argv: list) -> int:
         problems.append("worktrees fail but work_mode is worktrees")
         fixes.append(f"- worktrees fail ({wt_msg}). Either fix that, or switch to in-place mode: `just work-mode in-place` "
                      "(one developer at a time in this checkout; reviews and gates unchanged). Never swap in general-purpose agents.")
-    cur = current_branch() if is_repo else ""
-    main_checkout = git("rev-parse", "--git-dir").strip() == git("rev-parse", "--git-common-dir").strip()
-    if (mode_now == "worktrees" and main_checkout and cur and cur not in (integ, "HEAD")
-            and git("worktree", "list", "--porcelain").count("worktree ") > 1):
-        problems.append(f"main checkout is on '{cur}', not '{integ}' (feature branches belong to agent worktrees)")
-        fixes.append(f"- main checkout: `git switch {integ}`")
     review_path = "PR" if (gh_ok and has_remote) else "local branch (--branch / --diff)"
     width = max(len(c[0]) for c in checks)
     if not quiet:
@@ -908,55 +1522,62 @@ def open_blockers(rows: list, severities: set) -> list:
     return out
 
 
-def find_review(feature: str, name: str, refs: list) -> pathlib.Path:
-    """Expected path first; else any review file of that kind whose header names the same branch/PR."""
-    d = ROOT / ".agents" / "reviews" / feature
-    hit = sorted(d.glob(name.replace("<area>", "*"))) if "<area>" in name else ([d / name] if (d / name).exists() else [])
-    if hit or not refs:
-        return hit
-    stem = name.split(".")[0].replace("-<area>", "")
-    out = []
-    for f in sorted((ROOT / ".agents" / "reviews").glob(f"*/{stem}*.md")):
-        head = "\n".join(f.read_text(errors="replace").splitlines()[:15])
-        if any(re.search(rf"(?<![\w/-]){re.escape(r)}(?![\w-])", head) for r in refs):
-            out.append(f)
-    return out
+def review_ref(pr: str = "", branch: str = "") -> str:
+    return f"pr-{pr}" if pr else re.sub(r"[^A-Za-z0-9._-]+", "-", branch).strip("-")
 
 
-def review_checks(feature: str, kind: str, required: list = None, refs: list = None) -> list:
-    required = ["code", "security"] + (["tests"] if kind in TEST_KINDS else []) if required is None else required
-    refs = refs or []
+def review_dir(feature: str, ref: str) -> pathlib.Path:
+    """One folder per PR (or local branch): .agents/reviews/<feature>/<pr-N|branch>/ - slices of one feature
+    never overwrite each other's verdicts. Falls back to the old per-feature folder for work started before."""
+    base = ROOT / ".agents" / "reviews" / feature
+    d = base / ref if ref else base
+    if ref and not d.exists() and (base / "code-review.md").exists():
+        return base
+    return d
+
+
+def review_checks(feature: str, kind: str, required: list = None, ref: str = "") -> list:
+    required = required if required is not None else (["code", "security"] + (["tests"] if kind in TEST_KINDS else []))
     res = []
-    rel = lambda n: f".agents/reviews/{feature}/{n}"  # noqa: E731
-    if "code" not in required:
-        res.append(("code review (not required: light lane)", True, ""))
+    d = review_dir(feature, ref)
+    if "light" in required:
+        return [("light change (docs only): no reviewer needed; the tech lead reads the diff before merging", True, "")]
+    cr = d / "code-review.md"
+    if cr.exists():
+        v, rows = findings(cr)
+        bad = open_blockers(rows, {"blocker", "major"})
+        res.append(("code review approved", v.startswith("APPROVE") and not bad, f"verdict {v or 'missing'}; open: {', '.join(bad) or 'none'}"))
     else:
-        cr = find_review(feature, "code-review.md", refs)
-        if cr:
-            v, rows = findings(cr[0])
-            bad = open_blockers(rows, {"blocker", "major"})
-            res.append(("code review approved", v.startswith("APPROVE") and not bad, f"verdict {v or 'missing'}; open: {', '.join(bad) or 'none'}"))
-        else:
-            res.append(("code review approved", False, f"missing {rel('code-review.md')}"))
+        res.append(("code review approved", False, f"no {cr.relative_to(ROOT)}"))
+    sec = d / "security.md"
     if "security" not in required:
         res.append(("security review (not required: small, no sensitive files)", True, ""))
+    elif sec.exists():
+        v, rows = findings(sec)
+        bad = open_blockers(rows, {"critical", "high"})
+        res.append(("security review passed", v.startswith("PASS") and not bad, f"verdict {v or 'missing'}; open: {', '.join(bad) or 'none'}"))
     else:
-        sec = find_review(feature, "security.md", refs)
-        if sec:
-            v, rows = findings(sec[0])
-            bad = open_blockers(rows, {"critical", "high"})
-            res.append(("security review passed", v.startswith("PASS") and not bad, f"verdict {v or 'missing'}; open: {', '.join(bad) or 'none'}"))
+        res.append(("security review passed", False, f"no {sec.relative_to(ROOT)}"))
+    for dr in domain_reviews():
+        if dr["name"] not in required:
+            continue
+        f = d / review_file(dr["name"])
+        ok_words = tuple(w.upper() for w in dr.get("pass", ["PASS", "APPROVE"]))
+        if f.exists():
+            v, rows = findings(f)
+            bad = open_blockers(rows, set(dr.get("block_severities", ["blocker", "critical", "high"])))
+            res.append((f"{dr['name']} review ({dr['agent']}) passed", v.startswith(ok_words) and not bad,
+                        f"verdict {v or 'missing'}; open: {', '.join(bad) or 'none'}"))
         else:
-            res.append(("security review passed", False, f"missing {rel('security.md')}"))
+            res.append((f"{dr['name']} review ({dr['agent']}) passed", False, f"no {f.relative_to(ROOT)}"))
     if "tests" in required:
-        tests = find_review(feature, "tests-<area>.md", refs)
+        tests = sorted(d.glob("tests*.md"))
         signed = [p.name for p in tests if findings(p)[0].startswith("SIGN-OFF") and not open_blockers(findings(p)[1], {"blocker", "major", "critical", "high"})]
-        res.append(("tester sign-off", bool(signed), ", ".join(signed) or f"missing {rel('tests-<area>.md')} with Verdict: SIGN-OFF"))
+        res.append(("tester sign-off", bool(signed), ", ".join(signed) or "no tests-*.md with Verdict: SIGN-OFF"))
     return res
 
 
 def pr_info(pr: str) -> dict:
-    check_pr_arg(pr)
     if not shutil.which("gh"):
         sys.exit("kit: gh is not installed; use --branch for local merges")
     out = subprocess.run(["gh", "pr", "view", pr, "--json",
@@ -967,47 +1588,41 @@ def pr_info(pr: str) -> dict:
     return json.loads(out.stdout)
 
 
-def ci_check(info: dict) -> tuple:
+def ci_state(info: dict) -> tuple:
+    """(state, detail): state is passed | pending | failed | none (no checks reported yet)."""
     roll = info.get("statusCheckRollup") or []
     if not roll:
-        required = team_setting("require_ci_checks", "yes").lower() != "no"
-        return ("CI checks green", not required, "no CI checks reported" + ("" if required else " (not required)"))
+        return "none", "no CI checks reported yet"
     pending, failed = [], []
     for c in roll:
         name = c.get("name") or c.get("context") or "?"
         concl = (c.get("conclusion") or c.get("state") or "").upper()
         status = (c.get("status") or "").upper()
-        if status and status != "COMPLETED" and not concl:
+        if (status and status != "COMPLETED" and not concl) or concl in ("PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS"):
             pending.append(name)
         elif concl not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
             failed.append(f"{name}={concl or status}")
-    ok_ = not pending and not failed
-    return ("CI checks green", ok_, "all passed" if ok_ else f"failed: {', '.join(failed) or '-'}; running: {', '.join(pending) or '-'}")
+    if failed:
+        return "failed", f"failed: {', '.join(failed)}" + (f"; running: {', '.join(pending)}" if pending else "")
+    if pending:
+        return "pending", f"running: {', '.join(pending)}"
+    return "passed", "all passed"
 
 
-def ci_pending(info: dict) -> bool:
-    roll = info.get("statusCheckRollup") or []
-    if not roll:
-        return team_setting("require_ci_checks", "yes").lower() != "no"  # not reported yet
-    return any((c.get("status") or "").upper() not in ("", "COMPLETED") and not c.get("conclusion") for c in roll)
+PENDING = "pending"  # third result state: not failed, just not finished
 
 
-def wait_ci(pr: str, argv: list) -> None:
-    """Poll in the script (free) until CI finished; 'no checks yet' is pending, but only for a grace period."""
-    import time
-    timeout = int(argv[argv.index("--timeout") + 1]) if "--timeout" in argv else 1200
-    start, grace, said = time.time(), 120, False
-    while True:
-        info = pr_info(pr)
-        age = time.time() - start
-        if not ci_pending(info) or age >= timeout or (not info.get("statusCheckRollup") and age >= grace):
-            if said:
-                print(f"CI wait over after {int(age)}s")
-            return
-        if not said:
-            print(f"waiting for CI on PR {pr} (timeout {timeout}s)...", flush=True)
-            said = True
-        time.sleep(15)
+def ci_check(info: dict) -> tuple:
+    required = team_setting("require_ci_checks", "yes").lower() != "no"
+    state, detail = ci_state(info)
+    if state == "passed":
+        return ("CI checks green", True, detail)
+    if state == "none":
+        # right after a push nothing is reported yet: pending, not failed (pr-wait times out if the repo has no CI)
+        return ("CI checks green", PENDING if required else True, detail + ("" if required else " (not required)"))
+    if state == "pending":
+        return ("CI checks green", PENDING, detail)
+    return ("CI checks green", False, detail)
 
 
 def classify(head: str) -> tuple:
@@ -1020,14 +1635,13 @@ def merge_check(argv: list, quiet: bool = False) -> int:
     feature = argv[argv.index("--feature") + 1] if "--feature" in argv else ""
     results = []
     if "--branch" in argv:
-        head = head_branch(opt_value(argv, "--branch"))
+        head = argv[argv.index("--branch") + 1]
         kind, fid = classify(head)
         feature = feature or fid
-        if not feature and required_reviews(kind, diff_stats(base_ref(), head))[0]:
+        if not feature:
             sys.exit("kit: pass --feature <id> (branch name has no feature id)")
-        feature = feature or "light"
         req = review_plan(["--branch", head], show=False)[0]
-        results += review_checks(feature, kind, req, [head])
+        results += review_checks(feature, kind, req, review_ref(branch=head))
         results += record_checks(kind, feature, head, base_ref())
         if team_setting("require_ci_checks", "yes").lower() != "no":
             results.append(("quality gate passed at branch head", gate_passed(head),
@@ -1036,8 +1650,6 @@ def merge_check(argv: list, quiet: bool = False) -> int:
     else:
         if not argv or argv[0].startswith("--"):
             sys.exit("usage: kit.py merge-check <pr-number> [--feature ID]")
-        if "--wait" in argv:
-            wait_ci(check_pr_arg(argv[0]), argv)
         info = pr_info(argv[0])
         head, base = info["headRefName"], info["baseRefName"]
         target = base
@@ -1050,32 +1662,35 @@ def merge_check(argv: list, quiet: bool = False) -> int:
                 results.append(("back-merge from release branch", True, f"{rel} -> {integ}"))
             else:
                 results.append(("title is a Conventional Commit", bool(TITLE_RE.match(info["title"])), info["title"][:80]))
-                b_ref, h_ref = pr_refs(info)
-                req = required_reviews(kind, diff_stats(b_ref, h_ref))[0]
-                if not feature and req:
+                if not feature:
                     results.append(("feature id known", False, "branch has no feature id; pass --feature <id>"))
                 else:
-                    feature = feature or "light"
-                    results += review_checks(feature, kind, req, [head, f"#{argv[0]}", f"PR {argv[0]}"])
+                    b_ref, h_ref = pr_refs(info)
+                    req = required_reviews(kind, diff_stats(b_ref, h_ref))[0]
+                    results += review_checks(feature, kind, req, review_ref(pr=str(info["number"])))
                     results += record_checks(kind, feature, h_ref, b_ref)
         elif base == rel:
             allowed = head == integ or head.startswith("release-please--")
             results.append(("promotion or release PR into the release branch", allowed, f"{head} -> {base}"))
         else:
             results.append(("targets the integration branch", False, f"PR targets {base}; feature PRs must target {integ}"))
-    ok_all = all(r[1] for r in results)
+    failed = [r for r in results if r[1] is False]
+    pending = [r for r in results if r[1] == PENDING]
+    verdict = "FAIL" if failed else "PENDING" if pending else "PASS"
     if not quiet:
-        print(f"merge-check {argv[0] if argv and not argv[0].startswith('--') else head} -> {target}: {'PASS' if ok_all else 'FAIL'}")
+        print(f"merge-check {argv[0] if argv and not argv[0].startswith('--') else head} -> {target}: {verdict}"
+              + ("  (only CI is unfinished: `just pr-wait <pr>` waits for free; don't re-check by hand)" if verdict == "PENDING" else ""))
         for name, good, detail in results:
-            print(f"  {'ok  ' if good else 'FAIL'} {name}" + (f" ({detail})" if detail and not good else ""))
-    return 0 if ok_all else 1
+            mark = "ok  " if good is True else "WAIT" if good == PENDING else "FAIL"
+            print(f"  {mark} {name}" + (f" ({detail})" if detail and good is not True else ""))
+    return 1 if failed else 2 if pending else 0
 
 
 def merge(argv: list) -> int:
     integ, rel = branches()
     if "--branch" in argv:  # local fallback without GitHub
-        head = head_branch(opt_value(argv, "--branch"))
-        title = opt_value(argv, "--title") if "--title" in argv else ""
+        head = argv[argv.index("--branch") + 1]
+        title = argv[argv.index("--title") + 1] if "--title" in argv else ""
         if not TITLE_RE.match(title):
             sys.exit("kit: local merge needs --title '<conventional commit title>'")
         if merge_check(argv):
@@ -1084,7 +1699,7 @@ def merge(argv: list) -> int:
             sys.exit(f"kit: {head} is a protected branch and can't be merged/deleted this way")
         rid = classify(head)[1] or (argv[argv.index("--feature") + 1] if "--feature" in argv else "")
         refs = ["-m", f"Refs: {rid}"] if rid else []  # links the commit to its feature/bug record (just feature <id>)
-        for cmd in (["git", "switch", integ], ["git", "merge", "--squash", "--", head], ["git", "commit", "-m", title, *refs], ["git", "branch", "-D", "--", head]):
+        for cmd in (["git", "switch", integ], ["git", "merge", "--squash", head], ["git", "commit", "-m", title, *refs], ["git", "branch", "-D", head]):
             if subprocess.run(cmd, cwd=ROOT).returncode:
                 return 1
         print(f"merged {head} into {integ}")
@@ -1092,8 +1707,9 @@ def merge(argv: list) -> int:
     info = pr_info(argv[0])
     if info["baseRefName"] == rel:
         sys.exit(f"kit: PR targets {rel}; promotions and releases go through `just promote {argv[0]}` (asks the user)")
-    if merge_check(argv):
-        return 1
+    rc_check = merge_check(argv)
+    if rc_check:
+        return rc_check
     head = info["headRefName"]
     style = "--merge" if head == rel else "--squash"
     delete = [] if head in (integ, rel) else ["--delete-branch"]  # policy: never delete protected branches
@@ -1103,72 +1719,6 @@ def merge(argv: list) -> int:
     if rc == 0:
         subprocess.run(["git", "fetch", "-q", "origin"], cwd=ROOT, capture_output=True)
     return rc
-
-
-def ship(argv: list) -> int:
-    """One command for the mechanical tail: wait for CI, merge-check, merge, pull the integration branch."""
-    if "--branch" in argv:
-        return merge(argv)
-    if not argv or not (argv[0].isascii() and argv[0].isdigit()):
-        sys.exit("usage: kit.py ship <pr> [--timeout N] | --branch <b> --title T")
-    integ = branches()[0]
-    wait_ci(argv[0], argv)
-    rc = merge(argv)
-    if rc:
-        return rc
-    r = subprocess.run(["git", "switch", "-q", integ], cwd=ROOT, capture_output=True, text=True)
-    if r.returncode == 0:
-        r = subprocess.run(["git", "pull", "-q", "--ff-only"], cwd=ROOT, capture_output=True, text=True)
-    if r.returncode:
-        print(f"merged; {integ} not updated ({r.stderr.strip()[:120]})")
-        return 1
-    print(f"shipped PR {argv[0]}; {integ} updated")
-    return 0
-
-
-def status(argv: list) -> int:
-    import io
-    import contextlib
-    integ = branches()[0]
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        preflight(["--quiet", "--cached"])
-    msg = buf.getvalue().strip().removeprefix("Kit preflight: ").split(". Run `just")[0]
-    print(f"preflight: {msg or 'ok'} (mode {team_setting('work_mode', 'worktrees')}, base {integ})")
-    rows = []
-    board = ROOT / ".agents" / "board.md"
-    header = None
-    for l in board.read_text().splitlines() if board.exists() else []:
-        if not l.strip().startswith("|"):
-            continue
-        cells = [c.strip() for c in l.strip().strip("|").split("|")]
-        if header is None:
-            header = [c.lower() for c in cells] if "status" in [c.lower() for c in cells] else None
-            continue
-        if set("".join(cells)) <= set("-: ") or len(cells) != len(header):
-            continue
-        if dict(zip(header, cells)).get("status", "").lower() not in ("merged", "done", "closed", "released", "deferred", "won't fix", "wont fix", "fixed", "dropped"):
-            rows.append(" | ".join(c for c in cells if c))
-    print("board: " + ("none open" if not rows else f"{len(rows)} open"))
-    for r in rows:
-        print("  " + r)
-    prs = []
-    if shutil.which("gh"):
-        out = subprocess.run(["gh", "pr", "list", "--json", "number,headRefName", "--limit", "20"], cwd=ROOT, capture_output=True, text=True)
-        prs = json.loads(out.stdout) if out.returncode == 0 and out.stdout.strip() else []
-    print("prs: " + ("none open" if not prs else f"{len(prs)} open"))
-    for pr in prs:
-        buf = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(buf):
-                rc = merge_check([str(pr["number"])])
-        except SystemExit as e:
-            buf.write(f"merge-check error: {e}")
-            rc = 1
-        lines = buf.getvalue().splitlines()
-        bad = [l.strip()[5:] for l in lines[1:] if l.strip().startswith("FAIL")]
-        print(f"  #{pr['number']} {pr['headRefName']}: {'PASS' if rc == 0 else 'FAIL - ' + '; '.join(bad or lines[:1])[:300]}")
-    return 0
 
 
 def promote(argv: list) -> int:
@@ -1261,15 +1811,22 @@ def review_pack(argv: list) -> int:
     total = sum(a + d for a, d, _ in stats)
     print(f"# Review pack: {head} -> {base}  (feature {feature or '?'}, {len(stats)} files, {total} lines)")
     print(f"Reviews needed: {', '.join(req)}  ({'; '.join(why)})")
+    pr_no = argv[0] if argv and not argv[0].startswith("--") else ""
+    ref = review_ref(pr=pr_no, branch=head)
     if feature:
-        print(f"Findings dir: {ROOT / '.agents' / 'reviews' / feature}/  (code-review.md, security.md, tests-<area>.md)")
+        d_out = ROOT / ".agents" / "reviews" / feature / ref
+        agents = {"code": "code-reviewer", "security": "security-reviewer", "tests": "tester", **{d["name"]: d["agent"] for d in domain_reviews()}}
+        print("Write findings to exactly (merge-check reads these paths):")
+        for r in req:
+            if r in agents:
+                print(f"  {agents[r]}: {d_out / review_file(r)}")
     plan = ROOT / ".agents" / "plans" / f"{feature}.md" if feature else None
     if plan and plan.exists():
         m = re.search(r"^## Acceptance criteria\s*\n(.*?)(?=^## |\Z)", plan.read_text(), re.S | re.M)
         if m:
             print("\n## Acceptance criteria\n" + "\n".join(m.group(1).strip().splitlines()[:25]))
     if feature:
-        d = ROOT / ".agents" / "reviews" / feature
+        d = review_dir(feature, ref)
         prior = []
         for f in sorted(d.glob("*.md")) if d.exists() else []:
             v, rows = findings(f)
@@ -1349,14 +1906,24 @@ def main(argv: list) -> int:
         return review_pack(rest)
     if cmd == "merge":
         return merge(rest)
-    if cmd == "ship":
-        return ship(rest)
-    if cmd == "status":
-        return status(rest)
     if cmd == "promote":
         return promote(rest)
     if cmd == "setup-branches":
         return setup_branches()
+    if cmd == "docs":
+        return docs_cmd(rest)
+    if cmd == "start-report":
+        return start_report(rest)
+    if cmd == "envelope":
+        return envelope(rest)
+    if cmd == "triage":
+        return triage(rest)
+    if cmd == "status":
+        return status_cmd(rest)
+    if cmd == "pr-wait":
+        return pr_wait(rest)
+    if cmd == "ship":
+        return ship(rest)
     if cmd == "preflight":
         return preflight(rest)
     if cmd == "work-mode":

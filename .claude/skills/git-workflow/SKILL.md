@@ -24,7 +24,7 @@ Both names live in `.agents/team.md` -> Branches. Nobody pushes to the integrati
 | Developers, cicd | create work branches, commit, push their branch, open/update PRs | merge, push to protected branches, force-push others' branches |
 | Testers | push test commits to the work branch they're assigned | merge, push to protected branches |
 | Reviewers (code, security) | read the PR diff, write findings files | commit, push, merge |
-| Tech lead | `just ship <pr>` (= `just merge` + wait for CI + pull) into the integration branch; open promotion PRs; revert via PR | merge into the release branch, merge without a passing merge-check |
+| Tech lead | `just ship <pr>` into the integration branch; open promotion PRs; revert via PR | merge into the release branch, merge without a passing merge-check |
 | Manager | read git/PR state, run `just merge-check` to report status | commit code, merge |
 | User | approve `just promote` prompts, approve on GitHub | - |
 
@@ -81,7 +81,7 @@ No GitHub remote or `gh`: keep the branch local and report "PR: local branch <na
 
 ## 6. Reviews and merging (tech lead)
 
-Reviews happen **on the PR, before merging**: code reviewer, security reviewer and tester(s) read the PR diff as soon as the author hands off, and record a verdict in `.agents/reviews/<feature-id>/` (`Verdict: APPROVE` / `PASS` / `SIGN-OFF`).
+Reviews happen **on the PR, before merging**: code reviewer, security reviewer and tester(s) read the PR diff as soon as the author hands off, and record a verdict in `.agents/reviews/<feature-id>/<pr-N|branch>/` (paths printed by `just review-pack`) (`Verdict: APPROVE` / `PASS` / `SIGN-OFF`).
 
 `just merge-check <pr>` is the gate and the **only** source for saying a PR is green. It verifies:
 - the PR targets the integration branch (or is a back-merge from the release branch), is open and not a draft
@@ -91,8 +91,8 @@ Reviews happen **on the PR, before merging**: code reviewer, security reviewer a
 
 ```bash
 just merge-check <pr>        # status for anyone (manager reports this, never memory)
-just merge-check <pr> --wait # polls CI in the script; no checks reported yet = pending
-just ship <pr>               # tech lead: wait for CI, merge-check, squash-merge, delete branch, pull base
+just pr-wait <pr>            # wait for CI inside the script (free); PASSED / FAILED / STILL RUNNING
+just ship <pr>               # tech lead: wait for CI, merge-check, squash-merge, delete the branch, update the integration branch, codemap
 # local fallback without GitHub:
 just merge --branch feat/F12-orders --title "feat(api): orders endpoint"
 ```
@@ -104,7 +104,7 @@ After merging, refresh the main checkout so the code map updates: `git switch "$
 1. When the user wants a release, the tech lead opens a promotion PR: `gh pr create --base main --head "$(just base)" --title "chore(release): promote $(just base) to main"`.
 2. The manager asks the user; `just promote <pr>` merges it (Claude Code shows the user a permission prompt; a merge commit keeps the feature commits for the changelog).
 3. release-please opens a release PR on the release branch (version bump + `CHANGELOG.md`). Same path: user approves -> `just promote <pr>` -> tag `vX.Y.Z`, GitHub release, image.
-4. Back-merge the release commit: PR from the release branch into the integration branch, `just merge <pr>` (CI only).
+4. Back-merge the release commit: PR from the release branch into the integration branch, `just ship <pr>` (CI only).
 
 Never hand-edit generated changelog entries; never tag by hand while release-please is active. No GitHub: `just changelog` + annotated tag by the tech lead after the user approves. Production deploys need explicit human approval.
 

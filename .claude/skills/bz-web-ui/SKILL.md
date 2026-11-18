@@ -54,52 +54,18 @@ Screens: market-overview (indices, VIX, breadth, sector heatmap, movers, regime 
 
 ## 4. API client and requests
 
-One client in `api/client.ts`, created with `createClient<paths>({ baseUrl: location.origin, credentials: "same-origin" })` and called with full paths (`api.GET("/api/v1/recommendations")`, because the generated `paths` include the prefix; an origin base also works under jsdom) and middleware via `client.use(...)`. Same origin in dev (Vite proxy) and in `just run` (`web/dist` served by the server on 127.0.0.1:8787), so there is no CORS and no absolute server URL in code.
-
-- **CSRF:** middleware `onRequest` adds the CSRF header to every non-GET/HEAD request. Header name and how the token is delivered are defined in `bz-web-api` `references/api-contract.md`; keep the token in a module variable (memory), never in storage. A missing token on a mutation is a thrown error, not a silent send.
-- **401:** there is no login page. Middleware `onResponse` on 401 clears the query cache, closes the socket and shows the session-ended screen; `SessionGate` does the same on first load when `GET /auth/me` fails. 403 with a CSRF problem refreshes the token once (from `/auth/me`), then surfaces the error.
-- **Errors** are `application/problem+json`: show `title`/`detail` (user-safe), never the raw body or stack. Map to one `ApiError` type in `client.ts`.
-- **Side effects:** `retry: false` for mutations and for `order-intents`/`approvals`. `staleTime` per screen (EOD screens minutes, live screens `0` plus WebSocket).
-- Wrap each call in a `queryOptions` factory next to its feature; `api/keys.ts` holds the key tree (see reference). Components never call `fetch` directly.
+In short: One client in `api/client.ts`, created with `createClient<paths>({ baseUrl: location.origin, credentials: "same-origin" })` and called with full paths (`api.GET("/api/v1/recommendations")`, because the generated `paths` include the prefix; ...
+Full detail, examples and patterns: `references/api-client-and-requests.md` - read it before changing this area.
 
 ## 5. Session, WebSocket, stale data
 
-**Session** (`app/SessionGate`): the owner gets in through the one-time link that `just run` prints and opens (`/auth?token=...`, handled by the server, see `bz-security`); the UI has no password or login form. On start the gate loads `GET /auth/me` (CSRF token kept in memory, mode, live flag). Without a session it renders the session-ended screen: plain text saying the server was restarted or the one-time link was already used, and to restart the server (`just run`), which prints a fresh link. No retry loop, no token field, nothing stored.
-
-**WebSocket** (`api/ws.ts`, one socket per app, opened once `GET /auth/me` succeeds, at `/api/v1/ws` with `ws://` derived from `location`):
-
-- Messages are `{ type, data }` typed as `components["schemas"]["WsOut"]` (generated): `tick`, `data_status`, `order_update`, `gate_alert`, `job_progress` (updates the backtest job query cache), `resync` (invalidates the query groups it names, e.g. after the Mac wakes); parse once at the edge, ignore unknown types.
-- Reconnect with exponential backoff and jitter (for example 1s doubling to 30s, reset after a stable connection); after any abnormal close, call `GET /api/v1/auth/me` first: 401 stops reconnecting and shows the session-ended screen, anything else keeps backing off (there is no auth close code). Pause while `document.hidden` and reconnect on `visibilitychange`.
-- On every open, resubscribe to what the screens currently need (subscription set lives in the store, not in components).
-- Status machine `connecting | open | reconnecting | closed` drives a shell-level `DataDelayedBadge`: shown when disconnected, or when `now - asOf` exceeds the threshold supplied by the server status, never a constant in the UI. While disconnected, prices are labelled stale, not hidden.
-- Ticks write into a zustand `tickStore` keyed by symbol (latest only); components select a single symbol. Never one React update per raw tick. Chart updates are throttled: coalesce to at most one `series.update` per animation frame (or about 250 ms), and always apply the latest bar.
-- `order_update` and `gate_alert` invalidate the approval and positions queries and raise an alert; they never trigger an approval.
+In short: Session** (`app/SessionGate`): the owner gets in through the one-time link that `just run` prints and opens (`/auth?token=...`, handled by the server, see `bz-security`); the UI has no password or login form. On start the gate loads `GET ...
+Full detail, examples and patterns: `references/session-websocket-stale-data.md` - read it before changing this area.
 
 ## 6. Recommendation card
 
-The DTO is `components["schemas"]["RecommendationDto"]`, generated from the server. The field list lives only in `bz-quant`; this skill lists what the card shows and must not restate or extend the DTO. Money arrives as decimal strings. The card displays:
-
-- instrument, action (a `NoTrade` result renders the empty state), horizon, regime badge with summary;
-- **risk in rupees first** ("You risk ₹1,000 if the stop is hit"), then entry zone, stop, targets with reward:risk, size (quantity, or lots for F&O);
-- confidence (a score, not a probability), agreeing strategies, backtest strip (trades, win rate, profit factor, average R, max drawdown, period, costs applied);
-- `LowEvidenceBadge` next to confidence whenever the server flags low evidence; text states the trade count and a tooltip explains why few trades means weak proof;
-- warnings (naked short, ratio spread, event nearby, stale data) in a prominent block above the entry details, never collapsed;
-- gate state: a blocked recommendation shows each failing rule and offers no path to create an order intent;
-- data-as-of for the delayed badge; Why? sections under a disclosure.
-
-Why? panel: `<details>` or a button with `aria-expanded`, rendering the server-supplied sections in order (`bz-market-strategy` owns the template and wording). Render text only; never markdown-to-HTML of server strings.
-
-```tsx
-export function LowEvidenceBadge({ trades }: { trades: number }) {
-  return (
-    <span role="status" className="badge badge-warn" title="Fewer than about 30 past trades: treat the statistics as weak.">
-      Low evidence: {trades} past trades
-    </span>
-  );
-}
-```
-
-The empty list renders "No high-quality setups today" with the regime summary, never a blank table. The regime badge and the data-delayed badge are shared components used by the card, the chart header and the shell.
+In short: The DTO is `components["schemas"]["RecommendationDto"]`, generated from the server. The field list lives only in `bz-quant`; this skill lists what the card shows and must not restate or extend the DTO. Money arrives as decimal strings. The ...
+Full detail, examples and patterns: `references/recommendation-card.md` - read it before changing this area.
 
 ## 7. Formatting: INR (en-IN grouping) and IST
 
