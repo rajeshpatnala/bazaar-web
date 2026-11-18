@@ -9,8 +9,10 @@ pub mod clock;
 pub mod config;
 pub mod disclaimer;
 pub mod error;
+pub mod instrument;
 pub mod mode;
 pub mod money;
+pub mod ports;
 pub mod segment;
 #[cfg(feature = "test-util")]
 pub mod testutil;

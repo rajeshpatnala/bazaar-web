@@ -11,3 +11,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+bazaar-core.workspace = true
+sqlx.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
