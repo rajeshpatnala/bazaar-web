@@ -24,6 +24,7 @@ Owner area: Cargo.toml, crates/{core,server,cli,...stubs}, config/, fixtures/con
 - Config keys: none yet (`BAZAAR_PORT`/`BAZAAR_CONFIG_DIR`/`BAZAAR_DATA_DIR` names stay in `.env.example`).
 
 - Slice 3 (core-calendar, PR 21): `core::calendar::MarketCalendar` built from `calendar.toml`: `is_trading_day`, `session_at`, `close_time`, `next/prev_trading_day`, `shift_to_prior_trading_day` (expiry shift). Semantics: a mock session never makes a day tradable; a clearing holiday does not close trading; a year outside the file's covered years is `CalendarError::OutOfRange` (never "open"); special sessions (e.g. Saturday muhurat) override the weekend; instants are UTC and converted to IST inside; no wall-clock reads.
+- Slice 6 (server-app, PR 22): `bazaar-server` axum app (`app::build`) with `AppState`, OpenAPI document (`openapi` subcommand), `/healthz` (public, data-free), `/auth` (launch token to `bz_session`), `/api/v1/status`, unknown `/api/*` as 404 problem+json, static UI fallback from `web_dist` when `index.html` exists. Layers outermost first: `security_headers`, trace, `host_guard`, `origin_guard`, `problem_backstop`, timeout (30 s), body limit (1 MiB); session guard before CSRF guard. DTOs are separate from domain types; `live_enabled` comes from `cfg!`. No order route. In-process router tests in `crates/server/tests/app.rs`.
 
 ## Decisions
 - AC4 wording: the Sat/Sun weekend is a structural fact in `calendar.rs`, not market data, so it stays a literal (documented in the module doc); hours, holidays, sessions and covered years all come from config (CR-21-1, owner not needed).
@@ -45,6 +46,13 @@ Owner area: Cargo.toml, crates/{core,server,cli,...stubs}, config/, fixtures/con
 
 - TS-21-1..4, TS-21-6 (tests, F2 calendar-data slice): strengthen the calendar proptest (shift idempotent and never later, lands on a trading day, `session_at` Closed on non-trading days, all segments, `prev(next(x)) == x`); add Saturday-Closed, special-session edges (18:00:00 inclusive, 18:59:59), UTC/IST boundary (2026-01-05T18:29:59Z vs 18:30:00Z) and 2026-12-31T18:30Z OutOfRange, OutOfRange for `close_time`/`shift_to_prior_trading_day`.
 - CR-21-3: add a one-line comment in `next/prev_trading_day` that termination relies on the finite covered years (OutOfRange).
+- CR-22-1: add a router test for an oversize POST body (413 problem+json); 408 test via an injected tiny timeout or soften the module doc claim (`app.rs`).
+- CR-22-3, TS-22-1: first mutating route adds the CSRF success-path test; add foreign-Origin and wrong-CSRF-token cases to `post_without_origin_or_csrf_is_refused` with a comment on guard order.
+- CR-22-2: done in this record (slice 6 entry above; the slice 3 and PR 21 text is correct, kept).
+- TS-22-2: assert money-typed schemas are strings and the `schema.d.ts` no-diff once the first Decimal DTO lands (`just openapi` no-diff is T2).
+- TS-22-3: replace TestApp temp dist dirs with `tempfile::TempDir` so they are removed (`tests/common/mod.rs`).
+- SEC-22-1 (slice 7): `web_dist` stays fixed config, never user input; verify in the slice 7 review of `main.rs` wiring.
+- SEC-22-2: keep `/healthz` data-free as status fields grow.
 
 ## History
 - 2026-11-18: slice 0 scaffold.
