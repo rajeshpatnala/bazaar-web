@@ -7,7 +7,9 @@
 use bazaar_core as _;
 
 pub mod black76;
+pub mod iv;
 pub mod norm;
+pub mod payoff;
 pub mod time;
 
 /// Call or put.

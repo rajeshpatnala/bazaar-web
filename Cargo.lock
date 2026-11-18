@@ -297,6 +297,7 @@ dependencies = [
  "bazaar-core",
  "chrono",
  "proptest",
+ "rust_decimal",
 ]
 
 [[package]]
