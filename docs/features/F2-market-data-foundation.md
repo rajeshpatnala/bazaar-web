@@ -31,6 +31,10 @@ Owner area: `config/{calendar,charges}.toml`, `crates/{data,store}`, `core/src/{
 ## Deferred
 - TS-21-1..4, TS-21-6 and CR-21-3 (moved from F1): done in slice 1 (calendar tests and a comment in `next/prev_trading_day`).
 - Delisting/prune policy for the SQLite instrument master (CR-34-4): F2 does not prune rows absent from a newer import; snapshots keep history and expired rows are filtered by `on_or_after`. Revisit in F3.
+- QUAN-33-3 (F3): Kite index rows (tick 0 / lot 0) are dropped as `NonPositiveTick`; decide with a real dump whether to keep an index kind for spot tokens.
+- SEC-33-1 (slice 5): `import-instruments --file` must bound the file read (`take(max_bytes + 1)`); the parser caps only the slice it is given.
+- SEC-33-2 (F3): one huge quoted field can grow a csv buffer up to `max_bytes`; lower the default once the real master size is known.
 
 ## History
+- Slice 3: instrument master parser (`bazaar_data::instruments`), bounded, dedupes, counts rejects.
 -

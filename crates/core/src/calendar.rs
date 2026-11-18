@@ -209,6 +209,7 @@ impl MarketCalendar {
     /// `OutOfRange` when the search leaves the covered years.
     pub fn next_trading_day(&self, d: NaiveDate, seg: Segment) -> Result<NaiveDate, CalendarError> {
         let mut x = d;
+        // Terminates: `is_trading_day` returns OutOfRange once x leaves the finite covered years.
         loop {
             x = x.succ_opt().ok_or(CalendarError::OutOfRange(x))?;
             if self.is_trading_day(x, seg)? {
@@ -223,6 +224,7 @@ impl MarketCalendar {
     /// `OutOfRange` when the search leaves the covered years.
     pub fn prev_trading_day(&self, d: NaiveDate, seg: Segment) -> Result<NaiveDate, CalendarError> {
         let mut x = d;
+        // Terminates: `is_trading_day` returns OutOfRange once x leaves the finite covered years.
         loop {
             x = x.pred_opt().ok_or(CalendarError::OutOfRange(x))?;
             if self.is_trading_day(x, seg)? {

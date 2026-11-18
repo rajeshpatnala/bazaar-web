@@ -5,6 +5,7 @@
 //! The loader reads files only: no environment, no network, no clock (callers pass `today`).
 
 mod calendar;
+mod charges;
 mod error;
 mod files;
 mod risk;
@@ -17,9 +18,13 @@ pub use calendar::{
     AppliesTo, CalendarConfig, HolidayKind, HolidayRow, Phase, SessionRow, SpecialKind,
     SpecialSessionRow,
 };
+pub use charges::{
+    Brokerage, ChargeExchange, ChargeSegment, ChargeSide, ChargesConfig, ChargesMeta, DpCharge,
+    GstRate, HistoryPolicy, MAX_RATE_SETS, NoRateSet, OptionExercise, RateSet, TurnoverBasis,
+};
 pub use error::ConfigError;
 pub use files::{
-    ChargesConfig, ComplianceConfig, DataConfig, Event, EventKind, EventsConfig, MAX_EVENTS,
+    ComplianceConfig, DataConfig, Event, EventKind, EventsConfig, MAX_EVENTS,
     MAX_SYMBOLS_PER_WATCHLIST, MAX_TEXT_CHARS, MAX_WATCHLISTS, StrategiesConfig, Watchlist,
     WatchlistsConfig,
 };
@@ -316,11 +321,11 @@ mod tests {
     #[test]
     fn unknown_key_is_a_parse_error_with_line() {
         let text = "schema_version = 1\nverified_on = \"2026-01-01\"\nsource = \"x\"\nextra = 1\n";
-        let err = parse_str::<ChargesConfig>(text).unwrap_err();
+        let err = parse_str::<DataConfig>(text).unwrap_err();
         assert!(matches!(
             err,
             ConfigError::Parse {
-                file: "charges.toml",
+                file: "data.toml",
                 line: Some(4),
                 ..
             }
@@ -347,7 +352,7 @@ mod tests {
     #[test]
     fn staleness_age_future_placeholder_and_uncovered_year() {
         // fixtures: risk, watchlists, events, calendar verified 2026-01-05 (covers 2026);
-        // charges, strategies, data, compliance are placeholders.
+        // strategies, data, compliance are placeholders (charges is synthetic, verified too).
         let cfg = Config::load(Path::new(FIXTURES)).unwrap();
         let policy = StalenessPolicy {
             default_max_age_days: 30,
@@ -359,8 +364,8 @@ mod tests {
                 .count()
         };
         let w = cfg.stale_warnings(d(2026, 1, 20), &policy);
-        assert_eq!(w.len(), 4);
-        assert_eq!(placeholders(&w), 4);
+        assert_eq!(w.len(), 3);
+        assert_eq!(placeholders(&w), 3);
         let w = cfg.stale_warnings(d(2026, 3, 1), &policy); // 55 days: 3 over 30, risk ok
         assert_eq!(w.len(), 7);
         assert!(w.iter().all(|x| x.file != "risk.toml"));
@@ -373,7 +378,7 @@ mod tests {
         }));
         let w = cfg.stale_warnings(d(2026, 1, 1), &policy);
         assert_eq!(w.len(), 8);
-        assert_eq!(placeholders(&w), 4);
+        assert_eq!(placeholders(&w), 3);
         assert!(w.contains(&StaleWarning {
             file: "risk.toml",
             reason: StaleReason::FutureDated
