@@ -39,3 +39,21 @@ body {
     transition: none !important;
   }
 }
+
+.mode-badge {
+  margin-left: 0.75rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  border: 1px solid currentColor;
+}
+.mode-paper {
+  color: #0a5c36;
+  background: #e3f4ea;
+}
+.mode-semi_auto,
+.mode-auto {
+  color: #8a1c1c;
+  background: #fbe5e5;
+}
