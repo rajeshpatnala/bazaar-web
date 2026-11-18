@@ -174,6 +174,7 @@ passes (reviewers' verdicts, CI checks, target branch). The release branch only 
 | integration_branch | develop |
 | release_branch | main |
 | require_ci_checks | yes |
+| delete_merged_branches | no |
 
 ## Approvals (manager asks the user before)
 

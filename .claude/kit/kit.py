@@ -1699,7 +1699,10 @@ def merge(argv: list) -> int:
             sys.exit(f"kit: {head} is a protected branch and can't be merged/deleted this way")
         rid = classify(head)[1] or (argv[argv.index("--feature") + 1] if "--feature" in argv else "")
         refs = ["-m", f"Refs: {rid}"] if rid else []  # links the commit to its feature/bug record (just feature <id>)
-        for cmd in (["git", "switch", integ], ["git", "merge", "--squash", head], ["git", "commit", "-m", title, *refs], ["git", "branch", "-D", head]):
+        cmds = [["git", "switch", integ], ["git", "merge", "--squash", head], ["git", "commit", "-m", title, *refs]]
+        if team_setting("delete_merged_branches", "no").lower() == "yes":  # owner rule: keep branches unless opted in
+            cmds.append(["git", "branch", "-D", head])
+        for cmd in cmds:
             if subprocess.run(cmd, cwd=ROOT).returncode:
                 return 1
         print(f"merged {head} into {integ}")
@@ -1712,7 +1715,8 @@ def merge(argv: list) -> int:
         return rc_check
     head = info["headRefName"]
     style = "--merge" if head == rel else "--squash"
-    delete = [] if head in (integ, rel) else ["--delete-branch"]  # policy: never delete protected branches
+    # owner rule: keep merged branches unless delete_merged_branches=yes; protected branches are never deleted
+    delete = ["--delete-branch"] if head not in (integ, rel) and team_setting("delete_merged_branches", "no").lower() == "yes" else []
     rid = classify(head)[1] or (argv[argv.index("--feature") + 1] if "--feature" in argv else "")
     body = ["--body", f"Refs: {rid}\n\nPR #{argv[0]} from {head}"] if rid and style == "--squash" else []
     rc = subprocess.run(["gh", "pr", "merge", argv[0], style, *delete, *body], cwd=ROOT).returncode

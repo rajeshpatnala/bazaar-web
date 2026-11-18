@@ -1,0 +1,5 @@
+# events.toml: placeholder. It holds no data and is never reported as fresh (no verified_on on purpose).
+# Replace it with real, dated, sourced content and remove `placeholder`.
+schema_version = 1
+placeholder = true
+source = "placeholder: no data yet; to be filled from exchange announcements, rbi.org.in and finmin by an events feature (bz-india-markets)"

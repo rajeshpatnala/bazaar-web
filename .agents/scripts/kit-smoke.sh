@@ -75,7 +75,7 @@ echo "== 5 ship --branch (merge + switch)"
 out="$(K ship --branch docs/light-x --title 'docs: note' 2>&1)"; rc=$?
 expect "ship light branch merges" $rc "merged docs/light-x into develop" 0 <<<"$out"
 git log --oneline -1 | grep -q "docs: note" && { echo "PASS  squash commit on develop"; pass=$((pass+1)); } || { echo "FAIL  commit missing"; fail=$((fail+1)); }
-git rev-parse -q --verify docs/light-x >/dev/null && { echo "FAIL  branch not deleted"; fail=$((fail+1)); } || { echo "PASS  branch deleted"; pass=$((pass+1)); }
+git rev-parse -q --verify docs/light-x >/dev/null && { echo "PASS  branch kept (delete_merged_branches default no)"; pass=$((pass+1)); } || { echo "FAIL  branch was deleted"; fail=$((fail+1)); }
 out="$(K ship --branch feat/F1-thing --title 'bad title' 2>&1)"; rc=$?
 expect "ship rejects non-conventional title" $rc "conventional" 1 <<<"$out"
 out="$(K ship --branch develop --title 'chore: x' 2>&1)"; rc=$?

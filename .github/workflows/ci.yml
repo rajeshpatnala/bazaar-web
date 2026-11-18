@@ -7,9 +7,11 @@ on:
 permissions:
   contents: read
 
+# One group per ref, so a run never cancels another ref's runs. Only PR runs are cancelled when superseded;
+# pushes to develop/main always finish (their macOS test would otherwise be cancelled by the next push).
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -93,6 +95,9 @@ jobs:
         run: pnpm e2e
 
   test-macos:
+    # macOS runners queue for a long time and PR runs were cancelled before starting; the Linux `test` job is the
+    # PR test gate, so macOS (the owner's platform, compiles the Keychain store) runs only after merge on develop/main.
+    if: github.event_name == 'push'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
@@ -125,18 +130,22 @@ jobs:
       - if: hashFiles('Cargo.lock') != ''
         uses: EmbarkStudios/cargo-deny-action@v2
 
+  # Permanent guard (not a bypass): the steps run only once the generated API
+  # schema (web/src/api/schema.d.ts) is committed. The guard checks that file
+  # only; it is committed alongside the server `openapi` command and the web
+  # `gen:api` script (F1 slice 7), so the job self-activates then.
   openapi-drift:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != ''
+      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != '' && hashFiles('web/src/api/schema.d.ts') != ''
         uses: dtolnay/rust-toolchain@stable
-      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != ''
+      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != '' && hashFiles('web/src/api/schema.d.ts') != ''
         uses: Swatinem/rust-cache@v2
-      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != ''
+      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != '' && hashFiles('web/src/api/schema.d.ts') != ''
         uses: pnpm/action-setup@v4
         with: { package_json_file: web/package.json }
-      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != ''
+      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != '' && hashFiles('web/src/api/schema.d.ts') != ''
         name: regenerate UI types and fail on drift
         run: |
           cargo run -q -p bazaar-server -- openapi > web/openapi.json

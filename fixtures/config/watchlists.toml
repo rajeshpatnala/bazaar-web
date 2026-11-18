@@ -1,0 +1,7 @@
+schema_version = 1
+verified_on = "2026-01-05"
+source = "synthetic fixture"
+
+[[watchlist]]
+name = "fixture list"
+symbols = ["AAA", "BBB"]

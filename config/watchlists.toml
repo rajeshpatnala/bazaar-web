@@ -1,0 +1,7 @@
+# watchlists.toml: user-owned named symbol lists. Shape:
+#   [[watchlist]]
+#   name = "my list"
+#   symbols = ["EXAMPLE"]
+schema_version = 1
+verified_on = "2026-11-18"
+source = "owner"
