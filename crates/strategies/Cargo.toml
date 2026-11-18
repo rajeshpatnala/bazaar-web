@@ -11,7 +11,3 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-bazaar-core.workspace = true
-bazaar-indicators.workspace = true
-bazaar-options.workspace = true
-bazaar-regime.workspace = true

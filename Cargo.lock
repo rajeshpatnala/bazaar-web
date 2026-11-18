@@ -217,21 +217,10 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 [[package]]
 name = "bazaar-backtest"
 version = "0.1.0"
-dependencies = [
- "bazaar-core",
- "bazaar-indicators",
- "bazaar-risk",
- "bazaar-strategies",
-]
 
 [[package]]
 name = "bazaar-broker"
 version = "0.1.0"
-dependencies = [
- "bazaar-core",
- "bazaar-data",
- "bazaar-execution",
-]
 
 [[package]]
 name = "bazaar-cli"
@@ -239,10 +228,9 @@ version = "0.1.0"
 dependencies = [
  "bazaar-broker",
  "bazaar-core",
- "bazaar-paper",
- "bazaar-scanner",
- "bazaar-store",
  "clap",
+ "serde_json",
+ "toml",
 ]
 
 [[package]]
@@ -262,65 +250,34 @@ dependencies = [
 [[package]]
 name = "bazaar-data"
 version = "0.1.0"
-dependencies = [
- "bazaar-core",
-]
 
 [[package]]
 name = "bazaar-execution"
 version = "0.1.0"
-dependencies = [
- "bazaar-core",
- "bazaar-risk",
-]
 
 [[package]]
 name = "bazaar-indicators"
 version = "0.1.0"
-dependencies = [
- "bazaar-core",
-]
 
 [[package]]
 name = "bazaar-options"
 version = "0.1.0"
-dependencies = [
- "bazaar-core",
-]
 
 [[package]]
 name = "bazaar-paper"
 version = "0.1.0"
-dependencies = [
- "bazaar-core",
- "bazaar-execution",
-]
 
 [[package]]
 name = "bazaar-regime"
 version = "0.1.0"
-dependencies = [
- "bazaar-core",
- "bazaar-indicators",
-]
 
 [[package]]
 name = "bazaar-risk"
 version = "0.1.0"
-dependencies = [
- "bazaar-core",
-]
 
 [[package]]
 name = "bazaar-scanner"
 version = "0.1.0"
-dependencies = [
- "bazaar-backtest",
- "bazaar-core",
- "bazaar-regime",
- "bazaar-risk",
- "bazaar-strategies",
-]
 
 [[package]]
 name = "bazaar-server"
@@ -355,19 +312,10 @@ dependencies = [
 [[package]]
 name = "bazaar-store"
 version = "0.1.0"
-dependencies = [
- "bazaar-core",
-]
 
 [[package]]
 name = "bazaar-strategies"
 version = "0.1.0"
-dependencies = [
- "bazaar-core",
- "bazaar-indicators",
- "bazaar-options",
- "bazaar-regime",
-]
 
 [[package]]
 name = "bit-set"

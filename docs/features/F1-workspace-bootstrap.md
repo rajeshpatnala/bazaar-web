@@ -1,6 +1,6 @@
 # F1 - Workspace bootstrap
 
-Status: building
+Status: done
 Summary: the repo builds, gates and serves: workspace + core types + config + a loopback-only axum server + a React shell with the disclaimer.
 Owner area: Cargo.toml, crates/{core,server,cli,...stubs}, config/, fixtures/config/, web/, justfile
 
@@ -28,12 +28,14 @@ Owner area: Cargo.toml, crates/{core,server,cli,...stubs}, config/, fixtures/con
 - Slice 7 (server-startup, PR 24): `bazaar-server serve` loads `config/*.toml`, starts tracing (`RUST_LOG`, default info), binds `127.0.0.1` only (`ensure_loopback` assert; no host flag), prints the one-time launch URL to stdout via `writeln!` (never tracing), opens it best effort, and shuts down gracefully on Ctrl-C and SIGTERM. Port: `--port`, else `BAZAAR_PORT`, else 8787 (0 rejected). `BAZAAR_CONFIG_DIR` (default `config`) is a dev/test override of the config dir; the loader still enforces `[hard_limits]` and the mode rules. `BAZAAR_DATA_DIR` is not read yet. The launch URL is also an argument of `open`/`xdg-open` (briefly visible in `ps`; one-time, short-lived token: accepted). TraceLayer logs the path only (`path_only_span`), so `/auth?token=` is never logged. SEC-22-1 done (`web_dist` is the const `web/dist`), SEC-22-2 done (`/healthz` untouched). `deny.toml` reconciled, `cargo deny check` green.
 - Slice 8 (web-client, PR 25): web app generated API client (`web/src/api/client.ts`, cookie session, CSRF header on non-GET, 401 session-ended listener), `SessionGate` with a session-ended screen, `ModeBadge` (paper vs other mode, text plus colour, polls status every 30 s), and typed MSW handlers for tests (CR-25-3).
 
+- Slice 9 (workspace-checks): `crates/cli/tests/architecture.rs` (edges from `cargo metadata` against the `bz-architecture` table, no domain crate on a composition root, `live-trading` in no default feature, `bazaar-broker` optional only, no `--all-features` recipe) and `crates/cli/tests/workspace.rs` (env template empty values and no mode var, server/web versions equal, exactly eight config files, Rust vs TS `DISCLAIMER` byte-equal); `README.md`. CR-F1-1 done: the cargo lint allows are removed and the unused dependencies they hid are dropped from crate manifests and `[workspace.dependencies]` (each feature re-adds its edges when it first uses them; dev-deps of `bazaar-cli`: `bazaar-core`, `serde_json`, `toml`).
+
 ## Decisions
 - AC4 wording: the Sat/Sun weekend is a structural fact in `calendar.rs`, not market data, so it stays a literal (documented in the module doc); hours, holidays, sessions and covered years all come from config (CR-21-1, owner not needed).
 - Calendar loader (`config/calendar.rs`) already enforces `start < end` for regular and special sessions and rejects overlapping regular sessions; special-vs-regular overlap is resolved by precedence (SEC-21-1).
 - Toolchain pinned to Rust 1.100.0 (owner, 2026-11-18).
 - 15 crates (not 14): the `bz-repo-structure` list is authoritative (owner).
-- Crate edges are declared up front in the manifests; the cargo lints `unused_dependencies` and `unused_workspace_dependencies` are set to `allow` in the workspace until F1 ends (reverting is a slice 9 task).
+- Crate edges are declared when first used (the scaffold's up-front edges were removed in slice 9 with the lint allows); the architecture test checks edges against the allowed table, not that every edge exists.
 - `InstrumentKind` has the four concrete kinds; `applies_to = "all"` in `calendar.toml` is a loader wildcard, not a variant.
 - Additive `StatusDto` subset, header-only config structs for the six data-less files, synthetic fixtures, no CORS, disclaimer constant duplicated Rust/TS with an equality test (plan decisions).
 
@@ -43,7 +45,6 @@ Owner area: Cargo.toml, crates/{core,server,cli,...stubs}, config/, fixtures/con
 
 ## Deferred
 - CR-F1-3 / SEC-F1-1: `[hard_limits]` live in the owner-editable `config/risk.toml` (owner decision: file-only). The DecisionGate feature adds an enforced check so a raised ceiling cannot slip through.
-- CR-F1-1: slice 9 reverts the workspace cargo lint allows `unused_dependencies` and `unused_workspace_dependencies` (Cargo.toml `[workspace.lints.cargo]`).
 - CR-F1-S5-1: slice 6 adds a router-level test: every OpenAPI path returns 401 without a cookie (exempt: `/healthz`, `/auth`, Kite callback). Slice 6 also wires layers with `security_headers` outermost, then `host_guard`, `origin_guard`, `problem_backstop` (see `security.rs` module doc).
 
 - TS-21-1..4, TS-21-6 (tests, F2 calendar-data slice): strengthen the calendar proptest (shift idempotent and never later, lands on a trading day, `session_at` Closed on non-trading days, all segments, `prev(next(x)) == x`); add Saturday-Closed, special-session edges (18:00:00 inclusive, 18:59:59), UTC/IST boundary (2026-01-05T18:29:59Z vs 18:30:00Z) and 2026-12-31T18:30Z OutOfRange, OutOfRange for `close_time`/`shift_to_prior_trading_day`.
@@ -69,3 +70,4 @@ Owner area: Cargo.toml, crates/{core,server,cli,...stubs}, config/, fixtures/con
 
 ## History
 - 2026-11-18: slice 0 scaffold.
+- 2026-11-19: slice 9 workspace checks, README, lint allows reverted; status done.

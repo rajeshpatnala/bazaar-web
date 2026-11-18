@@ -11,5 +11,3 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-bazaar-core.workspace = true
-bazaar-risk.workspace = true
