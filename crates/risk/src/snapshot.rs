@@ -15,6 +15,16 @@ pub struct Position {
     pub qty: u32,
     /// Stop stored in the journal; `Unknown` when none is recorded.
     pub stop: Tri<Decimal>,
+    /// Price the open risk to `stop` is measured from (G04b): the average entry price, or the
+    /// mark when that is higher risk. `Unknown` rejects entries under G04b.
+    pub risk_price: Tri<Decimal>,
+}
+
+/// Latest mark for one symbol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mark {
+    pub symbol: String,
+    pub price: Decimal,
 }
 
 /// Last stop-out time for one symbol.
@@ -41,6 +51,14 @@ pub struct PortfolioSnapshot {
     pub overrides_week: Tri<u32>,
     pub kill_switch: Tri<bool>,
     pub charges_buffer: Tri<Decimal>,
+    /// Cash the account started with (paper: `paper_starting_cash_inr`).
+    pub starting_cash: Tri<Decimal>,
+    /// Cumulative realised P&L since the start, net of charges.
+    pub realised_pnl: Tri<Decimal>,
+    /// Mark-to-market equity now (cash plus open positions at their marks).
+    pub equity_mtm: Tri<Decimal>,
+    /// Latest mark per symbol with an open position (G03/G19 unrealised P&L).
+    pub marks: Tri<Vec<Mark>>,
     pub last_stop_outs: Tri<Vec<StopOut>>,
 }
 
@@ -60,6 +78,10 @@ impl PortfolioSnapshot {
             overrides_week: Tri::Unknown,
             kill_switch: Tri::Unknown,
             charges_buffer: Tri::Unknown,
+            starting_cash: Tri::Unknown,
+            realised_pnl: Tri::Unknown,
+            equity_mtm: Tri::Unknown,
+            marks: Tri::Unknown,
             last_stop_outs: Tri::Unknown,
         }
     }
@@ -83,6 +105,8 @@ mod tests {
         let s = PortfolioSnapshot::unknown();
         assert!(s.as_of.is_unknown() && s.positions.is_unknown());
         assert!(s.day_pnl.is_unknown() && s.kill_switch.is_unknown());
+        assert!(s.starting_cash.is_unknown() && s.realised_pnl.is_unknown());
+        assert!(s.equity_mtm.is_unknown() && s.marks.is_unknown());
         assert!(s.position("ABC").is_none());
     }
 
@@ -95,12 +119,14 @@ mod tests {
                 side: Side::Buy,
                 qty: 0,
                 stop: Tri::Unknown,
+                risk_price: Tri::Unknown,
             },
             Position {
                 symbol: "XYZ".into(),
                 side: Side::Sell,
                 qty: 5,
                 stop: Tri::Unknown,
+                risk_price: Tri::Unknown,
             },
         ]);
         assert!(s.position("ABC").is_none());

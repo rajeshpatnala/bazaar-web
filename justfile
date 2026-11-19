@@ -1,6 +1,9 @@
 # Task runner used by humans and agents. Outputs are kept compact on purpose (token budget).
 # Stack commands come from .agents/stack.json. just never loads .env; the application loads it itself.
 
+# recipe arguments reach the kit as separate, quoted arguments: free text with ; : ( ) is safe
+set positional-arguments
+
 default: gate
 
 # check tools, hooks, settings and agents; prints install commands for anything missing
@@ -41,7 +44,7 @@ preflight:
 
 # show or switch how developers work: worktrees (parallel) or in-place (one at a time in this checkout)
 work-mode *mode:
-    @python3 .claude/kit/kit.py work-mode {{mode}}
+    @python3 .claude/kit/kit.py work-mode "$@"
 
 # integration branch that feature PRs target (team.md -> Branches)
 base:
@@ -53,20 +56,20 @@ new-branch name:
 
 # may this PR merge? target branch, Conventional title, CI checks, reviewer verdicts (the only source for "it's green")
 merge-check pr *args:
-    @python3 .claude/kit/kit.py merge-check {{pr}} {{args}}
+    @python3 .claude/kit/kit.py merge-check "$@"
 
 # review without a PR: just review-pack --diff develop..HEAD (also review-plan / merge-check --branch <b>)
 # which reviews a PR needs (code always; security/tests by size and sensitivity - team.md -> Review policy)
 review-plan pr *args:
-    @python3 .claude/kit/kit.py review-plan {{pr}} {{args}}
+    @python3 .claude/kit/kit.py review-plan "$@"
 
 # everything a reviewer needs in one output: size, required reviews, criteria, red flags, codemap lines, diff
 review-pack pr *args:
-    @python3 .claude/kit/kit.py review-pack {{pr}} {{args}}
+    @python3 .claude/kit/kit.py review-pack "$@"
 
 # small PRs: all required reviews in one tool-free Claude call (exit 3 = launch the reviewers, 4 = can't run here: one combined-reviewer)
 envelope pr *args:
-    @python3 .claude/kit/kit.py envelope {{pr}} {{args}}
+    @python3 .claude/kit/kit.py envelope "$@"
 
 # test the envelope path once (find Claude Code, version, one tiny call) and say what to fix
 envelope-check:
@@ -74,11 +77,15 @@ envelope-check:
 
 # what an agent reads before it starts working, and how big each part is (no agent = summary of all)
 start-report *agent:
-    @python3 .claude/kit/kit.py start-report {{agent}}
+    @python3 .claude/kit/kit.py start-report "$@"
 
 # the library: one section of the skills/handbooks on request (e.g. just docs money; --list shows topics)
 docs *topic:
-    @python3 .claude/kit/kit.py docs {{topic}}
+    @python3 .claude/kit/kit.py docs "$@"
+
+# reviewers and testers: check a findings file (verdict, severities) and store it where merge-check reads it
+save-review *args:
+    @python3 .claude/kit/kit.py save-review "$@"
 
 # copy review files that agents wrote inside their worktrees into this checkout (merge-check and triage do it too)
 collect-reviews:
@@ -86,19 +93,19 @@ collect-reviews:
 
 # zip only the kit (agents, skills, hooks, .agents notes, records, CI) for feedback or upgrades; shows size and contents
 export-kit *args:
-    @python3 .claude/kit/kit.py export-kit {{args}}
+    @python3 .claude/kit/kit.py export-kit "$@"
 
 # apply the default triage decisions to a PR's findings; lists only what needs the tech lead
 triage feature *args:
-    @python3 .claude/kit/kit.py triage {{feature}} {{args}}
+    @python3 .claude/kit/kit.py triage "$@"
 
 # a feature plan, or one slice's brief (works inside agent worktrees): just plan F3 --slice 2
 plan id *args:
-    @python3 .claude/kit/kit.py plan {{id}} {{args}}
+    @python3 .claude/kit/kit.py plan "$@"
 
 # close a milestone: rewrite the board's Resume note, archive finished rows, then start a fresh session (/clear)
 milestone *text:
-    @python3 .claude/kit/kit.py milestone {{text}}
+    @python3 .claude/kit/kit.py milestone "$@"
 
 # one-shot status for the manager: checkout, work mode, budget, board, open PRs with CI, bugs
 status:
@@ -106,19 +113,35 @@ status:
 
 # wait for a PR's CI inside the script (free); exit 0 passed, 1 failed, 2 still running
 pr-wait pr *args:
-    @python3 .claude/kit/kit.py pr-wait {{pr}} {{args}}
+    @python3 .claude/kit/kit.py pr-wait "$@"
 
 # tech lead, after deciding a PR's open questions: it may merge once merge-check passes (triage approves by itself when nothing needs judgment)
 approve pr *args:
-    @python3 .claude/kit/kit.py approve {{pr}} {{args}}
+    @python3 .claude/kit/kit.py approve "$@"
+
+# change one team setting safely (checked against what the kit supports); --list shows them all
+set *args:
+    @python3 .claude/kit/kit.py set "$@"
+
+# where one agent run's tokens went, step by step (newest run of <agent>, or --match "PR 29")
+run-report *args:
+    @python3 .claude/kit/kit.py run-report "$@"
+
+# agents of this session: continue (SendMessage id) or start fresh, by their context size
+warm:
+    @python3 .claude/kit/kit.py warm
 
 # efficiency review from the kit's own records (no agent): the current feature, F<n>, --session (this session) or --all
 efficiency *args:
-    @python3 .claude/kit/kit.py efficiency {{args}}
+    @python3 .claude/kit/kit.py efficiency "$@"
 
 # remove leftover agent worktrees that hold nothing unsaved (branches are kept); --dry-run lists them
 worktree-clean *args:
-    @python3 .claude/kit/kit.py worktree-clean {{args}}
+    @python3 .claude/kit/kit.py worktree-clean "$@"
+
+# commit the manager's records (board, decisions, reports, project, codemap) through a small docs PR; no reviewer
+records-pr *args:
+    @python3 .claude/kit/kit.py records-pr "$@"
 
 # fast-forward your local integration branch to origin (ship does this after every merge)
 sync-base:
@@ -126,11 +149,11 @@ sync-base:
 
 # merge in one command (run by the manager once the PR is approved): wait for CI, merge-check, merge, update the integration branch, refresh codemap
 ship pr *args:
-    @python3 .claude/kit/kit.py ship {{pr}} {{args}}
+    @python3 .claude/kit/kit.py ship "$@"
 
 # tech lead: merge-check, then squash-merge a feature PR into the integration branch
 merge pr *args:
-    @python3 .claude/kit/kit.py merge {{pr}} {{args}}
+    @python3 .claude/kit/kit.py merge "$@"
 
 # promotion/release PR into the release branch - Claude Code asks the user every time
 promote pr:
@@ -142,7 +165,7 @@ setup-branches:
 
 # show (or --apply) GitHub branch protection for the integration and release branches (asks the user)
 protect-branches *args:
-    @python3 .claude/kit/kit.py protect-branches {{args}}
+    @python3 .claude/kit/kit.py protect-branches "$@"
 
 # the team: every agent with model, effort, turns and role, and which agent the main session runs as
 agents:
@@ -157,10 +180,10 @@ feature id:
 
 # bugs: draft one (just bug-new "Cart total wrong" --feature F7 --severity high) or list open ones (--all for every one)
 bug-new title *args:
-    @python3 .claude/kit/kit.py bug-new "{{title}}" {{args}}
+    @python3 .claude/kit/kit.py bug-new "$@"
 
 bugs *args:
-    @python3 .claude/kit/kit.py bugs {{args}}
+    @python3 .claude/kit/kit.py bugs "$@"
 
 # move finished rows from the board to .agents/board-archive/<month>.md
 board-archive:
@@ -168,7 +191,7 @@ board-archive:
 
 # token budget (runs are measured automatically): manual row with --estimate if unmeasured, status, or check planned launches (e.g. just budget-check F12 dev-data:4 code-reviewer:4)
 budget-add task agent tokens *note:
-    @python3 .claude/kit/budget.py add {{task}} {{agent}} {{tokens}} {{note}}
+    @python3 .claude/kit/budget.py add "$@"
 
 budget task="":
     @python3 .claude/kit/budget.py status {{task}}

@@ -64,9 +64,11 @@ New agents you hire get their rows here automatically.
 | combined-reviewer | - | - | none | - |
 
 - `context_window`: 100,000-1,000,000 tokens; the conversation is summarised when it reaches this size.
-  Smaller = cheaper turns on long tasks. Needs Claude Code 2.1.296+.
+  Smaller = cheaper turns on long tasks. The manager defaults to 160,000: its whole conversation is re-sent on
+  every step, so a long one is the biggest cost; the board carries the state across summaries and fresh sessions. Needs Claude Code 2.1.296+.
 - `cache_ttl`: 5m | 1h - how long the agent's prompt cache lives. 1h makes repeat launches within an hour
-  cheaper (ignored while on usage credits).
+  cheaper (ignored while on usage credits). The manager defaults to 1h: it often waits longer than 5 minutes for
+  agents or for you, and with 5m its whole conversation is written to the cache again after every pause.
 - `memory`: project | user | local | none - where the agent keeps notes between runs.
 - `permission_mode`: default | manual | acceptEdits | auto | dontAsk | plan. `bypassPermissions` is not
   allowed by the kit. The safety hooks run in every mode.
@@ -110,9 +112,9 @@ then there is no fixed cap on developers - the budget is the governor.
 | checkpoint_commits | yes |
 | preview_first | yes |
 
-| reuse_roles | tech-lead, architect, market-strategist, code-reviewer, security-reviewer, risk-guardian, quant-reviewer, combined-reviewer |
+| reuse_roles | tech-lead, architect, market-strategist |
 | reuse_window_minutes | 90 |
-| reuse_max_context | 100,000 |
+| reuse_max_context | 120,000 |
 | efficiency_review | yes |
 - `work_mode`: `worktrees` (developers in parallel, each in its own git worktree) or `in-place` (one developer at a
   time in this checkout, for repos where worktrees fail). `just preflight` recommends one; `just work-mode <mode>` switches.
@@ -139,7 +141,7 @@ Code review runs on every PR. Security review and testing scale with risk so sma
 | light_lane | skip |
 | light_review_docs | yes |
 | envelope_reviews | yes |
-| envelope_max_lines | 150 |
+| envelope_max_lines | 400 |
 | envelope_max_diff_chars | 60000 |
 | envelope_command | /Users/rajesh/.local/bin/claude |
 | require_feature_t2 | yes |
@@ -171,6 +173,7 @@ Set `usd_per_million_tokens` to your blended rate to see dollar estimates.
 | per_day_tokens | 15,000,000 |
 | warn_percent | 80 |
 | usd_per_million_tokens | - |
+| manager_clear_at | 150,000 |
 
 ## Branches
 

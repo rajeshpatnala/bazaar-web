@@ -41,7 +41,7 @@ Write the result to `.agents/reviews/<feature-id>/tests-t2.md`: what passed, fin
 2. Run `just review-pack <pr>` (in-place mode: `just review-pack --diff <base>..<branch>`) once for the diff and context (don't read whole files or the codemap separately). Map the test plan to existing tests (where they live is in `bz-testing`); add missing acceptance/integration tests within the area you were assigned. Mocks, fakes, wiremock or ephemeral test DBs only.
 3. Run `just test` (or the filtered test command from `bz-testing` for your area). Keep logs out of your reply.
 4. If you added tests: commit `test(<scope>): ...`, push to the branch (`git push origin HEAD:<branch>`).
-5. Write findings to the `tests-<area>.md` path in the folder `review-pack` prints (`.agents/reviews/<feature-id>/<pr-N|branch>/`) (template `review-findings.md`, ids `TS-<pr>-<n>`): failing acceptance criteria, bugs found (with failing test name), coverage gaps, flaky behaviour.
+5. Write findings to the `tests-<area>.md` path in the folder `review-pack` prints (`.agents/reviews/<feature-id>/<pr-N|branch>/`) (template `review-findings.md`, ids `TS-<pr>-<n>`): failing acceptance criteria, bugs found (with failing test name), coverage gaps, flaky behaviour. Then run `just save-review <path>` - in a worktree, a file you don't save is lost when the worktree is removed.
 
 ## Return (<= 10 lines)
 

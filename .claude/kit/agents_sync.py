@@ -429,6 +429,22 @@ def main() -> int:
         if env != before and not check:
             SETTINGS.write_text(json.dumps(s, indent=2) + "\n")
 
+    # The main session (the manager) summarises at the manager row's context_window. An agent file's
+    # autoCompactWindow is documented for sub-agents only, so the main session gets the settings-level key too.
+    mrow = agent_rows(team_text).get("manager", {})
+    mctx = (mrow.get("context_window") or "-").replace(",", "").replace("_", "")
+    if SETTINGS.exists() and mctx:
+        s = json.loads(SETTINGS.read_text())
+        before = s.get("autoCompactWindow")
+        if mctx == "-":
+            s.pop("autoCompactWindow", None)
+        elif not is_int(100_000, 1_000_000)(mctx):
+            s["autoCompactWindow"] = int(mctx)
+        if s.get("autoCompactWindow") != before:
+            changed.append(f"session: autoCompactWindow (manager) {before or '-'} -> {s.get('autoCompactWindow', '-')}")
+            if not check:
+                SETTINGS.write_text(json.dumps(s, indent=2) + "\n")
+
     for p in problems:
         print("ERROR", p)
     for c in changed:
