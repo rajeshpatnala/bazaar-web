@@ -7,10 +7,12 @@
 //!   `None` inside the output until index 2N-1 (average of the first N DX values, then Wilder).
 //! - `Supertrend(N, m)`: first `Some` at index N (first ATR).
 //!
-//! Periods are bounded to `1..=MAX_PERIOD`; bars with a non-finite or huge (> 1e15) price are
-//! skipped (`None`, state unchanged).
+//! Periods are bounded to `1..=MAX_PERIOD`; bars with a non-finite or huge (> 1e15) high, low or
+//! close are skipped (`None`, state unchanged). Open and volume are unused here and not validated.
+//! A `None` after warm-up therefore means a rejected bar; the next true range then spans the gap.
 //! Zero denominators (flat range) give 0 for DI/DX, never NaN/inf.
-//! `ParamError` is local to this file (the shared one lives in `ma.rs`, on another branch).
+//! `TrendParamError` is local to this file (the shared `ParamError` lives in `ma.rs`, on another
+//! branch); the two are to be merged once the branches land.
 
 use thiserror::Error;
 
@@ -23,7 +25,7 @@ pub enum TrendParamError {
     #[error("indicator period must be at least 1")]
     ZeroPeriod,
     /// The period exceeds `MAX_PERIOD`.
-    #[error("indicator period must be at most 10000")]
+    #[error("indicator period must be at most {}", MAX_PERIOD)]
     PeriodTooLarge,
     /// The Supertrend multiplier must be finite and positive.
     #[error("multiplier must be finite and greater than zero")]
@@ -110,7 +112,7 @@ pub struct Atr {
 
 impl Atr {
     /// # Errors
-    /// `ZeroPeriod` when `period == 0`.
+    /// `ZeroPeriod` when `period == 0`; `PeriodTooLarge` when `period > MAX_PERIOD`.
     pub const fn new(period: usize) -> Result<Self, TrendParamError> {
         match check(period) {
             Ok(n) => Ok(Self {
@@ -185,7 +187,7 @@ pub struct Adx {
 
 impl Adx {
     /// # Errors
-    /// `ZeroPeriod` when `period == 0`.
+    /// `ZeroPeriod` when `period == 0`; `PeriodTooLarge` when `period > MAX_PERIOD`.
     pub const fn new(period: usize) -> Result<Self, TrendParamError> {
         match check(period) {
             Ok(n) => Ok(Self {
@@ -294,7 +296,8 @@ pub struct SupertrendValue {
 
 /// Supertrend(N, m). Bands are `hl2 +- m*ATR(N)` (Wilder ATR); the final upper band only moves down
 /// (or resets after the previous close broke it), the lower only up. Initial direction at the first
-/// `Some` (index N): up when the close is at or above hl2, otherwise down. Afterwards: up flips
+/// `Some` (index N): up when the close is at or above hl2 (a tie counts as up; other platforms
+/// may start differently, which only affects bars before the first flip), otherwise down. Afterwards: up flips
 /// down when close < final lower band; down flips up when close > final upper band.
 #[derive(Debug, Clone)]
 pub struct Supertrend {
@@ -307,7 +310,7 @@ pub struct Supertrend {
 
 impl Supertrend {
     /// # Errors
-    /// `ZeroPeriod` when `period == 0`; `BadMultiplier` unless `mult` is finite and > 0.
+    /// `ZeroPeriod` when `period == 0`; `PeriodTooLarge` when `period > MAX_PERIOD`; `BadMultiplier` unless `mult` is finite and > 0.
     pub fn new(period: usize, mult: f64) -> Result<Self, TrendParamError> {
         if !(mult.is_finite() && mult > 0.0) {
             return Err(TrendParamError::BadMultiplier);
@@ -636,6 +639,127 @@ mod tests {
     }
 
     #[test]
+    fn adx_n2_hand_values() {
+        // Bars (h,l,c): (10,8,9) (12,9,11) (11,8,9) (13,10,12) (14,11,13).
+        // Per change: TR = 3, 3, 4, 3; +DM = 2, 0, 2, 1; -DM = 0, 1, 0, 0.
+        // idx2 (seed = sums): TR 6, +DM 2, -DM 1 -> +DI 100/3, -DI 50/3, DX = 100*(50/3)/50 = 100/3.
+        // idx3 (s = s - s/2 + x): TR 6-3+4 = 7, +DM 2-1+2 = 3, -DM 1-0.5+0 = 0.5
+        //   -> +DI 300/7, -DI 50/7, DX = 100*250/350 = 500/7; ADX seed = (100/3 + 500/7)/2 = 1100/21.
+        // idx4: TR 7-3.5+3 = 6.5, +DM 3-1.5+1 = 2.5, -DM 0.5-0.25 = 0.25
+        //   -> +DI 250/6.5, -DI 25/6.5, DX = 100*225/275 = 900/11;
+        //   ADX = (1100/21 + 900/11)/2 = 15500/231.
+        let xs = [
+            bar(10.0, 8.0, 9.0),
+            bar(12.0, 9.0, 11.0),
+            bar(11.0, 8.0, 9.0),
+            bar(13.0, 10.0, 12.0),
+            bar(14.0, 11.0, 13.0),
+        ];
+        let out = batch(Adx::new(2).unwrap(), xs);
+        assert_eq!((out[0], out[1]), (None, None));
+        let a = out[2].unwrap();
+        assert!(near(a.plus_di, 100.0 / 3.0) && near(a.minus_di, 50.0 / 3.0));
+        assert_eq!(a.adx, None);
+        let b = out[3].unwrap();
+        assert!(near(b.plus_di, 300.0 / 7.0) && near(b.minus_di, 50.0 / 7.0));
+        assert!(near(b.adx.unwrap(), 1100.0 / 21.0));
+        let c = out[4].unwrap();
+        assert!(near(c.plus_di, 250.0 / 6.5) && near(c.minus_di, 25.0 / 6.5));
+        assert!(near(c.adx.unwrap(), 15500.0 / 231.0));
+    }
+
+    #[test]
+    fn supertrend_flips_back_to_up() {
+        // N=1, m=1. First four bars as in `supertrend_hand_cases` (down, fu 10.5, fl 7.5 after bar 3).
+        // Bar4 (13,10,12), prev close 5: TR max(3,|13-5|=8,|10-5|=5) = 8, hl2 11.5, bands 19.5/3.5.
+        // fu: 19.5 < 10.5 no, prev close 5 > 10.5 no -> stays 10.5. fl: prev close 5 < 7.5 -> reset to 3.5.
+        // Down and close 12 > fu 10.5 -> flips up, value = fl = 3.5.
+        let xs = [
+            bar(10.0, 8.0, 9.0),
+            bar(12.0, 9.0, 11.0),
+            bar(11.0, 8.0, 9.0),
+            bar(8.0, 5.0, 5.0),
+            bar(13.0, 10.0, 12.0),
+        ];
+        let out = batch(Supertrend::new(1, 1.0).unwrap(), xs);
+        assert_eq!(out[3].map(|v| v.up), Some(false));
+        assert_eq!(
+            out[4],
+            Some(SupertrendValue {
+                value: 3.5,
+                up: true
+            })
+        );
+    }
+
+    /// Outputs for the good bars of `xs` with `bad` injected after index `at`.
+    fn run_with_bad<I>(
+        make: impl Fn() -> I,
+        xs: &[Ohlcv],
+        at: usize,
+        bad: Ohlcv,
+    ) -> Vec<Option<I::Output>>
+    where
+        I: Indicator<Input = Ohlcv>,
+    {
+        let mut ind = make();
+        let mut out = Vec::new();
+        for (i, x) in xs.iter().enumerate() {
+            out.push(ind.update(*x));
+            if i == at {
+                assert!(ind.update(bad).is_none());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn bad_bar_mid_stream_equals_run_without_it() {
+        let xs: Vec<Ohlcv> = (0..12)
+            .map(|i| {
+                let b = 100.0 + f64::from(i) * 1.5 + if i % 3 == 0 { 4.0 } else { 0.0 };
+                bar(b + 3.0, b - 2.0, b + f64::from(i % 4) - 1.0)
+            })
+            .collect();
+        let bad = bar(f64::NAN, 1.0, 1.0);
+        for at in [4, 7] {
+            assert_eq!(
+                run_with_bad(Tr::new, &xs, at, bad),
+                batch(Tr::new(), xs.iter().copied())
+            );
+            assert_eq!(
+                run_with_bad(|| Atr::new(3).unwrap(), &xs, at, bad),
+                batch(Atr::new(3).unwrap(), xs.iter().copied())
+            );
+            assert_eq!(
+                run_with_bad(|| Adx::new(3).unwrap(), &xs, at, bad),
+                batch(Adx::new(3).unwrap(), xs.iter().copied())
+            );
+            assert_eq!(
+                run_with_bad(|| Supertrend::new(3, 2.0).unwrap(), &xs, at, bad),
+                batch(Supertrend::new(3, 2.0).unwrap(), xs.iter().copied())
+            );
+        }
+    }
+
+    /// Outputs at indices `< cut` must not depend on any bar at or after `cut`.
+    fn assert_no_lookahead<I>(
+        make: impl Fn() -> I,
+        head: &[Ohlcv],
+        tail_a: &[Ohlcv],
+        tail_b: &[Ohlcv],
+    ) -> Result<(), TestCaseError>
+    where
+        I: Indicator<Input = Ohlcv>,
+        I::Output: PartialEq + std::fmt::Debug,
+    {
+        let run = |tail: &[Ohlcv]| batch(make(), head.iter().chain(tail).copied());
+        let (a, b) = (run(tail_a), run(tail_b));
+        prop_assert_eq!(&a[..head.len()], &b[..head.len()]);
+        Ok(())
+    }
+
+    #[test]
     fn flat_bars_give_zero_not_nan() {
         let xs = [bar(5.0, 5.0, 5.0); 6];
         let out = batch(Adx::new(2).unwrap(), xs);
@@ -682,6 +806,30 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn lookahead_tr(xs in bars_strategy(), a in bars_strategy(), b in bars_strategy(), cut in 0usize..60) {
+            let cut = cut.min(xs.len());
+            assert_no_lookahead(Tr::new, &xs[..cut], &a, &b)?;
+        }
+
+        #[test]
+        fn lookahead_atr(xs in bars_strategy(), a in bars_strategy(), b in bars_strategy(), cut in 0usize..60, n in 1usize..8) {
+            let cut = cut.min(xs.len());
+            assert_no_lookahead(|| Atr::new(n).unwrap(), &xs[..cut], &a, &b)?;
+        }
+
+        #[test]
+        fn lookahead_adx(xs in bars_strategy(), a in bars_strategy(), b in bars_strategy(), cut in 0usize..60, n in 1usize..8) {
+            let cut = cut.min(xs.len());
+            assert_no_lookahead(|| Adx::new(n).unwrap(), &xs[..cut], &a, &b)?;
+        }
+
+        #[test]
+        fn lookahead_supertrend(xs in bars_strategy(), a in bars_strategy(), b in bars_strategy(), cut in 0usize..60, n in 1usize..8, m in 0.5f64..4.0) {
+            let cut = cut.min(xs.len());
+            assert_no_lookahead(|| Supertrend::new(n, m).unwrap(), &xs[..cut], &a, &b)?;
+        }
+
         #[test]
         fn tr_matches_naive(xs in bars_strategy()) {
             check_contract(Tr::new, &xs, true);
