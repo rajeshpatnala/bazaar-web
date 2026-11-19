@@ -1,5 +1,5 @@
 //! `RegimeParams`: the `[regime]` table of `config/strategies.toml` (spec section 4).
-//! Every default is an UNVERIFIED convention; no threshold literal lives in classifier code.
+//! Every value is an UNVERIFIED convention that lives only in the config file: there is no `Default`.
 
 use bazaar_core::config::StrategiesConfig;
 use serde::Deserialize;
@@ -35,6 +35,8 @@ pub struct RegimeParams {
     pub ema_mid: usize,
     pub ema_slow: usize,
     pub adx_period: usize,
+    /// ATR period for the volatility percentile (separate from `adx_period`).
+    pub atr_period: usize,
     pub adx_trend_enter: f64,
     pub adx_trend_stay: f64,
     pub adx_range_max: f64,
@@ -46,28 +48,6 @@ pub struct RegimeParams {
     pub vol_high_pct: f64,
     pub breadth_breakdown_max_pct: f64,
     pub market_vol_source: MarketVolSource,
-}
-
-impl Default for RegimeParams {
-    /// Spec section 4 defaults, mirrored by `config/strategies.toml` (UNVERIFIED conventions).
-    fn default() -> Self {
-        Self {
-            ema_mid: 50,
-            ema_slow: 200,
-            adx_period: 14,
-            adx_trend_enter: 25.0,
-            adx_trend_stay: 20.0,
-            adx_range_max: 20.0,
-            slope_bars: 10,
-            slope_flat_max_pct: 2.0,
-            confirm_bars: 3,
-            vol_lookback_bars: 250,
-            vol_low_pct: 25.0,
-            vol_high_pct: 75.0,
-            breadth_breakdown_max_pct: 30.0,
-            market_vol_source: MarketVolSource::VixIfAvailable,
-        }
-    }
 }
 
 fn bad(key: &'static str, reason: &'static str) -> ParamsError {
@@ -100,14 +80,18 @@ impl RegimeParams {
         if !(2..=100).contains(&self.adx_period) {
             return Err(bad("adx_period", "must be 2..=100"));
         }
+        if !(2..=100).contains(&self.atr_period) {
+            return Err(bad("atr_period", "must be 2..=100"));
+        }
         if !pct(self.adx_trend_enter) || !pct(self.adx_trend_stay) || !pct(self.adx_range_max) {
             return Err(bad("adx_*", "must be between 0 and 100 exclusive"));
         }
         if self.adx_trend_stay > self.adx_trend_enter {
             return Err(bad("adx_trend_stay", "must not exceed adx_trend_enter"));
         }
-        if self.adx_range_max > self.adx_trend_enter {
-            return Err(bad("adx_range_max", "must not exceed adx_trend_enter"));
+        // Keeps Range_raw (ADX < range_max) and a held trend (ADX >= stay) from overlapping.
+        if self.adx_range_max > self.adx_trend_stay {
+            return Err(bad("adx_range_max", "must not exceed adx_trend_stay"));
         }
         if !(1..=100).contains(&self.slope_bars) {
             return Err(bad("slope_bars", "must be 1..=100"));
@@ -142,11 +126,22 @@ impl RegimeParams {
         Ok(())
     }
 
-    /// Bars needed before any label: `ema_slow + vol_lookback_bars + confirm_bars` (spec section 3).
+    /// Bars needed before any label. The indicators warm up side by side over the same bars, so
+    /// the need is a max, not a sum: EMA slow (`ema_slow`), ADX (`2 * adx_period`), the EMA-mid
+    /// slope (`ema_mid + slope_bars`) and a full ATR% percentile window
+    /// (`atr_period + vol_lookback_bars - 1`); then `confirm_bars - 1` more closes to confirm.
+    /// About 265 at the shipped config.
     pub fn min_history_bars(&self) -> usize {
-        self.ema_slow
-            .saturating_add(self.vol_lookback_bars)
-            .saturating_add(self.confirm_bars)
+        let warm = self
+            .ema_slow
+            .max(self.adx_period.saturating_mul(2))
+            .max(self.ema_mid.saturating_add(self.slope_bars))
+            .max(
+                self.atr_period
+                    .saturating_add(self.vol_lookback_bars)
+                    .saturating_sub(1),
+            );
+        warm.saturating_add(self.confirm_bars.saturating_sub(1))
     }
 }
 
@@ -168,8 +163,14 @@ mod tests {
         text[start..].to_owned()
     }
 
+    fn shipped() -> RegimeParams {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config");
+        let c: StrategiesConfig = load(&dir).expect("strategies.toml loads");
+        RegimeParams::from_config(&c).expect("params")
+    }
+
     #[test]
-    fn real_config_loads_and_equals_defaults() {
+    fn real_config_loads_with_expected_provenance() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config");
         let c: StrategiesConfig = load(&dir).expect("strategies.toml loads");
         assert!(!c.placeholder);
@@ -182,8 +183,9 @@ mod tests {
                 .starts_with("owner decision 2026-11-20: UNVERIFIED")
         );
         let p = RegimeParams::from_config(&c).expect("params");
-        assert_eq!(p, RegimeParams::default());
-        assert_eq!(p.min_history_bars(), 453);
+        assert_eq!(p.ema_slow, 200);
+        assert_eq!(p.atr_period, 14);
+        assert_eq!(p.min_history_bars(), 265);
     }
 
     #[test]
@@ -230,6 +232,8 @@ mod tests {
             ("adx_trend_enter", "150.0"),
             ("adx_trend_stay", "30.0"),
             ("adx_range_max", "26.0"),
+            ("adx_range_max", "21.0"),
+            ("atr_period", "1"),
             ("slope_bars", "0"),
             ("slope_flat_max_pct", "-1.0"),
             ("confirm_bars", "0"),
@@ -251,10 +255,19 @@ mod tests {
     }
 
     #[test]
+    fn min_history_is_a_max_not_a_sum() {
+        let p = shipped();
+        // 14 + 250 - 1 = 263 (ATR% window) beats 200 (EMA), 28 (ADX), 60 (slope); plus 2 confirm closes.
+        assert_eq!(p.min_history_bars(), 263 + 2);
+        let q = RegimeParams { ema_slow: 300, ..p };
+        assert_eq!(q.min_history_bars(), 300 + 2);
+    }
+
+    #[test]
     fn nan_is_refused() {
         let p = RegimeParams {
             adx_trend_enter: f64::NAN,
-            ..RegimeParams::default()
+            ..shipped()
         };
         assert!(p.validate().is_err());
     }

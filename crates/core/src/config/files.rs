@@ -50,6 +50,8 @@ macro_rules! header_only {
 ///
 /// Tables stay raw so core never depends on the crates that own their schema
 /// (`bazaar-regime` parses `[regime]`; F8 parses `[strategy.<id>]`). Any other table is an error.
+/// `validate` is a no-op here: F8 must bound and validate the `[strategy.<id>]` tables
+/// (count and size; only the whole-file size cap applies today).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StrategiesConfig {

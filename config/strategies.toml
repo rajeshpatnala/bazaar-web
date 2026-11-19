@@ -10,6 +10,7 @@ verified_on = "2026-11-20"
 ema_mid = 50                # trend average (convention, UNVERIFIED)
 ema_slow = 200              # trend average (convention, UNVERIFIED)
 adx_period = 14             # Wilder default (UNVERIFIED)
+atr_period = 14             # ATR period for the volatility percentile (convention, UNVERIFIED)
 adx_trend_enter = 25.0      # ADX needed to enter a trend label (UNVERIFIED)
 adx_trend_stay = 20.0       # ADX needed to keep a trend label (UNVERIFIED)
 adx_range_max = 20.0        # below this there is no trend strength (UNVERIFIED)
