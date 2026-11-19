@@ -389,6 +389,17 @@ dependencies = [
 [[package]]
 name = "bazaar-strategies"
 version = "0.1.0"
+dependencies = [
+ "bazaar-core",
+ "bazaar-regime",
+ "chrono",
+ "chrono-tz",
+ "rust_decimal",
+ "serde",
+ "sha2",
+ "thiserror",
+ "toml",
+]
 
 [[package]]
 name = "bit-set"
