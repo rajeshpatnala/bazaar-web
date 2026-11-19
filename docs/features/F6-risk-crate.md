@@ -41,15 +41,18 @@ Deferred: first-15-minute rule; broker order-rate figure and the new hard ceilin
 | `override.size_factor` | 0.5 | 0 < x <= 1 |
 | `override.confirm_delay_secs` | 10 | 1..=300 |
 | `gate.evidence.min_oos_trades` (G01) | 30 | 1..=100000 |
-| `gate.evidence.min_profit_factor`, `min_expectancy_r` | 1.3, 0.1 | > 0 |
+| `gate.evidence.min_profit_factor`, `min_expectancy_r` | 1.3, 0.1 | >= 1, > 0; `require_walk_forward_pass = false` refused |
 | `events.block_ban_list`, `block_results_days`, `block_policy_days` | true | `false` refused |
 | `events.ban_list_max_age_hours` | 24 | 1..=48 |
 | `events.expiry_day_no_new_after_ist`, `events_file` | "13:30", events.toml | `HH:MM`; relative path, no `..` |
 | `data.max_quote_age_secs` (G15) | 5 | 1..=60 |
 | `data.max_snapshot_age_secs` (RG-F6-15, own key) | 10 | 1..=300 |
 | `options.allow_naked_short` (G13) | false | `true` refused |
-| `limits.min_charges_slippage_buffer` | 20 (rupees) | > 0; placeholder until the F9 cost model |
-| `limits.cap_equity_at_starting_cash` | true | bool (owner Q2 default) |
+| `limits.max_orders_per_day` / `max_notional_per_order_inr` (G16) + ceilings | 12 / 25000 | 1..=1000 / > 0; limit <= ceiling |
+| `limits.min_charges_slippage_buffer` | 60 (rupees) | > 0; placeholder, derive from charges.toml with the F9 cost model |
+| `limits.cap_equity_at_starting_cash` | true | `false` refused (owner Q2) |
+
+Deferred to slice 1b: ceilings for `ban_list_max_age_hours`, `max_quote_age_secs`, `max_snapshot_age_secs`, latest expiry cutoff; floor for `confirm_delay_secs`, ceiling for `size_factor`. Symlink and canonical-path check for `events_file` belongs to the events loader (F3/F10).
 
 Ceilings for G05 and G04a sit at their defaults; changing any `[hard_limits]` value needs an ADR and the owner.
 Test fixture `fixtures/config/risk.toml` gained the same sections with synthetic values.

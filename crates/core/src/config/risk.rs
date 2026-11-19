@@ -54,6 +54,11 @@ pub struct Limits {
     pub max_position_value_pct: Decimal,
     /// G16 orders per minute (Hard ceiling).
     pub max_orders_per_minute: u32,
+    /// G16 orders per day.
+    pub max_orders_per_day: u32,
+    /// G16 notional per order, rupees.
+    #[serde(deserialize_with = "super::decimal_str::deserialize")]
+    pub max_notional_per_order_inr: Decimal,
     /// Floor for the charges + slippage buffer the sizer accepts (rupees).
     #[serde(deserialize_with = "super::decimal_str::deserialize")]
     pub min_charges_slippage_buffer: Decimal,
@@ -91,6 +96,11 @@ pub struct HardLimits {
     pub max_open_positions: u32,
     /// Ceiling for `limits.max_orders_per_minute` (G16).
     pub max_orders_per_minute: u32,
+    /// Ceiling for `limits.max_orders_per_day` (G16).
+    pub max_orders_per_day: u32,
+    /// Ceiling for `limits.max_notional_per_order_inr` (G16), rupees.
+    #[serde(deserialize_with = "super::decimal_str::deserialize")]
+    pub max_notional_per_order_inr: Decimal,
     /// Ceiling for `override.max_per_day`.
     pub max_override_per_day: u32,
     /// Ceiling for `override.max_per_week`.
@@ -144,6 +154,16 @@ pub struct Events {
     /// Relative path of the events file under the config dir.
     #[serde(rename = "events_file")]
     pub file: String,
+}
+
+/// A relative path whose components are all plain names (no `..`, root, drive prefix, NUL or backslash).
+fn relative_normal_path(f: &str) -> bool {
+    use std::path::{Component, Path};
+    !f.is_empty()
+        && !f.contains(['\0', '\\'])
+        && Path::new(f)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
 }
 
 fn hhmm<'de, D: serde::Deserializer<'de>>(d: D) -> Result<NaiveTime, D::Error> {
@@ -225,7 +245,7 @@ pub struct RiskConfig {
 
 /// Loader sanity bounds (inclusive). They are structural limits that stop a degenerate value from
 /// switching a guard off; the trading thresholds themselves live in the file.
-/// Structural sanity bound, not a trading threshold; policy ceilings live in `[hard_limits]`.
+/// Structural sanity bounds, not trading thresholds; policy ceilings live in `[hard_limits]`.
 const OPEN_POSITIONS: (u32, u32) = (1, 20);
 const CORRELATED_POSITIONS: (u32, u32) = (1, 10);
 const CORRELATION_WINDOW_DAYS: (u32, u32) = (20, 250);
@@ -241,6 +261,7 @@ const OVERRIDES_PER_DAY: (u32, u32) = (1, 10);
 const OVERRIDES_PER_WEEK: (u32, u32) = (1, 50);
 const CONFIRM_DELAY_SECS: (u32, u32) = (1, 300);
 const MIN_OOS_TRADES: (u32, u32) = (1, 100_000);
+const ORDERS_PER_DAY: (u32, u32) = (1, 1000);
 
 /// A percentage must be above 0 and at most 100.
 fn check_pct(key: &str, v: Decimal) -> Result<(), ConfigError> {
@@ -294,6 +315,13 @@ fn check_floor_u32(key: &str, value: u32, floor: u32) -> Result<(), ConfigError>
             key,
             "is looser than its [hard_limits] floor",
         ));
+    }
+    Ok(())
+}
+
+fn forbid_false(key: &str, v: bool, why: &str) -> Result<(), ConfigError> {
+    if !v {
+        return Err(ConfigError::invalid(RiskConfig::FILE, key, why));
     }
     Ok(())
 }
@@ -491,8 +519,7 @@ impl RiskConfig {
                 return bad(key, "must be true (this guard cannot be switched off)");
             }
         }
-        let f = ev.file.as_str();
-        if f.is_empty() || f.starts_with('/') || f.contains("..") || f.contains('\\') {
+        if !relative_normal_path(&ev.file) {
             return bad(
                 "events.events_file",
                 "must be a relative path inside config",
@@ -526,9 +553,22 @@ impl RiskConfig {
             e.min_oos_trades,
             MIN_OOS_TRADES,
         )?;
-        if e.min_profit_factor <= Decimal::ZERO {
-            return bad("gate.evidence.min_profit_factor", "must be above 0");
+        if e.min_profit_factor < Decimal::ONE {
+            return bad(
+                "gate.evidence.min_profit_factor",
+                "must be at least 1 (a factor below 1 loses money)",
+            );
         }
+        forbid_false(
+            "gate.evidence.require_walk_forward_pass",
+            e.require_walk_forward_pass,
+            "must be true (the evidence bar needs a walk-forward pass)",
+        )?;
+        forbid_false(
+            "limits.cap_equity_at_starting_cash",
+            l.cap_equity_at_starting_cash,
+            "must be true (owner decision: size never rises after wins)",
+        )?;
         if e.min_expectancy_r <= Decimal::ZERO {
             return bad("gate.evidence.min_expectancy_r", "must be above 0");
         }
@@ -549,6 +589,35 @@ impl RiskConfig {
         Ok(())
     }
 
+    /// G16 orders per day and notional per order, with their ceilings.
+    fn validate_order_limits(&self) -> Result<(), ConfigError> {
+        let (l, h) = (&self.limits, &self.hard_limits);
+        check_range(
+            "hard_limits.max_orders_per_day",
+            h.max_orders_per_day,
+            ORDERS_PER_DAY,
+        )?;
+        check_range(
+            "limits.max_orders_per_day",
+            l.max_orders_per_day,
+            ORDERS_PER_DAY,
+        )?;
+        check_ceiling_u32(
+            "limits.max_orders_per_day",
+            l.max_orders_per_day,
+            h.max_orders_per_day,
+        )?;
+        let (n, c) = (l.max_notional_per_order_inr, h.max_notional_per_order_inr);
+        if n <= Decimal::ZERO || c <= Decimal::ZERO {
+            return Err(ConfigError::invalid(
+                Self::FILE,
+                "limits.max_notional_per_order_inr",
+                "must be above 0 (limit and ceiling)",
+            ));
+        }
+        check_ceiling("limits.max_notional_per_order_inr", n, c)
+    }
+
     /// G04a, G16 and override-count ceilings and their ranges.
     fn validate_rate_ceilings(&self) -> Result<(), ConfigError> {
         let (l, h, o) = (&self.limits, &self.hard_limits, &self.override_);
@@ -562,6 +631,7 @@ impl RiskConfig {
             l.max_open_positions,
             h.max_open_positions,
         )?;
+        self.validate_order_limits()?;
         for (key, v, c, r) in [
             (
                 "hard_limits.max_orders_per_minute",
@@ -639,14 +709,16 @@ mod tests {
         on_daily_loss = \"lockout_entries\"\nmax_open_positions = 3\n\
         max_total_open_risk_pct = \"3\"\nmax_weekly_loss_pct = \"6\"\n\
         max_position_value_pct = \"25\"\n\
-        max_orders_per_minute = 10\nmin_charges_slippage_buffer = \"20\"\n\
+        max_orders_per_minute = 10\nmax_orders_per_day = 12\n\
+        max_notional_per_order_inr = \"25000\"\nmin_charges_slippage_buffer = \"60\"\n\
         cap_equity_at_starting_cash = true\n\
         [hard_limits]\nmax_risk_per_trade_pct = \"1\"\nmax_daily_loss_pct = \"3\"\n\
         max_total_open_risk_pct = \"3\"\nmax_weekly_loss_pct = \"6\"\n\
         max_cooloff_after_losses = 2\nmax_new_entries_per_day = 3\n\
         min_reentry_lockout_minutes = 60\nmax_entry_zone_tolerance_bps = 0\n\
         max_position_value_pct = \"25\"\nmax_sector_pct = \"30\"\nmax_open_positions = 3\n\
-        max_orders_per_minute = 10\nmax_override_per_day = 1\nmax_override_per_week = 3\n\
+        max_orders_per_minute = 10\nmax_orders_per_day = 12\n\
+        max_notional_per_order_inr = \"25000\"\nmax_override_per_day = 1\nmax_override_per_week = 3\n\
         [exposure]\nmax_sector_pct = \"30\"\nmax_correlated_positions = 2\n\
         correlation_threshold = \"0.7\"\ncorrelation_window_days = 60\n\
         [behaviour]\ncooloff_after_losses = 2\ncooloff_until = \"end_of_session\"\n\
@@ -814,6 +886,10 @@ mod tests {
         ("limits", "max_orders_per_minute"),
         ("limits", "min_charges_slippage_buffer"),
         ("limits", "cap_equity_at_starting_cash"),
+        ("limits", "max_orders_per_day"),
+        ("limits", "max_notional_per_order_inr"),
+        ("hard_limits", "max_orders_per_day"),
+        ("hard_limits", "max_notional_per_order_inr"),
         ("hard_limits", "max_position_value_pct"),
         ("hard_limits", "max_sector_pct"),
         ("hard_limits", "max_open_positions"),
@@ -1149,10 +1225,27 @@ mod tests {
         assert!(parse_str::<RiskConfig>(&with("\"end_of_session\"", "\"never\"")).is_err());
     }
 
-    /// (section, key, bad value, text the error must contain)
+    /// (section, key, bad value); the error must name the key.
     #[test]
     fn slice1_table_refuses_degenerate_and_loose_values() {
         let rows: &[(&str, &str, &str)] = &[
+            ("limits", "max_orders_per_day", "0"),
+            ("limits", "max_orders_per_day", "13"),
+            ("limits", "max_notional_per_order_inr", "\"0\""),
+            ("limits", "max_notional_per_order_inr", "\"25001\""),
+            ("hard_limits", "max_orders_per_day", "0"),
+            ("hard_limits", "max_orders_per_day", "1001"),
+            ("hard_limits", "max_notional_per_order_inr", "\"0\""),
+            ("hard_limits", "max_orders_per_minute", "601"),
+            ("hard_limits", "max_override_per_day", "11"),
+            ("hard_limits", "max_open_positions", "21"),
+            ("hard_limits", "max_sector_pct", "\"0\""),
+            ("hard_limits", "max_position_value_pct", "\"101\""),
+            ("gate.evidence", "min_profit_factor", "\"0.99\""),
+            ("gate.evidence", "require_walk_forward_pass", "false"),
+            ("limits", "cap_equity_at_starting_cash", "false"),
+            ("events", "events_file", "\"a\\\\b.toml\""),
+            ("events", "events_file", "\"a/../b.toml\""),
             ("limits", "max_orders_per_minute", "0"),
             ("limits", "max_orders_per_minute", "601"),
             ("limits", "max_orders_per_minute", "11"),
@@ -1205,7 +1298,12 @@ mod tests {
         let t = t.replace("max_override_per_day = 1", "max_override_per_day = 2");
         let t = t.replace("max_override_per_week = 3", "max_override_per_week = 1");
         let t = t.replace("max_per_week = 3", "max_per_week = 1");
-        assert!(parse_str::<RiskConfig>(&t).is_err());
+        assert!(
+            parse_str::<RiskConfig>(&t)
+                .unwrap_err()
+                .to_string()
+                .contains("must not be below")
+        );
     }
 
     #[test]
