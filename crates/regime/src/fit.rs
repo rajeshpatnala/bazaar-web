@@ -33,31 +33,42 @@ fn no(label: &str, value: String, meaning: &str) -> Fit {
     Fit::Suppressed(Fact::new(label, value, meaning))
 }
 
+/// A bad `RegimeFit` declaration.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum RegimeFitError {
+    #[error("market_trends must not contain Mixed or Unknown")]
+    MarketTrendUnsettled,
+    #[error("stock_cells must not contain Mixed or Unknown")]
+    StockCellUnsettled,
+    #[error("weak_cells must also be in stock_cells")]
+    WeakNotDeclared,
+}
+
 impl RegimeFit {
     /// Check a declaration at config load: `weak_cells` must be declared in `stock_cells`, and no
     /// Mixed/Unknown trend or Unknown vol may be declared. A bad declaration only ever suppresses,
     /// so this is how its author hears about it.
     ///
     /// # Errors
-    /// A plain-English reason for the first problem found.
-    pub fn check(&self) -> Result<(), &'static str> {
+    /// The first problem found.
+    pub fn check(&self) -> Result<(), RegimeFitError> {
         let unsettled = |t: Trend| matches!(t, Trend::Unknown | Trend::Mixed);
         if self.market_trends.iter().any(|t| unsettled(*t)) {
-            return Err("market_trends must not contain Mixed or Unknown");
+            return Err(RegimeFitError::MarketTrendUnsettled);
         }
         if self
             .stock_cells
             .iter()
             .any(|(t, v)| unsettled(*t) || *v == VolState::Unknown)
         {
-            return Err("stock_cells must not contain Mixed or Unknown");
+            return Err(RegimeFitError::StockCellUnsettled);
         }
         if self
             .weak_cells
             .iter()
             .any(|c| !self.stock_cells.contains(c))
         {
-            return Err("weak_cells must also be in stock_cells");
+            return Err(RegimeFitError::WeakNotDeclared);
         }
         Ok(())
     }
@@ -70,7 +81,7 @@ impl RegimeFit {
             if matches!(s.trend, Trend::Unknown | Trend::Mixed) || s.vol == VolState::Unknown {
                 return no(
                     who,
-                    label(s),
+                    trend_label(s),
                     "Not settled: no trade ideas from this label.",
                 );
             }
@@ -92,22 +103,35 @@ impl RegimeFit {
                 "This idea does not fit the market's trend.",
             );
         }
+        // A stock run normally has `Unknown` breakdown (it is judged for the market only), so only
+        // a definite `True` suppresses here.
+        if stock.breakdown == Tri::True {
+            return no(
+                "Stock",
+                trend_label(stock),
+                "Stock is flagged as crashing: no new buys.",
+            );
+        }
         let cell = (stock.trend, stock.vol);
         if !self.stock_cells.contains(&cell) {
             return no(
                 "Stock",
-                label(stock),
+                trend_label(stock),
                 "This idea does not fit the stock's trend and swings.",
             );
         }
         if self.weak_cells.contains(&cell) {
             return Fit::Penalised(Fact::new(
-                "Stock",
-                label(stock),
+                "Fit",
+                format!("Market: {}; Stock: {}", label(market), trend_label(stock)),
                 "Fits, but a weaker setting: the score is lowered.",
             ));
         }
-        Fit::Allowed(Fact::new("Stock", label(stock), "Fits this idea."))
+        Fit::Allowed(Fact::new(
+            "Fit",
+            format!("Market: {}; Stock: {}", label(market), trend_label(stock)),
+            "Fits this idea.",
+        ))
     }
 }
 
@@ -117,6 +141,11 @@ pub fn label(s: &RegimeState) -> String {
     if s.breakdown == Tri::True {
         return "Market under stress: no new buys".to_owned();
     }
+    trend_label(s)
+}
+
+/// Trend and swing wording only (no stress text), safe for a stock line.
+fn trend_label(s: &RegimeState) -> String {
     let word = match s.vol {
         VolState::Low => "calm swings",
         VolState::Normal => "normal swings",
@@ -201,11 +230,29 @@ mod tests {
     }
 
     #[test]
+    fn stock_crash_flag_suppresses_and_pass_names_both_labels() {
+        let m = st(Trend::Up, VolState::Normal, Tri::False);
+        let mut crash = st(Trend::Up, VolState::Normal, Tri::True);
+        let Fit::Suppressed(r) = fit().allows(&m, &crash) else {
+            panic!("stock crash must suppress");
+        };
+        assert!(!r.value.contains("Market") && r.meaning.contains("crashing"));
+        crash.breakdown = Tri::Unknown; // the normal stock value
+        let Fit::Allowed(f) = fit().allows(&m, &crash) else {
+            panic!("allowed");
+        };
+        assert_eq!(
+            f.value,
+            "Market: Uptrend, normal swings; Stock: Uptrend, normal swings"
+        );
+    }
+
+    #[test]
     fn bad_declarations_are_reported() {
         assert_eq!(fit().check(), Ok(()));
         let mut f = fit();
         f.weak_cells.push((Trend::Range, VolState::Low));
-        assert!(f.check().is_err());
+        assert_eq!(f.check(), Err(RegimeFitError::WeakNotDeclared));
         let mut f = fit();
         f.market_trends.push(Trend::Mixed);
         assert!(f.check().is_err());
