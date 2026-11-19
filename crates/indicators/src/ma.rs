@@ -1,8 +1,11 @@
 //! SMA, EMA, WMA over a stream of `f64` values (normally closes).
 //!
 //! Warm-up (`bz-quant` conventions): the first `Some` is at 0-based bar index N-1, so `warmup()` is N.
-//! EMA is seeded with the SMA of the first N values (`TA-Lib` / `StockCharts`). Inputs are expected to
-//! be finite (the `Ohlcv` adapter guarantees it for candle data).
+//! EMA is seeded with the SMA of the first N values (`TA-Lib` / `StockCharts`).
+//!
+//! Input contract: a non-finite input (NaN, inf) is ignored: `update` returns `None` and the state is
+//! untouched, so one bad value never poisons the series. A finite input whose arithmetic would overflow
+//! (about 1e308) is treated the same way. Periods are capped at [`MAX_PERIOD`].
 
 use std::collections::VecDeque;
 
@@ -19,7 +22,13 @@ pub enum ParamError {
     /// MACD needs fast < slow.
     #[error("fast period must be smaller than slow period")]
     FastNotBelowSlow,
+    /// A period above [`MAX_PERIOD`] was given.
+    #[error("indicator period must be at most 10000")]
+    PeriodTooLarge,
 }
+
+/// Largest accepted indicator period (guards against huge allocations from bad config).
+pub const MAX_PERIOD: usize = 10_000;
 
 /// Period as `f64` (periods are tiny; exact).
 #[allow(clippy::cast_precision_loss)]
@@ -27,9 +36,11 @@ pub(crate) const fn n_f64(n: usize) -> f64 {
     n as f64
 }
 
-const fn check(period: usize) -> Result<usize, ParamError> {
+pub(crate) const fn check(period: usize) -> Result<usize, ParamError> {
     if period == 0 {
         Err(ParamError::ZeroPeriod)
+    } else if period > MAX_PERIOD {
+        Err(ParamError::PeriodTooLarge)
     } else {
         Ok(period)
     }
@@ -43,13 +54,15 @@ pub struct Sma {
 }
 
 impl Sma {
+    /// Build with the given period.
+    ///
     /// # Errors
-    /// `ZeroPeriod` when `period == 0`.
+    /// `ZeroPeriod` when `period == 0`; `PeriodTooLarge` above `MAX_PERIOD`.
     pub fn new(period: usize) -> Result<Self, ParamError> {
         let n = check(period)?;
         Ok(Self {
             n,
-            buf: VecDeque::with_capacity(n + 1),
+            buf: VecDeque::with_capacity(n),
         })
     }
 }
@@ -61,11 +74,16 @@ impl Indicator for Sma {
         self.n
     }
     fn update(&mut self, x: f64) -> Option<f64> {
+        if !x.is_finite() {
+            return None;
+        }
         self.buf.push_back(x);
         if self.buf.len() > self.n {
             self.buf.pop_front();
         }
-        (self.buf.len() == self.n).then(|| self.buf.iter().sum::<f64>() / n_f64(self.n))
+        (self.buf.len() == self.n)
+            .then(|| self.buf.iter().sum::<f64>() / n_f64(self.n))
+            .filter(|v| v.is_finite())
     }
     fn reset(&mut self) {
         self.buf.clear();
@@ -84,8 +102,10 @@ pub struct Ema {
 }
 
 impl Ema {
+    /// Build with the given period.
+    ///
     /// # Errors
-    /// `ZeroPeriod` when `period == 0`.
+    /// `ZeroPeriod` when `period == 0`; `PeriodTooLarge` above `MAX_PERIOD`.
     pub fn new(period: usize) -> Result<Self, ParamError> {
         let n = check(period)?;
         Ok(Self {
@@ -105,15 +125,26 @@ impl Indicator for Ema {
         self.n
     }
     fn update(&mut self, x: f64) -> Option<f64> {
+        if !x.is_finite() {
+            return None;
+        }
         if self.seen < self.n {
+            let sum = self.sum + x;
+            if !sum.is_finite() {
+                return None;
+            }
             self.seen += 1;
-            self.sum += x;
+            self.sum = sum;
             if self.seen < self.n {
                 return None;
             }
             self.prev = self.sum / n_f64(self.n);
         } else {
-            self.prev += self.alpha * (x - self.prev);
+            let next = self.prev + self.alpha * (x - self.prev);
+            if !next.is_finite() {
+                return None;
+            }
+            self.prev = next;
         }
         Some(self.prev)
     }
@@ -132,13 +163,15 @@ pub struct Wma {
 }
 
 impl Wma {
+    /// Build with the given period.
+    ///
     /// # Errors
-    /// `ZeroPeriod` when `period == 0`.
+    /// `ZeroPeriod` when `period == 0`; `PeriodTooLarge` above `MAX_PERIOD`.
     pub fn new(period: usize) -> Result<Self, ParamError> {
         let n = check(period)?;
         Ok(Self {
             n,
-            buf: VecDeque::with_capacity(n + 1),
+            buf: VecDeque::with_capacity(n),
         })
     }
 }
@@ -150,6 +183,9 @@ impl Indicator for Wma {
         self.n
     }
     fn update(&mut self, x: f64) -> Option<f64> {
+        if !x.is_finite() {
+            return None;
+        }
         self.buf.push_back(x);
         if self.buf.len() > self.n {
             self.buf.pop_front();
@@ -163,7 +199,7 @@ impl Indicator for Wma {
             .enumerate()
             .map(|(i, v)| n_f64(i + 1) * v)
             .sum();
-        Some(num / (n_f64(self.n) * (n_f64(self.n) + 1.0) / 2.0))
+        Some(num / (n_f64(self.n) * (n_f64(self.n) + 1.0) / 2.0)).filter(|v| v.is_finite())
     }
     fn reset(&mut self) {
         self.buf.clear();
@@ -226,6 +262,53 @@ mod tests {
         assert_eq!(Sma::new(0).unwrap_err(), ParamError::ZeroPeriod);
         assert_eq!(Ema::new(0).unwrap_err(), ParamError::ZeroPeriod);
         assert_eq!(Wma::new(0).unwrap_err(), ParamError::ZeroPeriod);
+    }
+
+    #[test]
+    fn huge_periods_rejected() {
+        for n in [MAX_PERIOD + 1, 1 << 40, usize::MAX] {
+            assert_eq!(Sma::new(n).unwrap_err(), ParamError::PeriodTooLarge);
+            assert_eq!(Ema::new(n).unwrap_err(), ParamError::PeriodTooLarge);
+            assert_eq!(Wma::new(n).unwrap_err(), ParamError::PeriodTooLarge);
+        }
+        assert!(Sma::new(MAX_PERIOD).is_ok());
+    }
+
+    #[test]
+    fn non_finite_input_is_skipped_and_output_stays_finite() {
+        let bad = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        let clean = [1.0, 2.0, 3.0, 7.0, 4.0];
+        for b in bad {
+            let dirty = [1.0, b, 2.0, 3.0, b, 7.0, 4.0];
+            let want = batch(Sma::new(3).unwrap(), clean);
+            let got: Vec<_> = batch(Sma::new(3).unwrap(), dirty)
+                .into_iter()
+                .flatten()
+                .collect();
+            assert_eq!(got, want.into_iter().flatten().collect::<Vec<_>>());
+            let want = batch(Ema::new(3).unwrap(), clean);
+            let got: Vec<_> = batch(Ema::new(3).unwrap(), dirty)
+                .into_iter()
+                .flatten()
+                .collect();
+            assert_eq!(got, want.into_iter().flatten().collect::<Vec<_>>());
+            let want = batch(Wma::new(3).unwrap(), clean);
+            let got: Vec<_> = batch(Wma::new(3).unwrap(), dirty)
+                .into_iter()
+                .flatten()
+                .collect();
+            assert_eq!(got, want.into_iter().flatten().collect::<Vec<_>>());
+        }
+        // overflow-sized finite values never yield NaN/inf
+        let huge = [1e308, 1e308, 1e308, -1e308, 1e308, 1e308];
+        for out in batch(Sma::new(2).unwrap(), huge)
+            .into_iter()
+            .chain(batch(Ema::new(2).unwrap(), huge))
+            .chain(batch(Wma::new(2).unwrap(), huge))
+            .flatten()
+        {
+            assert!(out.is_finite());
+        }
     }
 
     #[test]
