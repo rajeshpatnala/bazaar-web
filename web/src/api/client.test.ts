@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw/http";
 import { server } from "../mocks/server";
 import { problemFixture } from "../mocks/handlers";
@@ -35,6 +35,7 @@ describe("api client", () => {
 });
 
 describe("CSRF header", () => {
+  afterEach(() => setCsrfToken(null));
   const verbs = ["POST", "PUT", "PATCH", "DELETE"] as const;
   const call = (m: string) => {
     const f = (api as unknown as Record<string, ((p: string) => Promise<unknown>) | undefined>)[m];
