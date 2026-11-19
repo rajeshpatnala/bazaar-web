@@ -74,55 +74,49 @@ impl GateConfig {
         let (lim, beh) = (&r.limits, &r.behaviour);
         let (exp, ovr, dat) = (&r.exposure, &r.override_, &r.data);
         EffectiveLimits {
-            max_risk_per_trade_pct: lower_dec(
+            max_risk_per_trade_pct: lower(
                 lim.max_risk_per_trade_pct,
                 baseline.max_risk_per_trade_pct,
             ),
-            max_daily_loss_pct: lower_dec(lim.max_daily_loss_pct, baseline.max_daily_loss_pct),
-            max_total_open_risk_pct: lower_dec(
+            max_daily_loss_pct: lower(lim.max_daily_loss_pct, baseline.max_daily_loss_pct),
+            max_total_open_risk_pct: lower(
                 lim.max_total_open_risk_pct,
                 baseline.max_total_open_risk_pct,
             ),
-            max_weekly_loss_pct: lower_dec(lim.max_weekly_loss_pct, baseline.max_weekly_loss_pct),
-            max_position_value_pct: lower_dec(
+            max_weekly_loss_pct: lower(lim.max_weekly_loss_pct, baseline.max_weekly_loss_pct),
+            max_position_value_pct: lower(
                 lim.max_position_value_pct,
                 baseline.max_position_value_pct,
             ),
-            max_notional_per_order_inr: lower_dec(
+            max_notional_per_order_inr: lower(
                 lim.max_notional_per_order_inr,
                 baseline.max_notional_per_order_inr,
             ),
-            min_charges_slippage_buffer: higher_dec(
+            min_charges_slippage_buffer: higher(
                 lim.min_charges_slippage_buffer,
                 baseline.min_charges_slippage_buffer,
             ),
             cap_equity_at_starting_cash: lim.cap_equity_at_starting_cash
                 || baseline.cap_equity_at_starting_cash == Some(true),
-            max_open_positions: lower_u32(lim.max_open_positions, baseline.max_open_positions),
-            max_orders_per_minute: lower_u32(
-                lim.max_orders_per_minute,
-                baseline.max_orders_per_minute,
-            ),
-            max_orders_per_day: lower_u32(lim.max_orders_per_day, baseline.max_orders_per_day),
-            cooloff_after_losses: lower_u32(
-                beh.cooloff_after_losses,
-                baseline.cooloff_after_losses,
-            ),
-            max_new_entries_per_day: lower_u32(
+            max_open_positions: lower(lim.max_open_positions, baseline.max_open_positions),
+            max_orders_per_minute: lower(lim.max_orders_per_minute, baseline.max_orders_per_minute),
+            max_orders_per_day: lower(lim.max_orders_per_day, baseline.max_orders_per_day),
+            cooloff_after_losses: lower(beh.cooloff_after_losses, baseline.cooloff_after_losses),
+            max_new_entries_per_day: lower(
                 beh.max_new_entries_per_day,
                 baseline.max_new_entries_per_day,
             ),
-            entry_zone_tolerance_bps: lower_u32(
+            entry_zone_tolerance_bps: lower(
                 beh.entry_zone_tolerance_bps,
                 baseline.entry_zone_tolerance_bps,
             ),
-            reentry_lockout_minutes: higher_u32(
+            reentry_lockout_minutes: higher(
                 beh.reentry_lockout_minutes,
                 baseline.reentry_lockout_minutes,
             ),
-            max_sector_pct: lower_dec(exp.max_sector_pct, baseline.max_sector_pct),
-            override_max_per_day: lower_u32(ovr.max_per_day, baseline.override_max_per_day),
-            override_max_per_week: lower_u32(ovr.max_per_week, baseline.override_max_per_week),
+            max_sector_pct: lower(exp.max_sector_pct, baseline.max_sector_pct),
+            override_max_per_day: lower(ovr.max_per_day, baseline.override_max_per_day),
+            override_max_per_week: lower(ovr.max_per_week, baseline.override_max_per_week),
             max_quote_age_secs: dat.max_quote_age_secs,
             max_snapshot_age_secs: dat.max_snapshot_age_secs,
             override_size_factor: ovr.size_factor,
@@ -161,19 +155,11 @@ impl GateConfig {
     }
 }
 
-fn lower_dec(file: Decimal, base: Option<Decimal>) -> Decimal {
+pub(crate) fn lower<T: Ord + Copy>(file: T, base: Option<T>) -> T {
     base.map_or(file, |b| file.min(b))
 }
 
-fn higher_dec(file: Decimal, base: Option<Decimal>) -> Decimal {
-    base.map_or(file, |b| file.max(b))
-}
-
-fn lower_u32(file: u32, base: Option<u32>) -> u32 {
-    base.map_or(file, |b| file.min(b))
-}
-
-fn higher_u32(file: u32, base: Option<u32>) -> u32 {
+pub(crate) fn higher<T: Ord + Copy>(file: T, base: Option<T>) -> T {
     base.map_or(file, |b| file.max(b))
 }
 

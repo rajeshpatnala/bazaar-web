@@ -8,7 +8,6 @@
 use crate::config::{Baseline, GateConfig, RuleCtx};
 use chrono::DateTime;
 use chrono_tz::Tz;
-use rust_decimal::Decimal;
 use std::fmt;
 
 /// The baseline could not be read.
@@ -43,10 +42,12 @@ pub fn rule_ctx(
     Ok(config.rule_ctx(&baseline, now))
 }
 
-/// Test double: returns a fixed baseline or a fixed error.
+/// Test double: returns a fixed baseline or a fixed error. Test builds only.
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct FakeBaseline(Result<Baseline, BaselineError>);
 
+#[cfg(test)]
 impl FakeBaseline {
     /// A store that reads `baseline`.
     #[must_use]
@@ -61,6 +62,7 @@ impl FakeBaseline {
     }
 }
 
+#[cfg(test)]
 impl LimitsBaseline for FakeBaseline {
     fn read(&self) -> Result<Baseline, BaselineError> {
         self.0.clone()
@@ -120,23 +122,14 @@ impl LimitsBaseline for MemoryBaseline {
     }
 }
 
-trait Ord2: Copy + PartialOrd {}
-impl Ord2 for Decimal {}
-impl Ord2 for u32 {}
-
-fn pick<T: Ord2>(a: Option<T>, b: Option<T>, keep_lower: bool) -> Option<T> {
-    match (a, b) {
-        (Some(x), Some(y)) => Some(if (x <= y) == keep_lower { x } else { y }),
-        (x, y) => x.or(y),
-    }
+/// Keep the lower of two optional values (`None` = no value).
+fn lower<T: Ord + Copy>(a: Option<T>, b: Option<T>) -> Option<T> {
+    a.map_or(b, |x| Some(crate::config::lower(x, b)))
 }
 
-fn lower<T: Ord2>(a: Option<T>, b: Option<T>) -> Option<T> {
-    pick(a, b, true)
-}
-
-fn higher<T: Ord2>(a: Option<T>, b: Option<T>) -> Option<T> {
-    pick(a, b, false)
+/// Keep the higher of two optional values (`None` = no value).
+fn higher<T: Ord + Copy>(a: Option<T>, b: Option<T>) -> Option<T> {
+    a.map_or(b, |x| Some(crate::config::higher(x, b)))
 }
 
 #[cfg(test)]
@@ -144,6 +137,7 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use chrono_tz::Asia::Kolkata;
+    use rust_decimal::Decimal;
 
     const TEXT: &str = include_str!("../../../fixtures/config/risk.toml");
 
@@ -197,6 +191,55 @@ mod tests {
         let got = m.read().unwrap();
         assert_eq!(got.max_new_entries_per_day, Some(1));
         assert_eq!(got.reentry_lockout_minutes, Some(120));
+    }
+
+    /// Every baseline key: a looser candidate never loosens, a stricter one wins, and a missing
+    /// stored value takes the candidate. `lo`/`hi` are two distinct values of the key's type.
+    macro_rules! tighten_table {
+        ($field:ident, $lo:expr, $hi:expr, $stricter:expr) => {{
+            let (lo, hi) = ($lo, $hi);
+            let (strict, loose) = if $stricter == lo { (lo, hi) } else { (hi, lo) };
+            let with = |v| {
+                let mut b = Baseline::none();
+                b.$field = Some(v);
+                b
+            };
+            let mut m = MemoryBaseline::new();
+            m.tighten(&with(loose));
+            assert_eq!(m.read().unwrap().$field, Some(loose), stringify!($field));
+            m.tighten(&with(strict));
+            assert_eq!(m.read().unwrap().$field, Some(strict), stringify!($field));
+            m.tighten(&with(loose));
+            assert_eq!(m.read().unwrap().$field, Some(strict), stringify!($field));
+            m.tighten(&Baseline::none());
+            assert_eq!(m.read().unwrap().$field, Some(strict), stringify!($field));
+        }};
+    }
+
+    #[test]
+    fn every_baseline_key_tightens_in_its_own_direction() {
+        let (d1, d2) = (Decimal::from(1), Decimal::from(2));
+        // Max-type keys keep the lower value.
+        tighten_table!(max_risk_per_trade_pct, d1, d2, d1);
+        tighten_table!(max_daily_loss_pct, d1, d2, d1);
+        tighten_table!(max_total_open_risk_pct, d1, d2, d1);
+        tighten_table!(max_weekly_loss_pct, d1, d2, d1);
+        tighten_table!(max_position_value_pct, d1, d2, d1);
+        tighten_table!(max_notional_per_order_inr, d1, d2, d1);
+        tighten_table!(max_sector_pct, d1, d2, d1);
+        tighten_table!(max_open_positions, 1u32, 2u32, 1u32);
+        tighten_table!(max_orders_per_minute, 1u32, 2u32, 1u32);
+        tighten_table!(max_orders_per_day, 1u32, 2u32, 1u32);
+        tighten_table!(cooloff_after_losses, 1u32, 2u32, 1u32);
+        tighten_table!(max_new_entries_per_day, 1u32, 2u32, 1u32);
+        tighten_table!(entry_zone_tolerance_bps, 1u32, 2u32, 1u32);
+        tighten_table!(override_max_per_day, 1u32, 2u32, 1u32);
+        tighten_table!(override_max_per_week, 1u32, 2u32, 1u32);
+        // Floor-type keys keep the higher value.
+        tighten_table!(min_charges_slippage_buffer, d1, d2, d2);
+        tighten_table!(reentry_lockout_minutes, 1u32, 2u32, 2u32);
+        // The cap flag: true (capped) is stricter than false.
+        tighten_table!(cap_equity_at_starting_cash, false, true, true);
     }
 
     #[test]

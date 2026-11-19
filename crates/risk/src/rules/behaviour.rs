@@ -3,7 +3,7 @@
 //! all state comes from the snapshot. Unknown state rejects entries; exits and stop moves toward
 //! safety are never blocked by the entry-only rules.
 
-use crate::classify::{Action, Classification, StopDirection};
+use crate::classify::{Action, Classification, StopDirection, stop_direction};
 use crate::config::RuleCtx;
 use crate::money_fmt::rupees;
 use crate::snapshot::PortfolioSnapshot;
@@ -35,7 +35,7 @@ fn unknown(rule: RuleId, what: &str) -> RuleResult {
         "unknown",
         "known value needed",
         &format!(
-            "New entries are blocked because {what} cannot be confirmed; it must be readable from the journal"
+            "New entries are blocked because {what} cannot be confirmed from the stored state or the quote"
         ),
     )
 }
@@ -66,41 +66,52 @@ pub fn g08_cooloff(ctx: &RuleCtx, class: &Classification, snap: &PortfolioSnapsh
     }
 }
 
-/// G09: a stop may only move toward profit. Unknown stored stop or unknown positions reject.
+/// G09: a stop may only move toward profit. Whenever the order carries a `new_stop` (a pure stop
+/// move, a partial exit or an add) the direction is computed here against the held position's
+/// stored stop, so no order shape can widen a stop unseen. Unknown stored stop or unknown or
+/// ambiguous positions reject.
 #[must_use]
-pub fn g09_stop_widening(
-    intent: &OrderIntent,
-    class: &Classification,
-    snap: &PortfolioSnapshot,
-) -> RuleResult {
+pub fn g09_stop_widening(intent: &OrderIntent, snap: &PortfolioSnapshot) -> RuleResult {
     let rule = RuleId::G09;
-    if intent.new_stop.is_some() && snap.positions.is_unknown() {
-        return unknown(rule, "your open positions");
-    }
-    if class.action != Action::StopMove {
-        return RuleResult::pass(rule, "no stop change", "stop only moves toward profit");
-    }
-    match class.stop_direction {
-        Some(StopDirection::Tighten) => RuleResult::pass(
+    let kept = "stop only moves toward profit";
+    let Some(new_stop) = intent.new_stop else {
+        return RuleResult::pass(rule, "no stop change", kept);
+    };
+    let blocked = |what: &str| {
+        RuleResult::fail(
             rule,
-            "stop moved toward profit",
-            "stop only moves toward profit",
-        ),
-        Some(StopDirection::Unchanged) => {
-            RuleResult::pass(rule, "stop unchanged", "stop only moves toward profit")
-        }
-        Some(StopDirection::Widen) => RuleResult::fail(
+            "unknown",
+            "stored stop needed",
+            &format!("The stop change is blocked because {what} cannot be confirmed"),
+        )
+    };
+    let Tri::Known(rows) = &snap.positions else {
+        return blocked("your open positions");
+    };
+    let held: Vec<_> = rows
+        .iter()
+        .filter(|p| p.symbol == intent.symbol && p.qty > 0)
+        .collect();
+    if held.len() > 1 {
+        return blocked("which position the stop belongs to");
+    }
+    let Some(pos) = held.first() else {
+        // No position: nothing stored to widen.
+        return RuleResult::pass(rule, "no position to widen", kept);
+    };
+    let Tri::Known(old) = pos.stop else {
+        return blocked("the stop stored for this position");
+    };
+    match stop_direction(pos.side, old, new_stop) {
+        StopDirection::Tighten => RuleResult::pass(rule, "stop moved toward profit", kept),
+        StopDirection::Unchanged => RuleResult::pass(rule, "stop unchanged", kept),
+        StopDirection::Widen => RuleResult::fail(
             rule,
             "stop moved away from price",
             "toward profit only",
             "The stop can only move toward profit; moving it away raises the amount at risk",
         ),
-        Some(StopDirection::Unknown) | None => RuleResult::fail(
-            rule,
-            "unknown",
-            "stored stop needed",
-            "The stop change is blocked because the stop stored for this position cannot be confirmed",
-        ),
+        StopDirection::Unknown => blocked("the stop direction"),
     }
 }
 
@@ -399,12 +410,12 @@ mod tests {
         let up = intent(Side::Buy, 0, "500", Some("495"));
         let down = intent(Side::Buy, 0, "500", Some("485"));
         let same = intent(Side::Buy, 0, "500", Some("490"));
-        assert!(g09_stop_widening(&up, &cls(&up, &s), &s).passed());
-        assert!(g09_stop_widening(&same, &cls(&same, &s), &s).passed());
-        let res = g09_stop_widening(&down, &cls(&down, &s), &s);
+        assert!(g09_stop_widening(&up, &s).passed());
+        assert!(g09_stop_widening(&same, &s).passed());
+        let res = g09_stop_widening(&down, &s);
         assert!(!res.passed() && res.message().ends_with("(G09)"));
         let s2 = p(Tri::Unknown);
-        assert!(!g09_stop_widening(&up, &cls(&up, &s2), &s2).passed());
+        assert!(!g09_stop_widening(&up, &s2).passed());
     }
 
     #[test]
@@ -417,24 +428,52 @@ mod tests {
         )]);
         let widen = intent(Side::Buy, 0, "500", Some("520"));
         let tighten = intent(Side::Buy, 0, "500", Some("505"));
-        assert!(!g09_stop_widening(&widen, &cls(&widen, &s), &s).passed());
-        assert!(g09_stop_widening(&tighten, &cls(&tighten, &s), &s).passed());
-        // Unknown positions with a stop change reject even with a hand-made classification.
-        let fake = Classification {
-            action: Action::Entry,
-            entry_qty: 0,
-            exit_qty: 0,
-            stop_direction: None,
-        };
-        let res = g09_stop_widening(&tighten, &fake, &PortfolioSnapshot::unknown());
+        assert!(!g09_stop_widening(&widen, &s).passed());
+        assert!(g09_stop_widening(&tighten, &s).passed());
+        // Unknown positions with a stop change reject.
+        let res = g09_stop_widening(&tighten, &PortfolioSnapshot::unknown());
         assert!(!res.passed());
+    }
+
+    #[test]
+    fn g09_sees_new_stop_on_orders_with_quantity() {
+        let s = snap_with(vec![pos(Side::Buy, 10, Tri::Known(d("490")), Tri::Unknown)]);
+        // Partial exit that widens the stop: blocked. Tightening: allowed.
+        let exit_wide = intent(Side::Sell, 5, "500", Some("485"));
+        let res = g09_stop_widening(&exit_wide, &s);
+        assert!(!res.passed() && res.message().ends_with("(G09)"));
+        let exit_tight = intent(Side::Sell, 5, "500", Some("495"));
+        assert!(g09_stop_widening(&exit_tight, &s).passed());
+        // Add that widens the stop: blocked.
+        let add_wide = intent(Side::Buy, 5, "500", Some("480"));
+        assert!(!g09_stop_widening(&add_wide, &s).passed());
+        // Short side: higher stop is wider.
+        let short = snap_with(vec![pos(
+            Side::Sell,
+            10,
+            Tri::Known(d("510")),
+            Tri::Unknown,
+        )]);
+        let cover_wide = intent(Side::Buy, 5, "500", Some("520"));
+        assert!(!g09_stop_widening(&cover_wide, &short).passed());
+        let cover_tight = intent(Side::Buy, 5, "500", Some("505"));
+        assert!(g09_stop_widening(&cover_tight, &short).passed());
+        // Unknown stored stop fails closed even with a quantity.
+        let unk = snap_with(vec![pos(Side::Buy, 10, Tri::Unknown, Tri::Unknown)]);
+        assert!(!g09_stop_widening(&exit_tight, &unk).passed());
+        // Two rows for the symbol: ambiguous, reject.
+        let two = snap_with(vec![
+            pos(Side::Buy, 10, Tri::Known(d("490")), Tri::Unknown),
+            pos(Side::Sell, 5, Tri::Known(d("510")), Tri::Unknown),
+        ]);
+        assert!(!g09_stop_widening(&exit_tight, &two).passed());
     }
 
     #[test]
     fn g09_ignores_orders_without_a_stop_change() {
         let i = intent(Side::Buy, 10, "500", None);
         let s = snap_with(vec![]);
-        assert!(g09_stop_widening(&i, &cls(&i, &s), &s).passed());
+        assert!(g09_stop_widening(&i, &s).passed());
     }
 
     fn zone() -> Tri<EntryZone> {
