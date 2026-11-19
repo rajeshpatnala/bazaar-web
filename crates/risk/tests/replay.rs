@@ -129,6 +129,17 @@ fn eval(i: &OrderIntent, s: &PortfolioSnapshot, at: DateTime<Tz>) -> Evaluation 
     let cfg = GateConfig::from_toml_str(SHIPPED).unwrap();
     let inst = instrument(i.lot_size);
     let quote = at;
+    // The margin need is worked out for the opening part of the order (X03 checks the quantity).
+    let held: u32 = s
+        .positions
+        .known()
+        .map(|v| v.iter().filter(|p| p.symbol == i.symbol).map(|p| p.qty).sum())
+        .unwrap_or(0);
+    let entry_qty = if i.side == Side::Sell {
+        i.qty.0.saturating_sub(held)
+    } else {
+        i.qty.0
+    };
     let data = DataInputs {
         inputs_as_of: Tri::Known(quote),
         evidence: EvidenceInputs {
@@ -147,7 +158,7 @@ fn eval(i: &OrderIntent, s: &PortfolioSnapshot, at: DateTime<Tz>) -> Evaluation 
         quote_at: Tri::Known(quote),
         session_open: Tri::Known(true),
         margin: MarginInputs {
-            qty: i.qty.0,
+            qty: entry_qty,
             required: Tri::Known(d("5000")),
             available: Tri::Known(d("100000")),
         },
@@ -222,6 +233,18 @@ fn two_losses_pause_entries_until_the_session_ends_but_exits_pass() {
             "an exit is never paused: {exit:?}"
         );
     }
+    // To the session end: still paused later the same session, released next session once the
+    // snapshot's loss counter is reset for the new day.
+    s.consecutive_losses = Tri::Known(2);
+    let later = thursday() + Duration::hours(4);
+    let mut same = s.clone();
+    same.as_of = Tri::Known(later);
+    assert!(failed(&eval(&intent(Side::Buy, 5, 1), &same, later)).contains(&RuleId::G08));
+    let next = Kolkata.with_ymd_and_hms(2026, 11, 20, 10, 0, 0).unwrap();
+    let mut fresh = snap(next, (2026, 11, 16));
+    fresh.positions = s.positions.clone();
+    fresh.marks = s.marks.clone();
+    assert!(!failed(&eval(&intent(Side::Buy, 5, 1), &fresh, next)).contains(&RuleId::G08));
     // Unknown run of losses fails closed.
     s.consecutive_losses = Tri::Unknown;
     assert!(failed(&eval(&intent(Side::Buy, 5, 1), &s, thursday())).contains(&RuleId::G08));
@@ -230,7 +253,8 @@ fn two_losses_pause_entries_until_the_session_ends_but_exits_pass() {
 #[test]
 fn a_gap_down_through_the_stop_stops_new_entries_but_never_the_exit() {
     // 100 shares, stop Rs 90 (planned loss Rs 1,000). The open gaps to Rs 50: Rs 5,000 lost, not
-    // the Rs 1,000 the stop promised. The day figure is the real one (3% of equity = Rs 3,000).
+    // the Rs 1,000 the stop promised. The day figure is the real one; equity is the lower of start + realised and the mark-to-market
+    // value, capped at starting cash (Rs 95,000 here), so the day cap is 3% of that = Rs 2,850.
     let mut s = snap(thursday(), (2026, 11, 16));
     s.positions = Tri::Known(vec![held_long(100)]);
     s.marks = Tri::Known(vec![Mark {
@@ -258,10 +282,14 @@ fn a_gap_down_through_the_stop_stops_new_entries_but_never_the_exit() {
 
 #[test]
 fn the_day_cap_boundary_is_replayed_against_the_shipped_three_percent() {
-    // Equity stays Rs 1,00,000 so the cap is Rs 3,000; a loss at or past it blocks entries.
+    // A journal-shaped snapshot: the loss is realised, so equity (the lower of start + realised
+    // and mark-to-market, capped at starting cash) is Rs 1,00,000 less the loss. The cap is 3% of
+    // that, so it bites at 103 x loss >= 3,00,000: Rs 2,912 passes, Rs 2,913 blocks.
     let mut s = snap(thursday(), (2026, 11, 16));
-    for (loss, blocked) in [("-2999", false), ("-3000", true), ("-3001", true)] {
-        s.day_pnl = Tri::Known(d(loss));
+    for (loss, blocked) in [("2912", false), ("2913", true), ("3000", true)] {
+        s.day_pnl = Tri::Known(-d(loss));
+        s.realised_pnl = Tri::Known(-d(loss));
+        s.equity_mtm = Tri::Known(d("100000") - d(loss));
         let f = failed(&eval(&intent(Side::Buy, 1, 1), &s, thursday()));
         assert_eq!(f.contains(&RuleId::G03), blocked, "{loss}: {f:?}");
     }
@@ -344,6 +372,10 @@ fn a_sell_that_closes_and_reverses_is_an_entry_and_hits_the_lockout() {
     let mut s = snap(thursday(), (2026, 11, 16));
     s.positions = Tri::Known(vec![held_long(10)]);
     s.consecutive_losses = Tri::Known(2);
+    s.marks = Tri::Known(vec![Mark {
+        symbol: "ABC".into(),
+        price: d("100"),
+    }]);
     s.last_losing_exits = Tri::Known(vec![LosingExit {
         symbol: "ABC".into(),
         at: thursday() - Duration::minutes(10),
@@ -351,11 +383,11 @@ fn a_sell_that_closes_and_reverses_is_an_entry_and_hits_the_lockout() {
     let disguised = failed(&eval(&intent(Side::Sell, 30, 1), &s, thursday()));
     assert!(disguised.contains(&RuleId::G17), "{disguised:?}");
     assert!(disguised.contains(&RuleId::G08), "{disguised:?}");
-    // Only the lockout, the pause and the rules that treat the 20 share short as a new entry
-    // (X03, G05; the fixture has no ban list or return series for a short) fail. G02 and G09 do not.
+    // Exactly the lockout and the pause fail. (The fixture works the margin need out for the 20
+    // share entry part, as X03 requires, and marks the held ABC, as G05 requires.)
     let mut got = disguised.clone();
     got.sort();
-    let mut want = vec![RuleId::G05, RuleId::G08, RuleId::G17, RuleId::X03];
+    let mut want = vec![RuleId::G08, RuleId::G17];
     want.sort();
     assert_eq!(got, want, "{disguised:?}");
     // The honest exit of exactly the 10 held is never blocked by either rule.
