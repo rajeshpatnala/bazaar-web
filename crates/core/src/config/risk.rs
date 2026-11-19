@@ -4,7 +4,7 @@
 //! The mode is read from the file only: no env var, CLI flag or HTTP route sets it.
 //! A missing key is a load error: nothing here has a serde default.
 
-use chrono::{NaiveDate, NaiveTime};
+use chrono::{NaiveDate, NaiveTime, Timelike};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
@@ -278,6 +278,8 @@ const OVERRIDES_PER_WEEK: (u32, u32) = (1, 50);
 const CONFIRM_DELAY_SECS: (u32, u32) = (1, 300);
 const MIN_OOS_TRADES: (u32, u32) = (1, 100_000);
 const ORDERS_PER_DAY: (u32, u32) = (1, 1000);
+/// Cutoff for new expiry-day entries, seconds after midnight IST: within the 09:15..15:30 session.
+const EXPIRY_CUTOFF_SECS: (u32, u32) = (9 * 3600 + 15 * 60, 15 * 3600 + 30 * 60);
 
 /// A percentage must be above 0 and at most 100.
 fn check_pct(key: &str, v: Decimal) -> Result<(), ConfigError> {
@@ -637,6 +639,18 @@ impl RiskConfig {
         ] {
             check_range(key, v, r)?;
         }
+        for (key, t) in [
+            (
+                "hard_limits.latest_expiry_day_no_new_after_ist",
+                h.latest_expiry_day_no_new_after_ist,
+            ),
+            (
+                "events.expiry_day_no_new_after_ist",
+                ev.expiry_day_no_new_after_ist,
+            ),
+        ] {
+            check_range(key, t.num_seconds_from_midnight(), EXPIRY_CUTOFF_SECS)?;
+        }
         check_ceiling_u32(
             "events.ban_list_max_age_hours",
             ev.ban_list_max_age_hours,
@@ -813,7 +827,7 @@ mod tests {
         max_notional_per_order_inr = \"25000\"\nmax_override_per_day = 1\nmax_override_per_week = 3\n\
         max_ban_list_age_hours = 24\nmax_quote_age_secs = 5\nmax_snapshot_age_secs = 10\n\
         latest_expiry_day_no_new_after_ist = \"13:30\"\nmin_confirm_delay_secs = 10\n\
-        max_size_factor = \"0.5\"\nmin_oos_trades = 20\n\
+        max_size_factor = \"0.5\"\nmin_oos_trades = 30\n\
         [exposure]\nmax_sector_pct = \"30\"\nmax_correlated_positions = 2\n\
         correlation_threshold = \"0.7\"\ncorrelation_window_days = 60\n\
         [behaviour]\ncooloff_after_losses = 2\ncooloff_until = \"end_of_session\"\n\
@@ -935,10 +949,14 @@ mod tests {
 
     /// `OK` with `key` in `section` set to `val` (`None` removes the line).
     fn edit(section: &str, key: &str, val: Option<&str>) -> String {
+        edit_in(OK, section, key, val)
+    }
+
+    fn edit_in(base: &str, section: &str, key: &str, val: Option<&str>) -> String {
         let mut cur = String::new();
         let mut out = Vec::new();
         let mut hit = false;
-        for line in OK.lines() {
+        for line in base.lines() {
             if line.starts_with('[') {
                 cur = line.trim_matches(|c| c == '[' || c == ']').to_string();
             }
@@ -1381,7 +1399,7 @@ mod tests {
             ("events", "ban_list_max_age_hours", "25"),
             ("data", "max_quote_age_secs", "6"),
             ("data", "max_snapshot_age_secs", "11"),
-            ("gate.evidence", "min_oos_trades", "19"),
+            ("gate.evidence", "min_oos_trades", "29"),
             ("override", "confirm_delay_secs", "9"),
             ("override", "size_factor", "\"0.51\""),
             ("hard_limits", "max_ban_list_age_hours", "0"),
@@ -1425,6 +1443,48 @@ mod tests {
     }
 
     #[test]
+    fn slice1b_extremes_pass_when_ceiling_and_limit_both_sit_there() {
+        let mut t = OK.to_string();
+        for (sec, key, v) in [
+            ("hard_limits", "max_size_factor", "\"1\""),
+            ("override", "size_factor", "\"1\""),
+            ("hard_limits", "max_quote_age_secs", "60"),
+            ("data", "max_quote_age_secs", "60"),
+            ("hard_limits", "max_snapshot_age_secs", "300"),
+            ("data", "max_snapshot_age_secs", "300"),
+            ("hard_limits", "min_oos_trades", "1"),
+            ("gate.evidence", "min_oos_trades", "1"),
+            ("hard_limits", "min_confirm_delay_secs", "300"),
+            ("override", "confirm_delay_secs", "300"),
+            ("hard_limits", "max_ban_list_age_hours", "48"),
+            ("events", "ban_list_max_age_hours", "48"),
+        ] {
+            t = edit_in(&t, sec, key, Some(v));
+        }
+        assert!(parse_str::<RiskConfig>(&t).is_ok());
+    }
+
+    #[test]
+    fn slice1b_expiry_cutoff_must_stay_in_session() {
+        for bad in ["\"09:14\"", "\"15:31\"", "\"23:59\"", "\"00:00\""] {
+            let t = edit(
+                "hard_limits",
+                "latest_expiry_day_no_new_after_ist",
+                Some(bad),
+            );
+            assert!(parse_str::<RiskConfig>(&t).is_err(), "hard {bad}");
+            let t = edit("events", "expiry_day_no_new_after_ist", Some(bad));
+            assert!(parse_str::<RiskConfig>(&t).is_err(), "limit {bad}");
+        }
+        let t = edit(
+            "hard_limits",
+            "latest_expiry_day_no_new_after_ist",
+            Some("\"15:30\""),
+        );
+        assert!(parse_str::<RiskConfig>(&t).is_ok());
+    }
+
+    #[test]
     fn slice1b_expiry_cutoff_ceiling() {
         let ok = edit("events", "expiry_day_no_new_after_ist", Some("\"13:30\""));
         assert!(parse_str::<RiskConfig>(&ok).is_ok());
@@ -1465,7 +1525,7 @@ mod tests {
             ("override", "confirm_delay_secs", "10"),
             ("data", "max_quote_age_secs", "5"),
             ("data", "max_snapshot_age_secs", "10"),
-            ("gate.evidence", "min_oos_trades", "20"),
+            ("gate.evidence", "min_oos_trades", "30"),
             ("hard_limits", "max_quote_age_secs", "60"),
             ("hard_limits", "min_confirm_delay_secs", "1"),
             ("hard_limits", "max_size_factor", "\"1\""),

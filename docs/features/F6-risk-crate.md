@@ -40,7 +40,10 @@ Deferred: first-15-minute rule; broker order-rate figure and the new hard ceilin
 | `override.max_per_day` / `max_per_week` | 1 / 3 | same ranges, <= ceiling, week >= day |
 | `override.size_factor` | 0.5 | 0 < x <= 1 |
 | `override.confirm_delay_secs` | 10 | 1..=300 |
-| `gate.evidence.min_oos_trades` (G01) | 30 | 1..=100000 |
+| `gate.evidence.min_oos_trades` (G01) | 30 | 1..=100000, >= `hard_limits.min_oos_trades` |
+| `hard_limits.max_ban_list_age_hours` / `max_quote_age_secs` / `max_snapshot_age_secs` | 24 / 5 / 10 | 1..=48 / 1..=60 / 1..=300; limit <= ceiling |
+| `hard_limits.latest_expiry_day_no_new_after_ist` | 13:30 | 09:15..=15:30 (also bounds `events.expiry_day_no_new_after_ist`); limit <= ceiling |
+| `hard_limits.min_confirm_delay_secs` / `max_size_factor` / `min_oos_trades` | 10 / 0.5 / 30 | 1..=300 / (0,1] / 1..=100000; limit >= floor, <= ceiling |
 | `gate.evidence.min_profit_factor`, `min_expectancy_r` | 1.3, 0.1 | >= 1, > 0; `require_walk_forward_pass = false` refused |
 | `events.block_ban_list`, `block_results_days`, `block_policy_days` | true | `false` refused |
 | `events.ban_list_max_age_hours` | 24 | 1..=48 |
@@ -52,7 +55,7 @@ Deferred: first-15-minute rule; broker order-rate figure and the new hard ceilin
 | `limits.min_charges_slippage_buffer` | 60 (rupees) | > 0; placeholder, derive from charges.toml with the F9 cost model |
 | `limits.cap_equity_at_starting_cash` | true | `false` refused (owner Q2) |
 
-Slice 1b `[hard_limits]` (unverified, owner to confirm): `max_ban_list_age_hours` 24, `max_quote_age_secs` 5, `max_snapshot_age_secs` 10, `latest_expiry_day_no_new_after_ist` 13:30, `min_confirm_delay_secs` 10, `max_size_factor` 0.5, `min_oos_trades` floor 20 (chosen by dev, below the 30 default). Deferred: symlink and canonical-path check for `events_file` belongs to the events loader (F3/F10).
+Slice 1b `[hard_limits]` (unverified, owner to confirm): `max_ban_list_age_hours` 24, `max_quote_age_secs` 5, `max_snapshot_age_secs` 10, `latest_expiry_day_no_new_after_ist` 13:30, `min_confirm_delay_secs` 10, `max_size_factor` 0.5, `min_oos_trades` floor 30 (equals the G01 default). Deferred: symlink and canonical-path check for `events_file` belongs to the events loader (F3/F10).
 
 Ceilings for G05 and G04a sit at their defaults; changing any `[hard_limits]` value needs an ADR and the owner.
 Test fixture `fixtures/config/risk.toml` gained the same sections with synthetic values.

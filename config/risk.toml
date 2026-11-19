@@ -56,7 +56,7 @@ max_snapshot_age_secs = 10
 latest_expiry_day_no_new_after_ist = "13:30"   # G07
 min_confirm_delay_secs = 10             # override cooling delay may not go below this
 max_size_factor = "0.5"                 # an overridden trade may not be sized above this
-min_oos_trades = 20                     # G01 floor (conservative, below the 30 default); owner to confirm
+min_oos_trades = 30                     # G01 floor, equals the default; no loosening without the owner
 
 [execution]
 paper_starting_cash_inr = "100000"
