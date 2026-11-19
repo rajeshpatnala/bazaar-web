@@ -11,8 +11,9 @@ Source: https://zerodha.com/charges/#tab-equities (owner copied the page text; v
 | SEBI charges | Rs 10 / crore | Rs 10 / crore | Rs 10 / crore | Rs 10 / crore |
 | Stamp charges (buy side) | 0.015% or Rs 1500 / crore | 0.003% or Rs 300 / crore | 0.002% or Rs 200 / crore | 0.003% or Rs 300 / crore |
 
-Not in the owner's paste (seen only in an agent web fetch, UNVERIFIED): DP charge Rs 15.34 per scrip on sale (3.5 CDSL + 9.5 Zerodha + 2.34 GST); delivery min Rs 0.01 per contract note; physically settled F&O rates.
-# Zerodha "Charges explained" (pasted by owner 2026-11-20; source https://zerodha.com/charges/#tab-equities)
+DP charge Rs 15.34 per scrip on sale (3.5 CDSL + 9.5 Zerodha + 2.34 GST): supplied by the owner 2026-11-20 (CR-66-1). Still unmodelled: delivery min Rs 0.01 per contract note; physically settled F&O rates.
+
+Zerodha "Charges explained" (pasted by owner 2026-11-20; source https://zerodha.com/charges/#tab-equities)
 
 Relevant to config (verbatim facts):
 - STT/CTT: equity delivery both buy and sell; intraday and F&O sell side only.
