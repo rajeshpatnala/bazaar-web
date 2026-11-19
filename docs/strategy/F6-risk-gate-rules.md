@@ -50,7 +50,7 @@ do not bump the file-level `verified_on` (2026-11-18) until the owner confirms. 
 | G10 | `behaviour.entry_zone_tolerance_bps` | 0 | No | yes |
 | G13 | `options.allow_naked_short` | false | No | yes |
 | G14 | `limits.max_position_value_pct` | 25 | Soft | yes |
-| G16 | `hard_limits.max_orders_per_minute`, `limits.max_orders_per_day`, `max_notional_per_order_inr` | set from broker/SEBI limits (cite source); 12/day; Rs 25,000 | Hard | yes |
+| G16 | `hard_limits.max_orders_per_minute`, `limits.max_orders_per_day`, `max_notional_per_order_inr` | set from broker/SEBI limits (cite source); 4/min (owner-chosen 2026-11-20, unverified); 12/day; Rs 25,000 | Hard | yes |
 | Override | `override.max_per_day`, `max_per_week`, `size_factor`, `confirm_delay_secs` | 1, 3, 0.5, 10 | n/a | yes |
 
 G01 keys (30 trades, PF 1.3, 0.1 R, walk-forward pass) stay as in the table; F6 only reads them. Broker order-rate numbers must be
