@@ -183,7 +183,6 @@ pub fn g11_averaging_down(
         .iter()
         .filter(|p| p.symbol == intent.symbol && p.qty > 0)
         .collect();
-    let same_side = open.iter().filter(|p| p.side == intent.side).count();
     if open.len() > 1 {
         return unknown(rule, "which position this order adds to");
     }
