@@ -11,6 +11,8 @@ pub struct Pivot {
     pub bar: usize,
     /// Pivot price (the bar's high or low).
     pub price: f64,
+    /// Close time of the pivot bar, Unix milliseconds.
+    pub ts_ms: i64,
 }
 
 /// Swing output for one bar.
@@ -36,6 +38,7 @@ pub struct Swing {
     n: usize,
     highs: VecDeque<f64>,
     lows: VecDeque<f64>,
+    times: VecDeque<i64>,
     count: usize,
     last_high: Option<Pivot>,
     last_low: Option<Pivot>,
@@ -52,6 +55,7 @@ impl Swing {
             n,
             highs: VecDeque::new(),
             lows: VecDeque::new(),
+            times: VecDeque::new(),
             count: 0,
             last_high: None,
             last_low: None,
@@ -72,9 +76,11 @@ impl Indicator for Swing {
         let w = 2 * self.n + 1;
         self.highs.push_back(x.h);
         self.lows.push_back(x.l);
+        self.times.push_back(x.ts_ms);
         if self.highs.len() > w {
             self.highs.pop_front();
             self.lows.pop_front();
+            self.times.pop_front();
         }
         self.count += 1;
         if self.highs.len() < w {
@@ -83,7 +89,7 @@ impl Indicator for Swing {
         // The candidate is the window's centre bar, n bars old.
         let centre = self.n;
         let idx = self.count - 1 - self.n;
-        let (ch, cl) = (self.highs[centre], self.lows[centre]);
+        let (ch, cl, ts_ms) = (self.highs[centre], self.lows[centre], self.times[centre]);
         let is_high = self
             .highs
             .iter()
@@ -97,10 +103,12 @@ impl Indicator for Swing {
         let new_high = is_high.then_some(Pivot {
             bar: idx,
             price: ch,
+            ts_ms,
         });
         let new_low = is_low.then_some(Pivot {
             bar: idx,
             price: cl,
+            ts_ms,
         });
         self.last_high = new_high.or(self.last_high);
         self.last_low = new_low.or(self.last_low);
@@ -114,6 +122,7 @@ impl Indicator for Swing {
     fn reset(&mut self) {
         self.highs.clear();
         self.lows.clear();
+        self.times.clear();
         self.count = 0;
         self.last_high = None;
         self.last_low = None;
@@ -146,7 +155,11 @@ mod tests {
     }
 
     fn pivot(bar: usize, price: f64) -> Pivot {
-        Pivot { bar, price }
+        Pivot {
+            bar,
+            price,
+            ts_ms: i64::try_from(bar).unwrap() * 60_000,
+        }
     }
 
     #[test]
@@ -158,26 +171,26 @@ mod tests {
 
     #[test]
     fn micro_case_confirmation_lag() {
-        // n=2. highs 5,6,9,7,6,8,10,7,6; lows 7,6,4,5,6,5,7,8,9.
-        // Bar 2 (high 9 > 5,6,7,6; low 4 < 7,6,5,6) is a pivot of both kinds, but only visible at
-        // bar 4. Bar 5 low 5 ties bar 3 low 5 -> not a pivot. Bar 6 high 10 > 6,8,7,6 -> pivot
+        // n=2. highs 5,6,9,7,6,8,10,7,6; lows 3,4,2,3,4,3,5,4,5 (every low <= high).
+        // Bar 2 (high 9 > 5,6,7,6; low 2 < 3,4,3,4) is a pivot of both kinds, but only visible at
+        // bar 4. Bar 5 low 3 ties bar 3 low 3 -> not a pivot. Bar 6 high 10 > 6,8,7,6 -> pivot
         // high, visible at bar 8. Bars 0-3 are warm-up.
         let out = batch(Swing::new(2).unwrap(), micro());
         assert!(out[..4].iter().all(Option::is_none));
         let a = out[4].unwrap();
         assert_eq!(a.new_high, Some(pivot(2, 9.0)));
-        assert_eq!(a.new_low, Some(pivot(2, 4.0)));
+        assert_eq!(a.new_low, Some(pivot(2, 2.0)));
         for o in &out[5..8] {
             let o = o.unwrap();
             assert_eq!((o.new_high, o.new_low), (None, None));
             assert_eq!(o.last_high, Some(pivot(2, 9.0)));
-            assert_eq!(o.last_low, Some(pivot(2, 4.0)));
+            assert_eq!(o.last_low, Some(pivot(2, 2.0)));
         }
         let b = out[8].unwrap();
         assert_eq!(b.new_high, Some(pivot(6, 10.0)));
         assert_eq!(b.new_low, None);
         assert_eq!(b.last_high, Some(pivot(6, 10.0)));
-        assert_eq!(b.last_low, Some(pivot(2, 4.0)));
+        assert_eq!(b.last_low, Some(pivot(2, 2.0)));
     }
 
     #[test]
@@ -218,10 +231,15 @@ mod tests {
 
     proptest! {
         #[test]
-        fn matches_naive(v in proptest::collection::vec((10.0f64..200.0, 0.0f64..5.0, 0.0f64..5.0), 0..40), n in 1usize..5) {
+        fn matches_naive(v in proptest::collection::vec((0u8..6, 0u8..3), 0..40), n in 1usize..4) {
+            // Small integer prices so that equal highs/lows (ties) occur often.
             let xs: Vec<Ohlcv> = v.iter().enumerate()
-                .map(|(i, &(c, u, d))| bar(i64::try_from(i).unwrap(), c + u, c - d, c, 1.0)).collect();
+                .map(|(i, &(lo, span))| {
+                    let (l, h) = (f64::from(lo), f64::from(lo + span));
+                    bar(i64::try_from(i).unwrap(), h, l, f64::midpoint(h, l), 1.0)
+                }).collect();
             let got = batch(Swing::new(n).unwrap(), xs.clone());
+            let (mut last_h, mut last_l): (Option<Pivot>, Option<Pivot>) = (None, None);
             for (t, g) in got.iter().enumerate() {
                 if t < 2 * n { prop_assert!(g.is_none()); continue; }
                 let g = g.unwrap();
@@ -229,8 +247,14 @@ mod tests {
                 let win = &xs[p - n..=t];
                 let hi = win.iter().enumerate().all(|(i, b)| i == n || xs[p].h > b.h);
                 let lo = win.iter().enumerate().all(|(i, b)| i == n || xs[p].l < b.l);
-                prop_assert_eq!(g.new_high.is_some(), hi);
-                prop_assert_eq!(g.new_low.is_some(), lo);
+                let want_h = hi.then(|| Pivot { bar: p, price: xs[p].h, ts_ms: xs[p].ts_ms });
+                let want_l = lo.then(|| Pivot { bar: p, price: xs[p].l, ts_ms: xs[p].ts_ms });
+                last_h = want_h.or(last_h);
+                last_l = want_l.or(last_l);
+                prop_assert_eq!(g.new_high, want_h);
+                prop_assert_eq!(g.new_low, want_l);
+                prop_assert_eq!(g.last_high, last_h);
+                prop_assert_eq!(g.last_low, last_l);
             }
         }
     }

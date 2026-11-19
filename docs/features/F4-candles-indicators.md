@@ -20,6 +20,8 @@ Owner area: `crates/indicators`, `core/src/candle.rs`, `crates/data/src/bars.rs`
 - Slice 4: `session.rs` (`SessionVwap`, `GapPct`, `classic_pivots`, `camarilla_pivots`; caller supplies an opaque session id from `MarketCalendar`, so no open time is hardcoded), `swing.rs` (`Swing`, strict fractal pivots reported only n bars later); micro fixtures `session_micro.csv`, `swing_micro.csv`; `lookahead_*` tests.
 
 ## Decisions
+- Session id convention: IST trading date of the bar's `close_time`, accepted by `MarketCalendar::is_trading_day` (tested in `session.rs`). Muhurat and other special sessions are out of scope for indicators in F4 (would need their own id).
+- Swing pivots use strict inequality (a flat top of equal highs is not a pivot), unlike the `bz-quant` text "maximum of i-k..i+k"; documented on `Swing`.
 - F3 is reserved for Kite; offline work starts at F4. One streaming implementation, batch is a fold. Expected values come from hand cases and independent naive implementations (no TA-Lib offline).
 - Candle volume is `u64` (not `Qty`/u32) so summed daily volume cannot overflow; `Candle::new` normalises `close_time` to IST; time vs interval sanity is the bar builder's job (slice 5). Every indicator slice must call `testkit::check_contract`.
 - `Candle` fields are private; `close_time` serialises as RFC 3339 and is read back in `Asia/Kolkata`.
@@ -44,6 +46,7 @@ Owner area: `crates/indicators`, `core/src/candle.rs`, `crates/data/src/bars.rs`
 - CR-42-4 (PR 42): merge `ParamError`/`TrendParamError` and shared helpers into `util.rs` after PRs 39, 41 and 42 land (also CR-41-1).
 - Product question for the owner: weekly/monthly bars (not Kite intervals; out of scope).
 
+- CR-43-3 (PR 43): fold `session.rs` `finite()` into the shared util.rs item below (duplicates `bands::finite_bar`).
 - Merge `TrendParamError` and the shared `ParamError` into one util error once PRs 39/41/42 land (CR-41-1).
 
 ## History
