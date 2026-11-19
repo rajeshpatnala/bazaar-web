@@ -69,11 +69,11 @@ Labels (plain English, templated, snapshot-tested):
 | Cell | Label |
 |---|---|
 | Up x Low / Normal / High | "Uptrend, calm swings" / "Uptrend, normal swings" / "Uptrend, wild swings" |
-| Range x Low / Normal / High | "Sideways, calm" / "Sideways, normal swings" / "Sideways, wild swings" |
+| Range x Low / Normal / High | "Sideways, calm swings" / "Sideways, normal swings" / "Sideways, wild swings" |
 | Down x any | "Downtrend" + swing word |
 | Mixed | "Unclear: signals disagree" |
 | Breakdown | "Market under stress: no new buys" |
-| Unknown | "Not enough data to judge the market" |
+| Unknown | "Not enough data to judge" |
 
 ## 6. Known weaknesses
 - Lagging: EMA/ADX confirm trends late, and `confirm_bars` adds more lag. Labels describe the past.
@@ -88,7 +88,8 @@ Labels (plain English, templated, snapshot-tested):
 - [ ] Hysteresis test: noise series flips at most N times per 100 bars; a single contrary close never flips a label.
 - [ ] Warm-up: fewer than `min_history_bars` bars gives `Unknown` + reason; zero NaN/inf; flat and zero-volume series handled.
 - [ ] Missing VIX/breadth gives `None` + reason, never a default value; `as_of` equals the last closed bar's close time; no wall-clock reads.
-- [ ] Callers (F8, F9) pass closed bars only, with a test.
+- [ ] Carried over to F8 and F9 (cannot close inside F7): callers pass closed bars only, with a test.
+- [ ] Carried over to F8: the soft-penalty weight for `Fit::Penalised` lives in `strategies.toml` (no magic number); strategies call `RegimeFit::check` at config load.
 - [ ] Deterministic; thresholds only from config; `RegimeFit` unit tests for each strategy cell table in F8.
 - [ ] Later (F9, not a tuning loop): on real data, report forward-return and drawdown by regime cell as a sanity picture.
 
