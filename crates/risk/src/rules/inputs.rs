@@ -15,7 +15,7 @@ use crate::types::Tri;
 use crate::verdict::{RuleId, RuleResult};
 use bazaar_core::mode::ExecutionMode;
 use chrono::DateTime;
-use chrono_tz::Tz;
+use chrono_tz::{Asia::Kolkata, Tz};
 use rust_decimal::Decimal;
 
 /// Cost-adjusted out-of-sample evidence for the strategy on this instrument and segment (F9).
@@ -48,7 +48,9 @@ pub struct EventFlags {
 /// Cash or margin for the order (F9/F10): what it needs and what is available.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MarginInputs {
-    /// Margin or cash this order needs, for the quantity the gate sized.
+    /// Quantity `required` was computed for; X03 rejects when it is not the entry quantity.
+    pub qty: u32,
+    /// Margin or cash this order needs, for `qty`.
     pub required: Tri<Decimal>,
     pub available: Tri<Decimal>,
 }
@@ -56,6 +58,9 @@ pub struct MarginInputs {
 /// Everything these rules read that is not in the snapshot. No `Default`: build every field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataInputs {
+    /// When the session, events, evidence and margin figures below were read; G15 checks it
+    /// against `max_snapshot_age_secs`, so a figure cached from recommendation time cannot pass.
+    pub inputs_as_of: Tri<DateTime<Tz>>,
     pub evidence: EvidenceInputs,
     pub ban_list: Tri<BanList>,
     /// `Known(Some(underlying))` for a stock F&O order; `Known(None)` for an index or non-F&O
@@ -173,7 +178,8 @@ pub fn g01(ctx: &RuleCtx, cls: &Classification, inputs: &DataInputs) -> RuleResu
 }
 
 /// G06: no new stock F&O position in a banned underlying; a list older than
-/// `ban_list_max_age_hours` (or dated in the future) is not trusted. Entries only.
+/// `ban_list_max_age_hours`, dated in the future, not fetched on today's IST date, or empty is
+/// not trusted. The rule is always enforced (no off switch). Entries only.
 #[must_use]
 pub fn g06(ctx: &RuleCtx, cls: &Classification, inputs: &DataInputs) -> RuleResult {
     let rule = RuleId::G06;
@@ -184,9 +190,6 @@ pub fn g06(ctx: &RuleCtx, cls: &Classification, inputs: &DataInputs) -> RuleResu
     );
     if cls.entry_qty == 0 {
         return no_exposure(rule);
-    }
-    if !lim.block_ban_list {
-        return RuleResult::pass(rule, "ban check off", limit);
     }
     let Tri::Known(scope) = &inputs.stock_fno_underlying else {
         return cannot(
@@ -210,19 +213,22 @@ pub fn g06(ctx: &RuleCtx, cls: &Classification, inputs: &DataInputs) -> RuleResu
         );
     };
     let max_age = i64::from(lim.ban_list_max_age_hours).saturating_mul(3600);
-    if !matches!(age_secs(ctx.now, list.fetched_at), Some(a) if a <= max_age) {
+    let today = ctx.now.with_timezone(&Kolkata).date_naive();
+    let fetched_today = list.fetched_at.with_timezone(&Kolkata).date_naive() == today;
+    let fresh = matches!(age_secs(ctx.now, list.fetched_at), Some(a) if a <= max_age);
+    if !fresh || !fetched_today || list.banned_underlyings.is_empty() {
         return cannot(
             rule,
             "old ban list",
             &limit,
-            "the F&O ban list, which is out of date",
+            "the F&O ban list, which is out of date, from another day or empty",
             "refresh the exchange ban list",
         );
     }
     if list
         .banned_underlyings
         .iter()
-        .any(|b| b.eq_ignore_ascii_case(under))
+        .any(|b| b.trim().eq_ignore_ascii_case(under.trim()))
     {
         return RuleResult::fail(
             rule,
@@ -237,8 +243,8 @@ pub fn g06(ctx: &RuleCtx, cls: &Classification, inputs: &DataInputs) -> RuleResu
 }
 
 /// G07: results day (and the session before), policy day, and new option orders on their own
-/// expiry day after `expiry_day_no_new_after_ist`. Entries only; a needed flag that is
-/// `Unknown` rejects.
+/// expiry day after `expiry_day_no_new_after_ist` (compared in IST). Always enforced, whatever
+/// the `block_*_days` flags say; an `Unknown` flag rejects. Entries only.
 #[must_use]
 pub fn g07(ctx: &RuleCtx, cls: &Classification, inputs: &DataInputs) -> RuleResult {
     let rule = RuleId::G07;
@@ -253,16 +259,8 @@ pub fn g07(ctx: &RuleCtx, cls: &Classification, inputs: &DataInputs) -> RuleResu
     }
     let ev = &inputs.events;
     let needed = [
-        (
-            lim.block_results_days,
-            ev.results_window,
-            "the results calendar",
-        ),
-        (
-            lim.block_policy_days,
-            ev.policy_day,
-            "the policy-day calendar",
-        ),
+        (true, ev.results_window, "the results calendar"),
+        (true, ev.policy_day, "the policy-day calendar"),
         (
             true,
             ev.option_on_own_expiry,
@@ -285,13 +283,13 @@ pub fn g07(ctx: &RuleCtx, cls: &Classification, inputs: &DataInputs) -> RuleResu
     }
     let hit = |on: bool, f: Tri<bool>| on && f == Tri::Known(true);
     let mut why = Vec::new();
-    if hit(lim.block_results_days, ev.results_window) {
+    if hit(true, ev.results_window) {
         why.push("Results are due for this stock today or the next session.".to_owned());
     }
-    if hit(lim.block_policy_days, ev.policy_day) {
+    if hit(true, ev.policy_day) {
         why.push("Today is an RBI policy or Budget day.".to_owned());
     }
-    if hit(true, ev.option_on_own_expiry) && ctx.now.time() >= cutoff {
+    if hit(true, ev.option_on_own_expiry) && ctx.now.with_timezone(&Kolkata).time() >= cutoff {
         why.push(format!(
             "New option orders on their own expiry day stop at {}.",
             cutoff.format("%H:%M")
@@ -339,6 +337,19 @@ pub fn g15(
                 .into(),
         ),
     }
+    match inputs.inputs_as_of {
+        Tri::Known(t) => match age_secs(ctx.now, t) {
+            Some(a) if a <= i64::from(lim.max_snapshot_age_secs) => {
+                seen.push(format!("inputs {a} s"));
+            }
+            _ => why.push(
+                "The market, calendar, evidence or cash figures are out of date. To pass, refresh them.".to_owned(),
+            ),
+        },
+        Tri::Unknown => why.push(
+            "Cannot confirm when the market, calendar, evidence and cash figures were read. When unsure, the app says no.".into(),
+        ),
+    }
     if cls.entry_qty > 0 {
         match inputs.quote_at {
             Tri::Known(t) => match age_secs(ctx.now, t) {
@@ -380,6 +391,14 @@ pub fn x03(cls: &Classification, inputs: &DataInputs) -> RuleResult {
     let rule = RuleId::X03;
     if cls.entry_qty == 0 {
         return no_exposure(rule);
+    }
+    if inputs.margin.qty != cls.entry_qty {
+        return RuleResult::fail(
+            rule,
+            format!("need worked out for {} units", inputs.margin.qty),
+            format!("{} units ordered", cls.entry_qty),
+            "The cash or margin need was worked out for a different quantity than this order. To pass, recompute it for the order quantity.",
+        );
     }
     let (Tri::Known(req), Tri::Known(avail)) = (inputs.margin.required, inputs.margin.available)
     else {
@@ -464,6 +483,7 @@ mod tests {
 
     fn good(now: DateTime<Tz>) -> DataInputs {
         DataInputs {
+            inputs_as_of: Tri::Known(now),
             evidence: EvidenceInputs {
                 oos_trades: Tri::Known(30),
                 profit_factor: Tri::Known(d("1.3")),
@@ -483,6 +503,7 @@ mod tests {
             quote_at: Tri::Known(now),
             session_open: Tri::Known(true),
             margin: MarginInputs {
+                qty: 5,
                 required: Tri::Known(d("25000")),
                 available: Tri::Known(d("25000")),
             },
@@ -574,20 +595,48 @@ mod tests {
     }
 
     #[test]
-    fn g06_list_age_boundary_and_future_date() {
-        let (now, c) = (at(11, 0), ctx(ExecutionMode::Paper, at(11, 0)));
-        let max = Duration::hours(i64::from(c.limits.ban_list_max_age_hours));
-        let with = |t: DateTime<Tz>| {
+    fn g06_list_must_be_from_today_in_ist_and_not_empty() {
+        let banned = || vec!["XYZ".to_owned()];
+        let run = |now: DateTime<Tz>, t: DateTime<Tz>, names: Vec<String>| {
+            let c = ctx(ExecutionMode::Paper, now);
             let mut i = good(now);
             i.ban_list = Tri::Known(BanList {
-                banned_underlyings: vec![],
+                banned_underlyings: names,
                 fetched_at: t,
             });
             g06(&c, &cls(5), &i)
         };
-        assert!(with(now - max).passed());
-        assert!(!with(now - max - Duration::seconds(1)).passed());
-        assert!(!with(now + Duration::seconds(1)).passed());
+        let now = at(9, 20);
+        assert!(run(now, at(9, 20), banned()).passed());
+        assert!(run(now, at(0, 0), banned()).passed());
+        // 23 h 50 m old but from yesterday: rejected.
+        let yesterday = Kolkata.with_ymd_and_hms(2026, 11, 18, 9, 30, 0).unwrap();
+        assert!(!run(now, yesterday, banned()).passed());
+        // Friday list on Monday.
+        let mon = Kolkata.with_ymd_and_hms(2026, 11, 23, 9, 20, 0).unwrap();
+        let fri = Kolkata.with_ymd_and_hms(2026, 11, 20, 16, 0, 0).unwrap();
+        assert!(!run(mon, fri, banned()).passed());
+        assert!(!run(now, now + Duration::seconds(1), banned()).passed());
+        let r = run(now, now, vec![]);
+        assert!(!r.passed(), "an empty list is not a valid list");
+        ends_with_id(&r);
+        // A UTC clock reading is converted to IST before the date check.
+        let utc_now = now.with_timezone(&chrono_tz::UTC);
+        assert!(run(utc_now.with_timezone(&Kolkata), now, banned()).passed());
+    }
+
+    #[test]
+    fn g06_trims_padded_entries_and_ignores_the_off_flag() {
+        let now = at(11, 0);
+        let mut c = ctx(ExecutionMode::Paper, now);
+        c.limits.block_ban_list = false;
+        let mut i = good(now);
+        i.stock_fno_underlying = Tri::Known(Some("SBIN".into()));
+        i.ban_list = Tri::Known(BanList {
+            banned_underlyings: vec!["sbin ".into()],
+            fetched_at: now,
+        });
+        assert!(!g06(&c, &cls(5), &i).passed());
     }
 
     #[test]
@@ -621,15 +670,72 @@ mod tests {
     }
 
     #[test]
-    fn g07_calendar_flags_not_needed_when_the_block_is_off() {
+    fn g07_is_enforced_even_when_the_block_flags_are_off() {
         let now = at(11, 0);
         let mut c = ctx(ExecutionMode::Paper, now);
         c.limits.block_results_days = false;
         c.limits.block_policy_days = false;
         let mut i = good(now);
-        i.events.results_window = Tri::Unknown;
         i.events.policy_day = Tri::Known(true);
-        assert!(g07(&c, &cls(5), &i).passed());
+        assert!(!g07(&c, &cls(5), &i).passed());
+        i.events.policy_day = Tri::Known(false);
+        i.events.results_window = Tri::Unknown;
+        assert!(!g07(&c, &cls(5), &i).passed());
+    }
+
+    #[test]
+    fn g07_cutoff_is_read_in_ist_whatever_the_clock_zone() {
+        let mut c = ctx(ExecutionMode::Paper, at(13, 30));
+        c.now = at(13, 30).with_timezone(&chrono_tz::UTC);
+        let mut i = good(at(13, 30));
+        i.events.option_on_own_expiry = Tri::Known(true);
+        assert!(!g07(&c, &cls(5), &i).passed());
+    }
+
+    #[test]
+    fn g01_without_the_walk_forward_requirement_ignores_it() {
+        let now = at(11, 0);
+        let mut c = ctx(ExecutionMode::SemiAuto, now);
+        c.limits.require_walk_forward_pass = false;
+        let mut i = good(now);
+        i.evidence.walk_forward_pass = Tri::Unknown;
+        assert!(g01(&c, &cls(5), &i).passed());
+    }
+
+    #[test]
+    fn shipped_risk_toml_gives_the_documented_g01_boundary() {
+        let now = at(11, 0);
+        let text = include_str!("../../../../config/risk.toml");
+        let c = GateConfig::from_toml_str(text)
+            .unwrap()
+            .rule_ctx(&Baseline::none(), now);
+        assert_eq!(c.limits.min_oos_trades, 30);
+        assert_eq!(c.limits.min_profit_factor, d("1.3"));
+        assert_eq!(c.limits.min_expectancy_r, d("0.1"));
+        assert!(g01(&c, &cls(5), &good(now)).passed());
+        let mut i = good(now);
+        i.evidence.oos_trades = Tri::Known(29);
+        assert!(!g01(&c, &cls(5), &i).passed());
+    }
+
+    #[test]
+    fn stale_or_unknown_input_time_rejects_every_order() {
+        let now = at(11, 0);
+        let c = ctx(ExecutionMode::Paper, now);
+        let max = i64::from(c.limits.max_snapshot_age_secs);
+        let run = |t: Tri<DateTime<Tz>>, entry: u32| {
+            let mut i = good(now);
+            i.inputs_as_of = t;
+            g15(&c, &cls(entry), &snap(now), &i)
+        };
+        assert!(run(Tri::Known(now - Duration::seconds(max)), 5).passed());
+        assert!(!run(Tri::Known(now - Duration::seconds(max + 1)), 5).passed());
+        assert!(!run(Tri::Known(now - Duration::seconds(max + 1)), 0).passed());
+        assert!(!run(Tri::Known(now + Duration::seconds(1)), 5).passed());
+        assert!(!run(Tri::Unknown, 0).passed());
+        let i = good(now);
+        let future = snap(now + Duration::seconds(1));
+        assert!(!g15(&c, &cls(5), &future, &i).passed());
     }
 
     #[test]
@@ -699,15 +805,38 @@ mod tests {
         i.margin.required = Tri::Unknown;
         assert!(!x03(&cls(5), &i).passed());
         i.margin = MarginInputs {
+            qty: 5,
             required: Tri::Known(d("1")),
             available: Tri::Unknown,
         };
         assert!(!x03(&cls(5), &i).passed());
         i.margin = MarginInputs {
+            qty: 5,
             required: Tri::Known(d("-1")),
             available: Tri::Known(d("5")),
         };
         assert!(!x03(&cls(5), &i).passed());
+        i.margin = MarginInputs {
+            qty: 5,
+            required: Tri::Known(d("1")),
+            available: Tri::Known(d("-5")),
+        };
+        assert!(!x03(&cls(5), &i).passed());
+        i.margin = MarginInputs {
+            qty: 5,
+            required: Tri::Known(d("1")),
+            available: Tri::Known(d("0")),
+        };
+        assert!(!x03(&cls(5), &i).passed());
+    }
+
+    #[test]
+    fn x03_rejects_a_need_worked_out_for_another_quantity() {
+        let mut i = good(at(11, 0));
+        i.margin.qty = 50;
+        let r = x03(&cls(94), &i);
+        assert!(!r.passed() && r.message().contains("different quantity"));
+        ends_with_id(&r);
     }
 
     #[test]
@@ -729,6 +858,7 @@ mod tests {
         .unwrap();
         let mut i = good(at(11, 0));
         i.margin = MarginInputs {
+            qty: s.qty,
             required: Tri::Known(s.notional),
             available: Tri::Known(d("100000")),
         };
