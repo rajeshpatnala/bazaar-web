@@ -2,7 +2,7 @@
 //! `Default`: an unknown input rejects entries.
 
 use crate::types::{Side, Tri};
-use chrono::DateTime;
+use chrono::{DateTime, NaiveDate};
 use chrono_tz::Tz;
 use rust_decimal::Decimal;
 
@@ -48,6 +48,8 @@ pub struct PortfolioSnapshot {
     pub day_pnl: Tri<Decimal>,
     /// This week's P&L: realised + unrealised, net of charges.
     pub week_pnl: Tri<Decimal>,
+    /// The Monday (IST date) the weekly P&L starts from; G19 rejects when it is not the Monday of `as_of`.
+    pub week_start: Tri<NaiveDate>,
     pub entries_today: Tri<u32>,
     pub orders_last_minute: Tri<u32>,
     /// Orders sent today (all orders, not only entries); G16.
@@ -78,6 +80,7 @@ impl PortfolioSnapshot {
             consecutive_losses: Tri::Unknown,
             day_pnl: Tri::Unknown,
             week_pnl: Tri::Unknown,
+            week_start: Tri::Unknown,
             entries_today: Tri::Unknown,
             orders_last_minute: Tri::Unknown,
             orders_today: Tri::Unknown,
@@ -113,6 +116,7 @@ mod tests {
         assert!(s.as_of.is_unknown() && s.positions.is_unknown());
         assert!(s.day_pnl.is_unknown() && s.kill_switch.is_unknown());
         assert!(s.orders_today.is_unknown() && s.orders_last_minute.is_unknown());
+        assert!(s.week_start.is_unknown() && s.week_pnl.is_unknown());
         assert!(s.starting_cash.is_unknown() && s.realised_pnl.is_unknown());
         assert!(s.equity_mtm.is_unknown() && s.marks.is_unknown());
         assert!(s.position("ABC").is_none());

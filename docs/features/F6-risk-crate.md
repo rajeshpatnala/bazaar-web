@@ -92,3 +92,9 @@ Test fixture `fixtures/config/risk.toml` gained the same sections with synthetic
 - Owner to confirm (CR-56-3): G02 adds the new order's charges allowance to the held risk of a same-side add.
 - Symbols must reach the gate in canonical instrument-master form (RISK-56-5); gate test in slice 11.
 - Deferred: slice 11/11b pass the charges buffer for the FINAL qty into G02 with a cost-grows-with-qty test (RISK-56-3, QR-56-5; below-floor is raised to the floor, `size` rejects it); slice 12 replays boundaries against shipped `config/risk.toml` (RISK-56-4); F10 validates marks at snapshot build.
+
+## Slice 5b (loss limits: G03, G19)
+- Fix round (PR 59): G19 converts `as_of` to Asia/Kolkata before taking the Monday (RISK-59-1, CR-59-2, SEC-59-1); per-input "To pass" text, zero equity has its own message (CR-59-3, RISK-59-3); tests for flip/oversized exits at the limit, unknown equity, week change at midnight IST, future `week_start`, a consistent snapshot (RISK-59-2, CR-59-4, TS-59-1, TS-59-2, RISK-59-5). Doc: relies on G15 for snapshot freshness (RISK-59-4).
+- Decision (tech lead, RISK-59-3): the base stays the post-loss equity, so real triggers are about -2.91% daily and -5.65% weekly at the shipped limits (stricter than nominal, never looser). CR-59-1: a loss exactly at the limit blocks; owner to confirm.
+- `rules/loss_limits.rs`: `g03(ctx, cls, snap)`, `g19(ctx, cls, snap)`. P&L from the snapshot (net of charges, realised + unrealised); base `sizing_equity`; a loss AT the limit blocks (owner to confirm); entry-only, exits and stop moves pass; Hard rows. Unknown P&L, equity, `as_of` or week start returns `RuleResult::input_missing`. No price input, so no reference price.
+- New snapshot field `week_start: Tri<NaiveDate>`: G19 requires it to be the IST Monday of `as_of`, else a stale week figure rejects (Monday reset). F10 must set it from the journal with the weekly P&L.
