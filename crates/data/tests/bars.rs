@@ -280,7 +280,12 @@ fn real_session() -> Vec<Candle> {
             Candle::new(
                 first + Duration::minutes(k),
                 Interval::Min1,
-                [o, Decimal::from(200 + k), Decimal::from(50 + k), o + d("0.5")],
+                [
+                    o,
+                    Decimal::from(200 + k),
+                    Decimal::from(50 + k),
+                    o + d("0.5"),
+                ],
                 u64::try_from(k + 1).unwrap(),
                 false,
             )
