@@ -11,6 +11,14 @@ execution_mode = "paper"
 [limits]
 max_risk_per_trade_pct = "1"
 max_daily_loss_pct = "3"
+on_daily_loss = "lockout_entries"
+# F6 keys below: owner-decided 2026-11-19 (.agents/decisions.md): max_open_positions, max_position_value_pct,
+# max_weekly_loss_pct (G19). Every other key in the sections below: source = owner-to-confirm,
+# verified_on = unverified. The file-level verified_on above is deliberately not bumped.
+max_open_positions = 3                  # G04a, Soft, owner decided 2026-11-19
+max_total_open_risk_pct = "3"           # G04b, Hard; owner-to-confirm, unverified
+max_weekly_loss_pct = "6"               # G19, Hard; owner decided 2026-11-19
+max_position_value_pct = "25"           # G14, Soft; owner decided 2026-11-19
 
 # Ceilings: the loader refuses a [limits] value above its ceiling, but both sit in this owner-editable
 # file, so the loader cannot tell a raised ceiling from an original one. Never raise a ceiling
@@ -19,6 +27,31 @@ max_daily_loss_pct = "3"
 [hard_limits]
 max_risk_per_trade_pct = "1"
 max_daily_loss_pct = "3"
+max_total_open_risk_pct = "3"           # owner-to-confirm, unverified
+max_weekly_loss_pct = "6"               # owner decided 2026-11-19
+# Ceilings for the No-row behaviour keys: the file cannot loosen them past these (owner 2026-11-19).
+# "max_" = the value may not exceed it; "min_" = the value may not go below it. Unverified.
+max_cooloff_after_losses = 2            # owner decided 2026-11-19 (G08)
+max_new_entries_per_day = 3             # owner decided 2026-11-19 (G18)
+min_reentry_lockout_minutes = 60        # owner decided 2026-11-19 (G17)
+max_entry_zone_tolerance_bps = 0        # owner-to-confirm, unverified (G10)
 
 [execution]
 paper_starting_cash_inr = "100000"
+
+# G05 sector and correlation (Soft). All four: owner-to-confirm, unverified.
+[exposure]
+max_sector_pct = "30"
+max_correlated_positions = 2
+correlation_threshold = "0.7"
+correlation_window_days = 60
+
+# Behaviour guards (No rows; G09/G11 are Hard and the loader refuses true).
+[behaviour]
+cooloff_after_losses = 2                # G08, owner decided 2026-11-19
+cooloff_until = "end_of_session"        # G08, owner-to-confirm, unverified
+allow_stop_widening = false             # G09, loader refuses true
+allow_averaging_down = false            # G11, loader refuses true
+entry_zone_tolerance_bps = 0            # G10, owner-to-confirm, unverified
+reentry_lockout_minutes = 60            # G17, owner decided 2026-11-19
+max_new_entries_per_day = 3             # G18, owner decided 2026-11-19

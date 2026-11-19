@@ -28,7 +28,10 @@ pub use files::{
     MAX_SYMBOLS_PER_WATCHLIST, MAX_TEXT_CHARS, MAX_WATCHLISTS, StrategiesConfig, Watchlist,
     WatchlistsConfig,
 };
-pub use risk::{ExecutionSection, HardLimits, Limits, ModeSection, RiskConfig};
+pub use risk::{
+    Behaviour, CooloffUntil, ExecutionSection, Exposure, HardLimits, Limits, ModeSection,
+    OnDailyLoss, RiskConfig,
+};
 
 /// Money and percentages are TOML strings. `rust_decimal::serde::str` also accepts TOML
 /// numbers, so this strict version reads a string only (a float never becomes money).
