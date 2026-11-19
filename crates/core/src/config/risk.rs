@@ -129,6 +129,7 @@ pub struct RiskConfig {
 
 /// Loader sanity bounds (inclusive). They are structural limits that stop a degenerate value from
 /// switching a guard off; the trading thresholds themselves live in the file.
+/// Structural sanity bound, not a trading threshold; policy ceilings live in `[hard_limits]`.
 const OPEN_POSITIONS: (u32, u32) = (1, 20);
 const CORRELATED_POSITIONS: (u32, u32) = (1, 10);
 const CORRELATION_WINDOW_DAYS: (u32, u32) = (20, 250);
@@ -497,60 +498,164 @@ mod tests {
         assert_eq!(cfg.exposure.correlation_threshold.to_string(), "0.7");
     }
 
-    /// Every new key, as the exact line to delete. Dropping any one must fail the load
-    /// (no serde default to a loose value).
+    /// `OK` with `key` in `section` set to `val` (`None` removes the line).
+    fn edit(section: &str, key: &str, val: Option<&str>) -> String {
+        let mut cur = String::new();
+        let mut out = Vec::new();
+        let mut hit = false;
+        for line in OK.lines() {
+            if line.starts_with('[') {
+                cur = line.trim_matches(|c| c == '[' || c == ']').to_string();
+            }
+            if cur == section && line.split(" = ").next() == Some(key) {
+                hit = true;
+                if let Some(v) = val {
+                    out.push(format!("{key} = {v}"));
+                }
+                continue;
+            }
+            out.push(line.to_string());
+        }
+        assert!(hit, "{section}.{key} not in OK");
+        out.join("\n") + "\n"
+    }
+
+    const NEW_KEYS: &[(&str, &str)] = &[
+        ("limits", "on_daily_loss"),
+        ("limits", "max_open_positions"),
+        ("limits", "max_total_open_risk_pct"),
+        ("limits", "max_weekly_loss_pct"),
+        ("limits", "max_position_value_pct"),
+        ("hard_limits", "max_total_open_risk_pct"),
+        ("hard_limits", "max_weekly_loss_pct"),
+        ("hard_limits", "max_cooloff_after_losses"),
+        ("hard_limits", "max_new_entries_per_day"),
+        ("hard_limits", "min_reentry_lockout_minutes"),
+        ("hard_limits", "max_entry_zone_tolerance_bps"),
+        ("exposure", "max_sector_pct"),
+        ("exposure", "max_correlated_positions"),
+        ("exposure", "correlation_threshold"),
+        ("exposure", "correlation_window_days"),
+        ("behaviour", "cooloff_after_losses"),
+        ("behaviour", "cooloff_until"),
+        ("behaviour", "allow_stop_widening"),
+        ("behaviour", "allow_averaging_down"),
+        ("behaviour", "entry_zone_tolerance_bps"),
+        ("behaviour", "reentry_lockout_minutes"),
+        ("behaviour", "max_new_entries_per_day"),
+    ];
+
+    /// Each new key removed on its own must fail the load (no serde default to a loose value).
     #[test]
     fn every_new_key_is_required() {
-        let lines = [
-            "on_daily_loss = \"lockout_entries\"\n",
-            "max_open_positions = 3\n",
-            "max_total_open_risk_pct = \"3\"\nmax_weekly_loss_pct = \"6\"\nmax_position_value_pct = \"25\"\n",
-            "max_position_value_pct = \"25\"\n",
-            "max_cooloff_after_losses = 2\n",
-            "min_reentry_lockout_minutes = 60\n",
-            "max_entry_zone_tolerance_bps = 0\n",
-            "max_sector_pct = \"30\"\n",
-            "max_correlated_positions = 2\n",
-            "correlation_threshold = \"0.7\"\n",
-            "correlation_window_days = 60\n",
-            "cooloff_after_losses = 2\ncooloff_until",
-            "cooloff_until = \"end_of_session\"\n",
-            "allow_stop_widening = false\n",
-            "allow_averaging_down = false\n",
-            "entry_zone_tolerance_bps = 0\nreentry",
-            "reentry_lockout_minutes = 60\nmax_new",
-        ];
-        for l in lines {
-            let to = if l.ends_with("cooloff_until") {
-                "cooloff_until"
-            } else if l.ends_with("reentry") {
-                "reentry"
-            } else if l.ends_with("max_new") {
-                "max_new"
-            } else {
-                ""
-            };
+        for (section, key) in NEW_KEYS {
+            let text = edit(section, key, None);
             assert!(
-                parse_str::<RiskConfig>(&with(l, to)).is_err(),
-                "missing {l:?} must fail"
+                parse_str::<RiskConfig>(&text).is_err(),
+                "missing {section}.{key} must fail"
             );
         }
-        // Whole sections, and the [hard_limits] keys that are not unique lines.
         for sect in ["[exposure]", "[behaviour]"] {
             assert!(parse_str::<RiskConfig>(&OK.replacen(sect, "[zzz]", 1)).is_err());
         }
-        let no_hard_week = OK.replacen(
-            "max_total_open_risk_pct = \"3\"\nmax_weekly_loss_pct = \"6\"\nmax_cooloff",
-            "max_cooloff",
+    }
+
+    #[test]
+    fn values_at_the_boundary_are_accepted() {
+        let ok: &[(&str, &str, &str)] = &[
+            ("limits", "max_position_value_pct", "\"100\""),
+            ("exposure", "max_sector_pct", "\"100\""),
+            ("exposure", "correlation_threshold", "\"1\""),
+            ("exposure", "max_correlated_positions", "1"),
+            ("exposure", "max_correlated_positions", "10"),
+            ("exposure", "correlation_window_days", "20"),
+            ("exposure", "correlation_window_days", "250"),
+            ("limits", "max_open_positions", "1"),
+            ("limits", "max_open_positions", "20"),
+            ("hard_limits", "max_total_open_risk_pct", "\"100\""),
+            ("hard_limits", "max_weekly_loss_pct", "\"100\""),
+            ("hard_limits", "max_cooloff_after_losses", "10"),
+            ("hard_limits", "max_new_entries_per_day", "20"),
+            ("hard_limits", "max_entry_zone_tolerance_bps", "50"),
+            ("behaviour", "cooloff_after_losses", "1"),
+            ("behaviour", "cooloff_after_losses", "2"),
+            ("behaviour", "max_new_entries_per_day", "1"),
+            ("behaviour", "max_new_entries_per_day", "3"),
+            ("behaviour", "reentry_lockout_minutes", "60"),
+            ("behaviour", "entry_zone_tolerance_bps", "0"),
+        ];
+        for (sec, key, v) in ok {
+            let text = edit(sec, key, Some(v));
+            // Raising a hard ceiling to its bound can leave the value below it: still valid.
+            assert!(parse_str::<RiskConfig>(&text).is_ok(), "{sec}.{key} = {v}");
+        }
+        // Limit equal to a raised ceiling, and the top of every range for the behaviour keys.
+        let t = edit("limits", "max_weekly_loss_pct", Some("\"100\""));
+        let t = t.replacen(
+            "max_weekly_loss_pct = \"6\"\nmax_cooloff",
+            "max_weekly_loss_pct = \"100\"\nmax_cooloff",
             1,
         );
-        assert!(parse_str::<RiskConfig>(&no_hard_week).is_err());
-        let no_hard_entries = OK.replacen(
-            "max_cooloff_after_losses = 2\nmax_new_entries_per_day = 3\n",
-            "max_cooloff_after_losses = 2\n",
+        assert!(parse_str::<RiskConfig>(&t).is_ok());
+        let t = edit("hard_limits", "max_cooloff_after_losses", Some("10"));
+        let t = t.replacen(
+            "[behaviour]\ncooloff_after_losses = 2",
+            "[behaviour]\ncooloff_after_losses = 10",
             1,
         );
-        assert!(parse_str::<RiskConfig>(&no_hard_entries).is_err());
+        assert!(parse_str::<RiskConfig>(&t).is_ok());
+        let t = edit("hard_limits", "min_reentry_lockout_minutes", Some("480"));
+        let t = t.replacen(
+            "reentry_lockout_minutes = 60\nmax_new",
+            "reentry_lockout_minutes = 480\nmax_new",
+            1,
+        );
+        assert!(parse_str::<RiskConfig>(&t).is_ok());
+    }
+
+    #[test]
+    fn hard_ceilings_are_range_checked() {
+        let bad: &[(&str, &str, &str)] = &[
+            (
+                "max_total_open_risk_pct",
+                "\"0\"",
+                "hard_limits.max_total_open_risk_pct",
+            ),
+            (
+                "max_total_open_risk_pct",
+                "\"100.1\"",
+                "hard_limits.max_total_open_risk_pct",
+            ),
+            (
+                "max_weekly_loss_pct",
+                "\"0\"",
+                "hard_limits.max_weekly_loss_pct",
+            ),
+            (
+                "max_weekly_loss_pct",
+                "\"100.1\"",
+                "hard_limits.max_weekly_loss_pct",
+            ),
+            (
+                "max_cooloff_after_losses",
+                "11",
+                "hard_limits.max_cooloff_after_losses",
+            ),
+            (
+                "max_new_entries_per_day",
+                "21",
+                "hard_limits.max_new_entries_per_day",
+            ),
+            (
+                "min_reentry_lockout_minutes",
+                "481",
+                "hard_limits.min_reentry_lockout_minutes",
+            ),
+        ];
+        for (key, v, want) in bad {
+            let err = parse_str::<RiskConfig>(&edit("hard_limits", key, Some(v))).expect_err(key);
+            assert!(err.to_string().contains(want), "{key} = {v}: {err}");
+        }
     }
 
     fn assert_all_refused(bad: &[(&str, &str, &str)]) {
