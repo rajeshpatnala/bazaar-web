@@ -334,13 +334,13 @@ impl GateVerdict {
         self.results.iter().filter(|r| !r.passed)
     }
 
-    /// True when there is at least one failure and every failure is Soft or Paper. Any Hard or
-    /// No failure makes the whole verdict non-overridable.
+    /// True when there is at least one failure and every failure is Soft or Paper and a real breach. Any Hard, No or missing-input failure
+    /// makes the whole verdict non-overridable.
     #[must_use]
     pub fn overridable(&self) -> bool {
         let mut any = false;
         for r in self.failures() {
-            if !r.level().is_overridable() {
+            if r.is_input_missing() || !r.level().is_overridable() {
                 return false;
             }
             any = true;
@@ -573,6 +573,19 @@ mod tests {
         ] {
             assert!(e.to_string().contains("rule") || e.to_string().contains("results"));
         }
+    }
+
+    #[test]
+    fn input_missing_failure_is_never_overridable_even_on_a_soft_rule() {
+        let results: Vec<RuleResult> = pass_all()
+            .into_iter()
+            .map(|r| match r.rule() {
+                RuleId::G05 => RuleResult::input_missing(RuleId::G05, "o", "l", "no"),
+                RuleId::G14 => RuleResult::fail(RuleId::G14, "o", "l", "no"),
+                _ => r,
+            })
+            .collect();
+        assert!(!GateVerdict::new(hash(), &results).unwrap().overridable());
     }
 
     #[test]
