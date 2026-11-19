@@ -76,14 +76,14 @@ fn instrument(lot: u32) -> Instrument {
     }
 }
 
-/// Entry at Rs 100 with a Rs 90 stop: Rs 10 a share.
+/// Entry at Rs 100 with a stop Rs 10 away on the protective side (90 for a buy, 110 for a sell).
 fn intent(side: Side, qty: u32, lot: u32) -> OrderIntent {
     OrderIntent {
         symbol: "ABC".into(),
         side,
         qty: Qty(qty),
         price: d("100"),
-        stop: Some(d("90")),
+        stop: Some(if side == Side::Buy { d("90") } else { d("110") }),
         new_stop: None,
         lot_size: lot,
         tick_size: d("0.05"),
@@ -240,6 +240,8 @@ fn a_gap_down_through_the_stop_stops_new_entries_but_never_the_exit() {
     s.day_pnl = Tri::Known(d("-5000"));
     s.week_pnl = Tri::Known(d("-5000"));
     s.equity_mtm = Tri::Known(d("95000"));
+    // Note: buying more ABC at Rs 100 against a Rs 50 mark is also an averaging-down add, so G11
+    // fires too; this test asserts only on G03 and G19.
     let entry = failed(&eval(&intent(Side::Buy, 10, 1), &s, thursday()));
     assert!(entry.contains(&RuleId::G03), "{entry:?}");
     assert!(
@@ -255,6 +257,17 @@ fn a_gap_down_through_the_stop_stops_new_entries_but_never_the_exit() {
 }
 
 #[test]
+fn the_day_cap_boundary_is_replayed_against_the_shipped_three_percent() {
+    // Equity stays Rs 1,00,000 so the cap is Rs 3,000; a loss at or past it blocks entries.
+    let mut s = snap(thursday(), (2026, 11, 16));
+    for (loss, blocked) in [("-2999", false), ("-3000", true), ("-3001", true)] {
+        s.day_pnl = Tri::Known(d(loss));
+        let f = failed(&eval(&intent(Side::Buy, 1, 1), &s, thursday()));
+        assert_eq!(f.contains(&RuleId::G03), blocked, "{loss}: {f:?}");
+    }
+}
+
+#[test]
 fn a_restart_in_the_middle_of_a_lockout_keeps_the_lockout() {
     let exit_at = thursday() - Duration::minutes(30);
     let mut s = snap(thursday(), (2026, 11, 16));
@@ -263,14 +276,20 @@ fn a_restart_in_the_middle_of_a_lockout_keeps_the_lockout() {
         at: exit_at,
     }]);
     let i = intent(Side::Buy, 10, 1);
-    // Two fresh gates over the same snapshot (a restart) agree: the state is not in memory.
+    // Determinism check: two fresh gates over the same snapshot agree. The lockout comes only from
+    // the snapshot (`Store` returns an empty baseline), so nothing here proves absence of hidden state.
     let (a, b) = (eval(&i, &s, thursday()), eval(&i, &s, thursday()));
     assert_eq!(failed(&a), vec![RuleId::G17]);
     assert_eq!(a.verdict(), b.verdict());
     // 59 minutes in: still locked; at exactly 60 it opens.
     let at = |m: i64| exit_at + Duration::minutes(m);
-    assert!(failed(&eval(&i, &s, at(59))).contains(&RuleId::G17));
-    assert!(!failed(&eval(&i, &s, at(60))).contains(&RuleId::G17));
+    let moved = |m: i64| {
+        let mut s2 = s.clone();
+        s2.as_of = Tri::Known(at(m));
+        s2
+    };
+    assert!(failed(&eval(&i, &moved(59), at(59))).contains(&RuleId::G17));
+    assert!(!failed(&eval(&i, &moved(60), at(60))).contains(&RuleId::G17));
     // A fresh losing exit in another symbol does not lock ABC.
     let mut elsewhere = s.clone();
     elsewhere.last_losing_exits = Tri::Known(vec![LosingExit {
@@ -332,6 +351,13 @@ fn a_sell_that_closes_and_reverses_is_an_entry_and_hits_the_lockout() {
     let disguised = failed(&eval(&intent(Side::Sell, 30, 1), &s, thursday()));
     assert!(disguised.contains(&RuleId::G17), "{disguised:?}");
     assert!(disguised.contains(&RuleId::G08), "{disguised:?}");
+    // Only the lockout, the pause and the rules that treat the 20 share short as a new entry
+    // (X03, G05; the fixture has no ban list or return series for a short) fail. G02 and G09 do not.
+    let mut got = disguised.clone();
+    got.sort();
+    let mut want = vec![RuleId::G05, RuleId::G08, RuleId::G17, RuleId::X03];
+    want.sort();
+    assert_eq!(got, want, "{disguised:?}");
     // The honest exit of exactly the 10 held is never blocked by either rule.
     let honest = failed(&eval(&intent(Side::Sell, 10, 1), &s, thursday()));
     assert!(
