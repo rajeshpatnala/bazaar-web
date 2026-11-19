@@ -62,46 +62,80 @@ fn sources_are_found() {
     assert!(s.len() >= 10, "only {} files scanned", s.len());
 }
 
-#[test]
-fn no_derive_default_on_snapshot_intent_or_ctx() {
-    const GUARDED: [&str; 7] = [
-        "PortfolioSnapshot",
-        "OrderIntent",
-        "RuleCtx",
-        "Position",
-        "GatedIntent",
-        "DataInputs",
-        "ModeEvidence",
-    ];
+const GUARDED: [&str; 11] = [
+    "PortfolioSnapshot",
+    "OrderIntent",
+    "RuleCtx",
+    "Position",
+    "GatedIntent",
+    "DataInputs",
+    "ModeEvidence",
+    "EvidenceInputs",
+    "EventFlags",
+    "MarginInputs",
+    "ExposureInputs",
+];
+
+/// Findings for one file: a guarded type that derives or implements `Default`. Works on the whole
+/// comment-free text, so a rustfmt-wrapped multi-line derive and a same-line
+/// `#[derive(Default)] struct X` are both seen.
+fn default_findings(name: &str, text: &str) -> Vec<String> {
+    let code: String = code_lines(text)
+        .into_iter()
+        .map(|(_, l)| l)
+        .collect::<Vec<_>>()
+        .join("\n");
     let mut hits = Vec::new();
-    for (name, text) in sources() {
-        let mut attrs = String::new();
-        for (n, line) in code_lines(&text) {
-            let t = line.trim();
-            if t.starts_with("#[") {
-                attrs.push_str(t);
+    let words: Vec<&str> = idents(&code).collect();
+    for (i, w) in words.iter().enumerate() {
+        if matches!(*w, "struct" | "enum") {
+            let Some(ty) = words.get(i + 1).filter(|t| GUARDED.contains(t)) else {
                 continue;
+            };
+            // Attributes sit between the previous item's end and this keyword: take the text
+            // before the keyword back to the last `;`, `}` or `{`.
+            let at = code.find(&format!("{w} {ty}")).unwrap_or(0);
+            let head = &code[..at];
+            let start = head.rfind([';', '}', '{']).map_or(0, |p| p + 1);
+            let attrs = &head[start..];
+            if idents(attrs).any(|a| a == "Default") {
+                hits.push(format!("{name}: derive(Default) on {ty}"));
             }
-            let w: Vec<&str> = idents(t).collect();
-            let declared = w
-                .windows(2)
-                .find(|p| matches!(p[0], "struct" | "enum"))
-                .map(|p| p[1]);
-            if let Some(ty) = declared
-                && GUARDED.contains(&ty)
-                && idents(&attrs).any(|a| a == "Default")
-            {
-                hits.push(format!("{name}:{n} derive(Default) on {ty}"));
-            }
-            if w.starts_with(&["impl", "Default", "for"])
-                && w.get(3).is_some_and(|ty| GUARDED.contains(ty))
-            {
-                hits.push(format!("{name}:{n} impl Default for {}", w[3]));
-            }
-            attrs.clear();
+        }
+        if *w == "impl"
+            && words.get(i + 1) == Some(&"Default")
+            && words.get(i + 2) == Some(&"for")
+            && words.get(i + 3).is_some_and(|t| GUARDED.contains(t))
+        {
+            hits.push(format!("{name}: impl Default for {}", words[i + 3]));
         }
     }
+    hits
+}
+
+#[test]
+fn no_derive_default_on_snapshot_intent_or_ctx() {
+    let hits: Vec<String> = sources()
+        .iter()
+        .flat_map(|(name, text)| default_findings(name, text))
+        .collect();
     assert!(hits.is_empty(), "{hits:#?}");
+}
+
+#[test]
+fn the_default_scan_sees_wrapped_and_same_line_derives() {
+    let wrapped = "#[derive(\n    Debug,\n    Default,\n)]\npub struct PortfolioSnapshot {}\n";
+    assert_eq!(default_findings("t", wrapped).len(), 1);
+    let same = "#[derive(Default)] pub struct EventFlags {}\n";
+    assert_eq!(default_findings("t", same).len(), 1);
+    let manual = "impl Default for OrderIntent {\n}\n";
+    assert_eq!(default_findings("t", manual).len(), 1);
+    let fine =
+        "#[derive(Debug, Clone)]\npub struct Position {}\n#[derive(Default)]\nstruct Other {}\n";
+    assert_eq!(default_findings("t", fine), Vec::<String>::new());
+    // A Default derive on the previous item does not leak onto the next one.
+    let prev = "#[derive(Default)]\nstruct Other {}\npub struct Position {}\n";
+    assert_eq!(default_findings("t", prev), Vec::<String>::new());
 }
 
 #[test]
@@ -154,17 +188,29 @@ fn live_trading_is_not_in_default_features() {
 
 #[test]
 fn gated_intent_is_built_only_in_gate_rs() {
+    // Library code only: the fields are private (checked below, and by the `compile_fail`
+    // doctests on `GatedIntent`), so other modules and crates cannot construct it.
     let mut hits = Vec::new();
     let mut in_gate = 0;
-    // Library code only: the fields are private, so tests cannot construct it (compile error);
-    // `-> GatedIntent {` in a test helper is a return type, not a construction.
     for (name, text) in sources().into_iter().filter(|(n, _)| n.starts_with("src/")) {
+        let mut in_impl = false;
         for (n, line) in code_lines(&text) {
             // Whitespace removed so `GatedIntent  {` cannot slip past.
-            let squeezed: String = line.split_whitespace().collect();
-            let declaration =
-                squeezed.contains("structGatedIntent{") || squeezed.contains("implGatedIntent{");
-            if squeezed.contains("GatedIntent{") && !declaration {
+            let sq: String = line.split_whitespace().collect();
+            if sq.starts_with("implGatedIntent{") {
+                in_impl = true;
+                continue;
+            }
+            if in_impl && line.starts_with('}') {
+                in_impl = false;
+            }
+            let declaration = sq.contains("structGatedIntent{");
+            let return_type = sq.contains("->GatedIntent{")
+                || sq.contains("->Option<GatedIntent>{")
+                || sq.contains("->Result<GatedIntent");
+            let built = (sq.contains("GatedIntent{") && !declaration && !return_type)
+                || (in_impl && sq.contains("Self{") && !sq.contains("->Self{"));
+            if built {
                 if name == "src/gate.rs" {
                     in_gate += 1;
                 } else {
@@ -175,6 +221,26 @@ fn gated_intent_is_built_only_in_gate_rs() {
     }
     assert!(hits.is_empty(), "{hits:#?}");
     assert_eq!(in_gate, 1, "exactly one construction site in gate.rs");
+}
+
+#[test]
+fn gated_intent_has_no_public_fields() {
+    let gate = fs::read_to_string(root().join("src/gate.rs")).unwrap();
+    let code: Vec<String> = code_lines(&gate).into_iter().map(|(_, l)| l).collect();
+    let start = code
+        .iter()
+        .position(|l| l.contains("pub struct GatedIntent"))
+        .expect("GatedIntent declared");
+    let body: Vec<&String> = code[start + 1..]
+        .iter()
+        .take_while(|l| l.trim() != "}")
+        .collect();
+    assert_ne!(body.len(), 0);
+    let public: Vec<&&String> = body
+        .iter()
+        .filter(|l| l.trim_start().starts_with("pub "))
+        .collect();
+    assert!(public.is_empty(), "{public:?}");
 }
 
 #[test]
