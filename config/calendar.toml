@@ -1,6 +1,176 @@
-# calendar.toml: placeholder. It holds no data and is never reported as fresh (no verified_on on purpose).
-# Replace it with real, dated, sourced content and remove `placeholder`.
+# calendar.toml: NSE equity calendar for 2026 only (covered_years = [2026]).
+# Source: NSE "Exchange Communication - Holidays" page, text pasted by the owner on 2026-11-20
+# (copy in docs/owner-input/F2-calendar.md). Holiday rows have no per-row source field in the
+# schema, so every [[holiday]] row comes from the page URL in the top-level `source`.
+# The circular id and the Muhurat 2026-11-08 timings are unconfirmed, so no Muhurat [[special_session]]
+# row ships: 2026-11-08 stays closed (fail closed). Notes are in docs/owner-input/F2-calendar.md.
+# Not in the owner's source, so deliberately absent: derivatives/currency/commodity session
+# windows, closing-auction / closing-session rows (applicability by instrument kind and start date
+# unknown), and any year other than 2026. Holidays are applied to equity and equity_derivatives
+# (owner-pasted page is the NSE holiday list; the derivatives mapping is an assumption to confirm).
 schema_version = 1
-placeholder = true
-source = "placeholder: no data yet; to be filled from official NSE circulars by the calendar-data feature (F2, bz-india-markets)"
-covered_years = []
+verified_on = "2026-11-20"
+source = "https://www.nseindia.in/resources/exchange-communication-holidays (owner-pasted 2026-11-20; circular id unverified)"
+covered_years = [2026]
+
+# Equity timings (IST). effective_from is the start of the covered year: the source gives no date.
+
+[[session]]
+segment = "equity"
+applies_to = "cash_non_fno"
+phase = "pre_open"
+start = "09:00"
+end = "09:15"
+effective_from = "2026-01-01"
+source = "NSE holidays page, equity segment timings: pre-open 09:00-09:15 (order entry 09:00-09:10, matching 09:10-09:12, buffer 09:12-09:15); verified_on 2026-11-20"
+
+[[session]]
+segment = "equity"
+applies_to = "cash_non_fno"
+phase = "normal"
+start = "09:15"
+end = "15:30"
+effective_from = "2026-01-01"
+source = "NSE holidays page, equity segment timings: regular session 09:15-15:30; verified_on 2026-11-20"
+
+[[session]]
+segment = "equity"
+applies_to = "cash_fno"
+phase = "pre_open"
+start = "09:00"
+end = "09:15"
+effective_from = "2026-01-01"
+source = "NSE holidays page, equity segment timings: pre-open 09:00-09:15 (order entry 09:00-09:10, matching 09:10-09:12, buffer 09:12-09:15); verified_on 2026-11-20"
+
+[[session]]
+segment = "equity"
+applies_to = "cash_fno"
+phase = "normal"
+start = "09:15"
+end = "15:30"
+effective_from = "2026-01-01"
+source = "NSE holidays page, equity segment timings: regular session 09:15-15:30; verified_on 2026-11-20"
+
+# Trading holidays on weekdays.
+
+[[holiday]]
+date = "2026-01-15"
+segments = ["equity", "equity_derivatives"]
+kind = "trading"
+name = "Municipal Corporation Election - Maharashtra"  # owner confirmed 2026-11-20: equity holiday per the NSE website
+
+[[holiday]]
+date = "2026-01-26"
+segments = ["equity", "equity_derivatives"]
+kind = "trading"
+name = "Republic Day"
+
+[[holiday]]
+date = "2026-03-03"
+segments = ["equity", "equity_derivatives"]
+kind = "trading"
+name = "Holi"
+
+[[holiday]]
+date = "2026-03-26"
+segments = ["equity", "equity_derivatives"]
+kind = "trading"
+name = "Shri Ram Navami"
+
+[[holiday]]
+date = "2026-03-31"
+segments = ["equity", "equity_derivatives"]
+kind = "trading"
+name = "Shri Mahavir Jayanti"
+
+[[holiday]]
+date = "2026-04-03"
+segments = ["equity", "equity_derivatives"]
+kind = "trading"
+name = "Good Friday"
+
+[[holiday]]
+date = "2026-04-14"
+segments = ["equity", "equity_derivatives"]
+kind = "trading"
+name = "Dr. Baba Saheb Ambedkar Jayanti"
+
+[[holiday]]
+date = "2026-05-01"
+segments = ["equity", "equity_derivatives"]
+kind = "trading"
+name = "Maharashtra Day"
+
+[[holiday]]
+date = "2026-05-28"
+segments = ["equity", "equity_derivatives"]
+kind = "trading"
+name = "Bakri Id"
+
+[[holiday]]
+date = "2026-06-26"
+segments = ["equity", "equity_derivatives"]
+kind = "trading"
+name = "Muharram"
+
+[[holiday]]
+date = "2026-09-14"
+segments = ["equity", "equity_derivatives"]
+kind = "trading"
+name = "Ganesh Chaturthi"
+
+[[holiday]]
+date = "2026-10-02"
+segments = ["equity", "equity_derivatives"]
+kind = "trading"
+name = "Mahatma Gandhi Jayanti"
+
+[[holiday]]
+date = "2026-10-20"
+segments = ["equity", "equity_derivatives"]
+kind = "trading"
+name = "Dussehra"
+
+[[holiday]]
+date = "2026-11-10"
+segments = ["equity", "equity_derivatives"]
+kind = "trading"
+name = "Diwali-Balipratipada"
+
+[[holiday]]
+date = "2026-11-24"
+segments = ["equity", "equity_derivatives"]
+kind = "trading"
+name = "Prakash Gurpurb Sri Guru Nanak Dev"
+
+[[holiday]]
+date = "2026-12-25"
+segments = ["equity", "equity_derivatives"]
+kind = "trading"
+name = "Christmas"
+
+# Holidays that fall on Saturday or Sunday (listed by NSE; no trading anyway).
+
+[[holiday]]
+date = "2026-02-15"
+segments = ["equity", "equity_derivatives"]
+kind = "trading"
+name = "Mahashivratri (Sunday)"
+
+[[holiday]]
+date = "2026-03-21"
+segments = ["equity", "equity_derivatives"]
+kind = "trading"
+name = "Id-Ul-Fitr (Saturday)"
+
+[[holiday]]
+date = "2026-08-15"
+segments = ["equity", "equity_derivatives"]
+kind = "trading"
+name = "Independence Day (Saturday)"
+
+[[holiday]]
+date = "2026-11-08"
+segments = ["equity", "equity_derivatives"]
+kind = "trading"
+name = "Diwali Laxmi Pujan (Sunday)"

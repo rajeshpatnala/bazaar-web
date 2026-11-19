@@ -34,8 +34,10 @@ Owner area: `config/{calendar,charges}.toml`, `crates/{data,store}`, `core/src/{
 - QUAN-33-3 (F3): Kite index rows (tick 0 / lot 0) are dropped as `NonPositiveTick`; decide with a real dump whether to keep an index kind for spot tokens.
 - SEC-33-1 (slice 5): `import-instruments --file` must bound the file read (`take(max_bytes + 1)`); the parser caps only the slice it is given.
 - SEC-33-2 (F3): one huge quoted field can grow a csv buffer up to `max_bytes`; lower the default once the real master size is known.
+- F2 calendar 2027 data: owner supplies the NSE 2027 holiday list before 2027-01-01. Until then dates in 2027 are `OutOfRange` (fail closed, intended); `check-connections` reports `FAILED instruments calendar_out_of_range`.
+- Muhurat 2026-11-08 special session: not shipped (timings 14:20-15:50 and circular 172/2025 unverified); add the row once the owner confirms from the NSE circular.
 
 ## History
 - Slice 3: instrument master parser (`bazaar_data::instruments`), bounded, dedupes, counts rejects.
 - Slice 5: `bazaar-cli import-instruments --file` and `check-connections` (bounded read, 0700 on a newly created data dir only, freshness vs calendar; placeholder calendar never fresh). Acceptance criterion 7 (TS-21-1..4, TS-21-6, CR-21-3) was closed by PR 32 (slice 1).
--
+- Slice 6 of 7, calendar data only (PR 64): real `config/calendar.toml`, 2026 only (`covered_years = [2026]`, verified_on 2026-11-20), from the owner-pasted NSE holiday page (`docs/owner-input/F2-calendar.md`). Equity pre-open 09:00-09:15 and normal 09:15-15:30 for cash_non_fno/cash_fno. Assumption to confirm: holidays also apply to `equity_derivatives`. Gaps: no derivatives/currency/commodity session windows and no closing-auction rows (not in the source), so `session_at` returns Closed for equity_derivatives on trading days. Deviation: the schema has no per-row `source` on `[[holiday]]` rows; they are covered by the top-level `source`. Charges (slice 7) and other criteria are other slices.

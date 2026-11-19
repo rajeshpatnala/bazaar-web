@@ -297,7 +297,8 @@ mod tests {
             crate::mode::ExecutionMode::Paper
         );
         assert_eq!(cfg.risk.header().source, "owner");
-        assert_eq!(cfg.calendar.covered_years, Vec::<i32>::new());
+        assert!(!cfg.calendar.placeholder);
+        assert_eq!(cfg.calendar.covered_years, vec![2026]);
     }
 
     #[test]
