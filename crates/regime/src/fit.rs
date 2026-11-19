@@ -86,8 +86,8 @@ impl RegimeFit {
                 );
             }
         }
-        // Fail closed: only a definite `False` passes. For a settled market trend `classify` always
-        // gives True or False; `Unknown` means the stress check was not made.
+        // Fail closed: only a definite `False` passes. With trend and vol both settled, `classify`
+        // gives True or False for a market series (tested); `Unknown` means no stress check was made.
         if market.breakdown != Tri::False {
             let meaning = if market.breakdown == Tri::True {
                 "Market under stress: no new buys."
@@ -255,10 +255,15 @@ mod tests {
         assert_eq!(f.check(), Err(RegimeFitError::WeakNotDeclared));
         let mut f = fit();
         f.market_trends.push(Trend::Mixed);
-        assert!(f.check().is_err());
+        assert_eq!(f.check(), Err(RegimeFitError::MarketTrendUnsettled));
         let mut f = fit();
         f.stock_cells.push((Trend::Up, VolState::Unknown));
-        assert!(f.check().is_err());
+        assert_eq!(f.check(), Err(RegimeFitError::StockCellUnsettled));
+        for t in [Trend::Mixed, Trend::Unknown] {
+            let mut f = fit();
+            f.stock_cells.push((t, VolState::Normal));
+            assert_eq!(f.check(), Err(RegimeFitError::StockCellUnsettled));
+        }
     }
 
     fn fit() -> RegimeFit {
@@ -288,8 +293,12 @@ mod tests {
             st(Trend::Mixed, VolState::Normal, Tri::Unknown),
             st(Trend::Up, VolState::Unknown, Tri::Unknown),
         ] {
-            assert!(matches!(fit().allows(&m, &bad), Fit::Suppressed(_)));
-            assert!(matches!(fit().allows(&bad, &ok), Fit::Suppressed(_)));
+            for r in [fit().allows(&m, &bad), fit().allows(&bad, &ok)] {
+                let Fit::Suppressed(f) = r else {
+                    panic!("unsettled label must suppress");
+                };
+                assert!(f.meaning.starts_with("Not settled"), "{f:?}");
+            }
         }
         let stress = st(Trend::Up, VolState::Normal, Tri::True);
         let Fit::Suppressed(r) = fit().allows(&stress, &ok) else {

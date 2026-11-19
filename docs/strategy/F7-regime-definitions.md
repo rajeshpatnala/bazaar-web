@@ -65,7 +65,7 @@ Each strategy declares `regime_fit` as a list of (trend, vol) cells plus the mar
 `regime`. Hard suppress (no signal): any `Unknown`, `Mixed`, market Breakdown. Soft penalty (scanner score) for allowed-but-weaker cells such as Up x High.
 The Why panel always names the regime and whether it fits. **Closed bars are the caller's duty:** `classify` checks daily, adjusted, strictly ordered candles but cannot see whether the last bar is still forming, so F8 (scanner) and F9 (backtest) must pass only closed bars (acceptance for both: a test that a forming bar is never in the series passed to `classify`).
 
-Labels (plain English, templated, snapshot-tested):
+Labels (plain English, templated, snapshot-tested; wording adjusted 2026-11-20, copy only: "swings" added to the Sideways labels and "the market" dropped from the Unknown label):
 | Cell | Label |
 |---|---|
 | Up x Low / Normal / High | "Uptrend, calm swings" / "Uptrend, normal swings" / "Uptrend, wild swings" |
