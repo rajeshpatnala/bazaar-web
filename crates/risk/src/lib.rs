@@ -36,10 +36,15 @@ mod tests {
     #[test]
     fn live_trading_is_not_a_default_feature() {
         let manifest = include_str!("../Cargo.toml");
-        let default_line = manifest
+        let features = manifest
+            .split("[features]")
+            .nth(1)
+            .expect("[features] table present");
+        let table = features.split("\n[").next().unwrap_or(features);
+        let default_line = table
             .lines()
             .find(|l| l.trim_start().starts_with("default"))
-            .unwrap_or_default();
+            .expect("default line present");
         assert!(!default_line.contains("live-trading"));
     }
 }

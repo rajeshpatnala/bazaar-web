@@ -29,8 +29,11 @@ pub struct StopOut {
 pub struct PortfolioSnapshot {
     pub as_of: Tri<DateTime<Tz>>,
     pub positions: Tri<Vec<Position>>,
+    /// Consecutive losing trades within the current IST session day.
     pub consecutive_losses: Tri<u32>,
+    /// Today's P&L: realised + unrealised, net of charges.
     pub day_pnl: Tri<Decimal>,
+    /// This week's P&L: realised + unrealised, net of charges.
     pub week_pnl: Tri<Decimal>,
     pub entries_today: Tri<u32>,
     pub orders_last_minute: Tri<u32>,

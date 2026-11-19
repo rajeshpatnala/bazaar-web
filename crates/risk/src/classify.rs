@@ -47,6 +47,8 @@ pub enum ClassifyError {
     ZeroQty,
     /// A stop move for a symbol with no known held position.
     StopMoveWithoutPosition,
+    /// A stop change together with a non-zero quantity: send them as separate orders.
+    StopWithQty,
 }
 
 impl fmt::Display for ClassifyError {
@@ -55,6 +57,9 @@ impl fmt::Display for ClassifyError {
             Self::ZeroQty => f.write_str("order quantity is 0 and no stop change was given"),
             Self::StopMoveWithoutPosition => {
                 f.write_str("a stop change needs a known open position in this symbol")
+            }
+            Self::StopWithQty => {
+                f.write_str("a stop change cannot be combined with an order quantity")
             }
         }
     }
@@ -80,7 +85,20 @@ pub fn classify(
     snapshot: &PortfolioSnapshot,
 ) -> Result<Classification, ClassifyError> {
     let qty = intent.qty.0;
-    let held = snapshot.position(&intent.symbol);
+    if qty > 0 && intent.new_stop.is_some() {
+        return Err(ClassifyError::StopWithQty);
+    }
+    // More than one open row for a symbol is ambiguous: treat the order as a full entry.
+    let rows = snapshot.positions.known().map_or(0, |v| {
+        v.iter()
+            .filter(|p| p.symbol == intent.symbol && p.qty > 0)
+            .count()
+    });
+    let held = if rows > 1 {
+        None
+    } else {
+        snapshot.position(&intent.symbol)
+    };
 
     if qty == 0 {
         let Some(new_stop) = intent.new_stop else {
@@ -247,6 +265,33 @@ mod tests {
                 .to_string()
                 .contains("open position")
         );
+    }
+
+    #[test]
+    fn stop_with_qty_is_an_error() {
+        let s = snap(Side::Buy, 94, Tri::Known(d(490)));
+        // Exit of 1 share that also widens the stop 490 -> 400 must not classify.
+        let exit = intent(Side::Sell, 1, Some(d(400)));
+        assert_eq!(classify(&exit, &s), Err(ClassifyError::StopWithQty));
+        let entry = intent(Side::Buy, 5, Some(d(495)));
+        assert_eq!(classify(&entry, &s), Err(ClassifyError::StopWithQty));
+        assert!(ClassifyError::StopWithQty.to_string().contains("quantity"));
+    }
+
+    #[test]
+    fn two_open_rows_for_a_symbol_are_an_entry() {
+        let row = |side, qty| Position {
+            symbol: "ABC".into(),
+            side,
+            qty,
+            stop: Tri::Unknown,
+        };
+        let mut s = PortfolioSnapshot::unknown();
+        s.positions = Tri::Known(vec![row(Side::Buy, 10), row(Side::Sell, 20)]);
+        let c = classify(&intent(Side::Sell, 10, None), &s).unwrap();
+        assert_eq!(parts(c), (Action::Entry, 10, 0));
+        let m = classify(&intent(Side::Buy, 0, Some(d(495))), &s);
+        assert_eq!(m, Err(ClassifyError::StopMoveWithoutPosition));
     }
 
     #[test]
