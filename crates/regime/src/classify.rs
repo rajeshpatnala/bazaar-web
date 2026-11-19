@@ -535,6 +535,20 @@ mod tests {
     }
 
     #[test]
+    fn settled_trend_and_vol_never_give_unknown_market_breakdown() {
+        let p = shipped_params();
+        for seed in [3, 7, 11] {
+            let all = bars(&walk(seed, 600), 5.0, 100);
+            for k in p.min_history_bars()..all.len() {
+                let s =
+                    classify(all.get(..k).unwrap(), &p, Series::Market, Extras::default()).unwrap();
+                let settled = s.trend != Trend::Unknown && s.vol != VolState::Unknown;
+                assert_eq!(s.breakdown == Tri::Unknown, !settled, "seed {seed} k {k}");
+            }
+        }
+    }
+
+    #[test]
     fn breakdown_is_false_when_a_condition_fails() {
         let mut crash = vec![1000.0; 300];
         crash.extend((1..=40).map(|k| 1000.0 - 10.0 * f64::from(k)));
