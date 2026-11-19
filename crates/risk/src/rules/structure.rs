@@ -413,6 +413,7 @@ mod tests {
             qty,
             stop: Tri::Unknown,
             risk_price: Tri::Unknown,
+            avg_cost: Tri::Unknown,
         }
     }
 
