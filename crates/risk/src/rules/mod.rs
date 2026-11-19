@@ -3,5 +3,6 @@
 pub mod behaviour;
 pub mod exposure;
 pub mod inputs;
+pub mod loss_limits;
 pub mod portfolio;
 pub mod structure;
