@@ -21,7 +21,7 @@ Deferred: RISK-52-6 G05 return-series freshness (series end date within N sessio
 | `exposure.max_sector_pct` (G05) | 30 | (0,100] | unverified |
 | `exposure.max_correlated_positions` | 2 | 1..=10 | unverified |
 | `exposure.correlation_threshold` | 0.7 | (0,1] | unverified |
-| `exposure.correlation_window_days` | 60 | 20..=250 | unverified |
+| `exposure.correlation_window_days` | 60 | 20..=250, >= `hard_limits.min_correlation_window_days` | unverified |
 | `behaviour.cooloff_after_losses` (G08) | 2 | 1..=10, <= `hard_limits.max_cooloff_after_losses` (2) | owner 2026-11-19 |
 | `behaviour.cooloff_until` | end_of_session | enum, one value | unverified |
 | `behaviour.allow_stop_widening` (G09), `allow_averaging_down` (G11) | false | `true` refused | unverified |
@@ -44,6 +44,7 @@ Deferred: RISK-52-6 G05 return-series freshness (series end date within N sessio
 | `gate.evidence.min_oos_trades` (G01) | 30 | 1..=100000, >= `hard_limits.min_oos_trades` |
 | `hard_limits.max_ban_list_age_hours` / `max_quote_age_secs` / `max_snapshot_age_secs` | 24 / 5 / 10 | 1..=48 / 1..=60 / 1..=300; limit <= ceiling |
 | `hard_limits.latest_expiry_day_no_new_after_ist` | 13:30 | 09:15..=15:30 (also bounds `events.expiry_day_no_new_after_ist`); limit <= ceiling |
+| `hard_limits.min_correlation_window_days` (slice 1c) | 20 | 20..=250 | unverified |
 | `hard_limits.min_confirm_delay_secs` / `max_size_factor` / `min_oos_trades` | 10 / 0.5 / 30 | 1..=300 / (0,1] / 1..=100000; limit >= floor, <= ceiling |
 | `gate.evidence.min_profit_factor`, `min_expectancy_r` | 1.3, 0.1 | >= 1, > 0; `require_walk_forward_pass = false` refused |
 | `events.block_ban_list`, `block_results_days`, `block_policy_days` | true | `false` refused |
@@ -56,7 +57,7 @@ Deferred: RISK-52-6 G05 return-series freshness (series end date within N sessio
 | `limits.min_charges_slippage_buffer` | 60 (rupees) | > 0; placeholder, derive from charges.toml with the F9 cost model |
 | `limits.cap_equity_at_starting_cash` | true | `false` refused (owner Q2) |
 
-Slice 1b `[hard_limits]` (unverified, owner to confirm): `max_ban_list_age_hours` 24, `max_quote_age_secs` 5, `max_snapshot_age_secs` 10, `latest_expiry_day_no_new_after_ist` 13:30, `min_confirm_delay_secs` 10, `max_size_factor` 0.5, `min_oos_trades` floor 30 (equals the G01 default). Deferred: symlink and canonical-path check for `events_file` belongs to the events loader (F3/F10).
+Slice 1b `[hard_limits]` (unverified, owner to confirm): `max_ban_list_age_hours` 24, `max_quote_age_secs` 5, `max_snapshot_age_secs` 10, `latest_expiry_day_no_new_after_ist` 13:30, `min_confirm_delay_secs` 10, `max_size_factor` 0.5, `min_oos_trades` floor 30 (equals the G01 default), `min_correlation_window_days` floor 20 (added in 1c). A higher floor such as 40 is the owner's call (20 matches the loader minimum on purpose). Deferred: symlink and canonical-path check for `events_file` belongs to the events loader (F3/F10).
 
 Ceilings for G05 and G04a sit at their defaults; changing any `[hard_limits]` value needs an ADR and the owner.
 Test fixture `fixtures/config/risk.toml` gained the same sections with synthetic values.

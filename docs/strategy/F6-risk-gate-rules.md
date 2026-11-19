@@ -44,7 +44,7 @@ do not bump the file-level `verified_on` (2026-11-18) until the owner confirms. 
 | G03 | `limits.max_daily_loss_pct`, `on_daily_loss` | 3 (existing), `lockout_entries` | Hard | already set |
 | G04a | `limits.max_open_positions` | 3 (consider 2 while learning) | Soft | yes |
 | G04b | `limits.max_total_open_risk_pct` (+ `[hard_limits]` entry) | 3 | Hard | yes |
-| G05 | `exposure.max_sector_pct`, `max_correlated_positions`, `correlation_threshold`, `correlation_window_days` | 30, 2, 0.7, 60 | Soft | yes |
+| G05 | `exposure.max_sector_pct`, `max_correlated_positions`, `correlation_threshold`, `correlation_window_days` (+ `[hard_limits] min_correlation_window_days`, floor 20) | 30, 2, 0.7, 60 | Soft | yes |
 | G08 | `behaviour.cooloff_after_losses`, `cooloff_until` | 3 (see Q1), `end_of_session` | No | yes |
 | G09 / G11 | `behaviour.allow_stop_widening`, `allow_averaging_down` (+ `[hard_limits]`) | false; loader refuses true | Hard | yes |
 | G10 | `behaviour.entry_zone_tolerance_bps` | 0 | No | yes |

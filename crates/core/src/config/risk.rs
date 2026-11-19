@@ -423,12 +423,17 @@ impl RiskConfig {
         Ok(())
     }
 
-    /// RISK-52-7: the correlation window may not go below its `[hard_limits]` floor.
+    /// The only place the correlation window is bounded (structural range, then RISK-52-7: not below its `[hard_limits]` floor).
     fn validate_correlation_floor(&self) -> Result<(), ConfigError> {
         let (h, e) = (&self.hard_limits, &self.exposure);
         check_range(
             "hard_limits.min_correlation_window_days",
             h.min_correlation_window_days,
+            CORRELATION_WINDOW_DAYS,
+        )?;
+        check_range(
+            "exposure.correlation_window_days",
+            e.correlation_window_days,
             CORRELATION_WINDOW_DAYS,
         )?;
         check_floor_u32(
@@ -458,11 +463,6 @@ impl RiskConfig {
             "exposure.max_correlated_positions",
             e.max_correlated_positions,
             CORRELATED_POSITIONS,
-        )?;
-        check_range(
-            "exposure.correlation_window_days",
-            e.correlation_window_days,
-            CORRELATION_WINDOW_DAYS,
         )?;
         forbid_true(
             "behaviour.allow_stop_widening",
