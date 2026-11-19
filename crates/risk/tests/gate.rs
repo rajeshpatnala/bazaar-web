@@ -12,7 +12,7 @@ use bazaar_core::money::Qty;
 use bazaar_risk::baseline::{BaselineError, LimitsBaseline};
 use bazaar_risk::config::{Baseline, GateConfig};
 use bazaar_risk::gate::{
-    Evaluation, Gate, GateInputs, GateReject, ModeEvidence, live_trading_compiled,
+    CostModel, Evaluation, Gate, GateInputs, GateReject, ModeEvidence, live_trading_compiled,
 };
 use bazaar_risk::override_::{
     IntentDigest, OverrideChallenge, OverrideError, OverrideRequest, ReasonType, evaluate,
@@ -177,6 +177,15 @@ fn mode_evidence(approval: Option<IntentDigest>) -> ModeEvidence {
     }
 }
 
+/// Fake F9 cost: `base + per * qty`.
+#[derive(Debug)]
+struct Linear(Decimal, Decimal);
+impl CostModel for Linear {
+    fn cost(&self, _side: Side, qty: u32, _price: Decimal) -> Tri<Decimal> {
+        Tri::Known(self.0 + self.1 * Decimal::from(qty))
+    }
+}
+
 struct Rig {
     cfg: GateConfig,
     data: DataInputs,
@@ -186,6 +195,7 @@ struct Rig {
     live: Tri<Decimal>,
     drop_inst: bool,
     drop_exposure: bool,
+    cost: Linear,
 }
 
 impl Rig {
@@ -199,6 +209,7 @@ impl Rig {
             live: Tri::Known(d("500")),
             drop_inst: false,
             drop_exposure: false,
+            cost: Linear(d("20"), Decimal::ZERO),
         }
     }
 
@@ -210,6 +221,7 @@ impl Rig {
         s: &PortfolioSnapshot,
     ) -> Result<Evaluation, GateReject> {
         let inputs = GateInputs {
+            cost: &self.cost,
             data: &self.data,
             instrument: (!self.drop_inst).then_some(&self.inst),
             defined_max_loss: None,
