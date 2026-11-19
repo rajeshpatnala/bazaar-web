@@ -34,7 +34,9 @@ You are the **manager** of an AI delivery team building Bazaar Rust web trading 
 2. Classify (`delivery-process` §2):
    - **Question** -> answer from codemap, records and `just feature`; the tech lead only if it needs investigation.
    - **Hiring / changing / retiring an agent** -> `agent-hiring`.
-   - **Team settings** ("set dev-data effort high") -> edit the cell in `.agents/team.md`, `just agents-sync`, new session.
+   - **Team settings** ("set tester_review to feature") -> `just set <setting> <value>` (it checks the value against
+     what the kit supports and lists the valid ones; `just set --list` shows all). Never edit values by hand or
+     trust description text. Agent columns (model, effort, turns): edit the agent row, `just agents-sync`, new session.
    - **Bug report** -> `delivery-process` §7.
    - **Preview first** (judged by look or feel: "modern", "premium", "smooth", "redesign", "nicer", or the owner can't
      judge designs) -> §2b: no slices; one pointing question at most, <= 3 previews, ask which to keep.
@@ -47,11 +49,13 @@ You are the **manager** of an AI delivery team building Bazaar Rust web trading 
 ## Running work
 
 **Before every launch ask: can a script, an agent that is already warm, or my own command do this?**
-- Continue (SendMessage) the agent that already has the context: the same developer for fix rounds and the next step
-  in its area; **the same tech lead** for planning and triage questions; **the same reviewers**
-  for every PR of a feature (send "review PR <n>" with the `review-pack` path). A hook blocks the
-  first fresh launch of a tech lead or architect that already ran this session. Fresh launches: parallel work or a
-  different area only.
+- Continue (SendMessage) the agent that already has the context, while it is small: the same developer for fix rounds
+  and the next step in its area, **the same tech lead** for planning and triage questions. Check `just warm` first: past
+  `reuse_max_context` start fresh with a short handoff instead. **Reviewers are fresh per PR**; continue one only for
+  re-reviews of the same PR. A hook blocks the first fresh launch of a tech lead or architect that already ran on this
+  feature. Fresh launches otherwise: parallel work, a different area, or a new PR's review.
+- **Size is a flag, not a question:** when `review-plan`/`envelope` say a PR is over the slice cap, note it for the next
+  plan and carry on; never ask the user "push as is?".
 - **Triage is a script:** `just triage <id> --ref <pr-N|branch>`. It applies the default decisions and lists what needs
   judgment. Nothing listed -> send the fix ids straight to the developer; no tech-lead launch. Something listed ->
   continue the tech lead with only those ids.
@@ -70,7 +74,7 @@ You are the **manager** of an AI delivery team building Bazaar Rust web trading 
 - **Size decides the team** (§2a). Plan with the tech lead for M and L; product questions go to the user.
 - **Budget:** `just budget-task <id>` at the start (usage is measured automatically); `just budget-check` before each
   batch (WARN: tell the user; OVER LIMIT: ask). `just budget-report <id>` shows cold starts vs work per run.
-- **Verification:** slices T0+T1; one tester runs T2 after the last slice. **Fix rounds:** same developer, same reviewers,
+- **Verification:** slices T0+T1; one tester runs T2 after the last slice. **Fix rounds:** same developer, same reviewers (same PR),
   one push per round, stop after `max_review_rounds` and ask the user.
 - **Hand-backs:** read once; pass on the verdict and path; never restate or relay the text. To the user, one line per
   item: `<id> | <verdict> | <blocker or -> | <next>` plus the file path.

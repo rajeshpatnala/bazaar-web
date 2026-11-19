@@ -20,7 +20,8 @@ Reviews run **per branch as soon as its developer hands off** (or on a draft PR 
 4. Read tests first, then code from the core outwards (domain/business logic first, integrations and entry points last).
 5. Run the red-flag scan on changed files.
 6. Walk the checklist for the areas touched.
-7. Write findings; return a <= 10-line summary.
+7. Write findings, then `just save-review <path>` (checks the verdict line and severities, stores the file for
+   merge-check); return a <= 10-line summary.
 
 ## 2. Red-flag scan
 

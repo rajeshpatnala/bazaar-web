@@ -5,6 +5,6 @@ input=$(cat)
 root="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 case "$(printf '%s' "$input" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("hook_event_name",""))' 2>/dev/null)" in
   SubagentStop) printf '%s' "$input" | python3 "$root/.claude/kit/budget.py" hook-subagent >/dev/null 2>&1 ;;
-  Stop)         printf '%s' "$input" | python3 "$root/.claude/kit/budget.py" hook-session  >/dev/null 2>&1 ;;
+  Stop)         printf '%s' "$input" | python3 "$root/.claude/kit/budget.py" hook-session 2>/dev/null ;;  # may print a systemMessage for the owner
 esac
 exit 0
