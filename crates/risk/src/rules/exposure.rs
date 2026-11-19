@@ -51,7 +51,7 @@ pub struct ExposureInputs {
 }
 
 fn reject(limit: &str, why: &str, fix: &str) -> RuleResult {
-    RuleResult::fail(
+    RuleResult::input_missing(
         RuleId::G05,
         "cannot confirm",
         limit,
