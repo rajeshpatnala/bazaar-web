@@ -79,25 +79,7 @@ fn shipped_calendar_is_real_dated_and_sourced() {
 #[test]
 fn every_listed_weekday_holiday_is_closed_and_neighbours_open() {
     let cal = MarketCalendar::from_config(&cfg());
-    let weekday = [
-        (1, 15),
-        (1, 26),
-        (3, 3),
-        (3, 26),
-        (3, 31),
-        (4, 3),
-        (4, 14),
-        (5, 1),
-        (5, 28),
-        (6, 26),
-        (9, 14),
-        (10, 2),
-        (10, 20),
-        (11, 10),
-        (11, 24),
-        (12, 25),
-    ];
-    for (m, day) in weekday {
+    for (m, day) in WEEKDAY_HOLIDAYS {
         let h = d(2026, m, day);
         assert!(!cal.is_trading_day(h, Segment::Equity).unwrap(), "{h}");
         assert_eq!(

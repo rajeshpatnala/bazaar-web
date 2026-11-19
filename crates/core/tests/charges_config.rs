@@ -1,5 +1,5 @@
 //! `charges.toml` loader: Decimal-from-string, strict keys, effective-dated lookup.
-//! All rates here are synthetic; the shipped `config/charges.toml` is a placeholder.
+//! All rates here are synthetic; the shipped file is covered by `real_charges.rs`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -14,7 +14,6 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/config");
-const SHIPPED: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config");
 
 fn d(y: i32, m: u32, day: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(y, m, day).unwrap()
@@ -57,16 +56,6 @@ fn fixture_loads_with_exact_decimals() {
         }
     );
     assert_eq!(cfg.gst.as_ref().unwrap().rate_pct, dec("10"));
-}
-
-#[test]
-fn shipped_placeholder_loads_and_has_no_rates() {
-    let cfg: ChargesConfig = load(Path::new(SHIPPED)).unwrap();
-    assert!(cfg.placeholder && cfg.rate_set.is_empty());
-    let err = cfg
-        .rate_set_for(Ex::Nse, Seg::EquityIntraday, Side::Buy, d(2026, 1, 1))
-        .unwrap_err();
-    assert_eq!(err.date, d(2026, 1, 1));
 }
 
 #[test]

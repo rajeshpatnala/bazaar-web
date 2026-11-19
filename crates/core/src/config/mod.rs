@@ -401,20 +401,20 @@ mod tests {
             default_max_age_days: 100_000,
             overrides: vec![],
         };
-        let w = cfg.stale_warnings(d(2026, 11, 19), &policy);
+        let w = cfg.stale_warnings(d(2026, 11, 20), &policy);
         let files: Vec<_> = w.iter().map(|x| x.file).collect();
         for f in [
-            "charges.toml",
             "strategies.toml",
             "data.toml",
             "compliance.toml",
             "events.toml",
-            "calendar.toml",
         ] {
             assert!(files.contains(&f), "{f}");
         }
         assert!(!files.contains(&"risk.toml") && !files.contains(&"watchlists.toml"));
-        assert!(cfg.charges.verified_on.is_none() && cfg.charges.placeholder);
+        // calendar.toml and charges.toml are real (verified 2026-11-20).
+        assert!(!files.contains(&"calendar.toml") && !files.contains(&"charges.toml"));
+        assert!(!cfg.charges.placeholder && cfg.charges.verified_on.is_some());
     }
 
     #[test]

@@ -36,8 +36,17 @@ Owner area: `config/{calendar,charges}.toml`, `crates/{data,store}`, `core/src/{
 - SEC-33-2 (F3): one huge quoted field can grow a csv buffer up to `max_bytes`; lower the default once the real master size is known.
 - F2 calendar 2027 data: owner supplies the NSE 2027 holiday list before 2027-01-01. Until then dates in 2027 are `OutOfRange` (fail closed, intended); `check-connections` reports `FAILED instruments calendar_out_of_range`.
 - Muhurat 2026-11-08 special session: not shipped (timings 14:20-15:50 and circular 172/2025 unverified); add the row once the owner confirms from the NSE circular.
+- SEC-64-2 (closed): the owner CONFIRMED on 2026-11-20 that nseindia.in is the official NSE host used as the calendar source.
+- F2 charges: equity_delivery rate sets and the DP charge ([dp]) are not shipped until the owner verifies them (the schema requires [dp] with delivery rate sets).
+
+## Not verified (charges)
+- Contract-note cross-check pending: no Zerodha contract note was supplied, so the computed charges are not yet compared with a real one.
+- DP charge Rs 15.34 per scrip (3.5 CDSL + 9.5 Zerodha + 2.34 GST), delivery minimum Rs 0.01 per contract note and physically settled F&O rates were seen only in an agent web fetch: kept out of config.
+- IPFT is not in the owner's paste: `ipft_pct = "0"` means not listed, not verified zero.
+- Statutory rates (STT/CTT, exchange, SEBI, stamp) are as Zerodha lists them, not checked against NSE/SEBI circulars. effective_from 2026-11-20 is the verified date (the page gives none); `max_age_days = 90` is a default, not from the source.
 
 ## History
 - Slice 3: instrument master parser (`bazaar_data::instruments`), bounded, dedupes, counts rejects.
 - Slice 5: `bazaar-cli import-instruments --file` and `check-connections` (bounded read, 0700 on a newly created data dir only, freshness vs calendar; placeholder calendar never fresh). Acceptance criterion 7 (TS-21-1..4, TS-21-6, CR-21-3) was closed by PR 32 (slice 1).
 - Slice 6 of 7, calendar data only (PR 64): real `config/calendar.toml`, 2026 only (`covered_years = [2026]`, verified_on 2026-11-20), from the owner-pasted NSE holiday page (`docs/owner-input/F2-calendar.md`). Equity pre-open 09:00-09:15 and normal 09:15-15:30 for cash_non_fno/cash_fno. Assumption to confirm: holidays also apply to `equity_derivatives`. Gaps: no derivatives/currency/commodity session windows and no closing-auction rows (not in the source), so `session_at` returns Closed for equity_derivatives on trading days. Deviation: the schema has no per-row `source` on `[[holiday]]` rows; they are covered by the top-level `source`. Charges (slice 7) and other criteria are other slices.
+- Slice 7 of 7, charges data only: real `config/charges.toml` (Zerodha page pasted 2026-11-20; NSE and BSE, intraday, futures and options, buy and sell; GST 18, option exercise STT 0.15). Pinned by `crates/core/tests/real_charges.rs`.
