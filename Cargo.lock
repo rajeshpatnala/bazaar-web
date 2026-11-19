@@ -316,6 +316,14 @@ version = "0.1.0"
 [[package]]
 name = "bazaar-regime"
 version = "0.1.0"
+dependencies = [
+ "bazaar-core",
+ "chrono",
+ "chrono-tz",
+ "serde",
+ "thiserror",
+ "toml",
+]
 
 [[package]]
 name = "bazaar-risk"
