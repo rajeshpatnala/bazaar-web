@@ -20,8 +20,10 @@
     )
 )]
 
+mod classify;
 mod params;
 mod types;
 
+pub use classify::{ClassifyError, Extras, Series, classify};
 pub use params::{MarketVolSource, ParamsError, RegimeParams};
 pub use types::{Fact, RegimeState, Trend, Tri, VolState};

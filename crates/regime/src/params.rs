@@ -145,6 +145,15 @@ impl RegimeParams {
     }
 }
 
+/// Params from the shipped `config/strategies.toml` (the only source of values), for tests.
+#[cfg(test)]
+pub(crate) fn shipped_params() -> RegimeParams {
+    use bazaar_core::config::load;
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config");
+    let c: StrategiesConfig = load(&dir).expect("strategies.toml loads");
+    RegimeParams::from_config(&c).expect("params")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
