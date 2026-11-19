@@ -10,7 +10,7 @@ use bazaar_core::candle::{Candle, Interval};
 use bazaar_core::config::{CalendarConfig, load};
 use bazaar_core::segment::{InstrumentKind, Segment};
 use bazaar_data::bars::{BarBuilder, BarError, BarStats, MAX_INPUT_BARS, aggregate};
-use chrono::{DateTime, Duration, Timelike};
+use chrono::{DateTime, Duration, TimeZone, Timelike};
 use chrono_tz::{Asia::Kolkata, Tz};
 use rust_decimal::Decimal;
 
@@ -259,4 +259,179 @@ fn rejects_bad_target_and_oversized_input() {
         aggregate(&cal, SEG, KIND, Interval::Min5, &big).err(),
         Some(BarError::TooManyBars(MAX_INPUT_BARS + 1))
     );
+}
+
+fn real_cal() -> MarketCalendar {
+    let cfg: CalendarConfig = load(Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/config_real_hours"
+    )))
+    .unwrap();
+    MarketCalendar::from_config(&cfg)
+}
+
+/// One minute bar per minute of 09:15-15:30 on 2026-03-02 (375 minutes). Minute k (0-based)
+/// closes at 09:16 + k: open 100+k, high 200+k, low 50+k, close 100+k+0.5, volume k+1.
+fn real_session() -> Vec<Candle> {
+    let first = Kolkata.with_ymd_and_hms(2026, 3, 2, 9, 16, 0).unwrap();
+    (0..375i64)
+        .map(|k| {
+            let o = Decimal::from(100 + k);
+            Candle::new(
+                first + Duration::minutes(k),
+                Interval::Min1,
+                [o, Decimal::from(200 + k), Decimal::from(50 + k), o + d("0.5")],
+                u64::try_from(k + 1).unwrap(),
+                false,
+            )
+            .unwrap()
+        })
+        .collect()
+}
+
+fn real_run(target: Interval, input: &[Candle]) -> (Vec<Candle>, BarStats) {
+    aggregate(&real_cal(), SEG, KIND, target, input).unwrap()
+}
+
+#[test]
+fn short_final_bar_min10_on_real_hours() {
+    let (bars, s) = real_run(Interval::Min10, &real_session());
+    // 37 full bars plus a 5-minute bar 15:25-15:30.
+    assert_eq!(bars.len(), 38);
+    let last = bars.last().unwrap();
+    assert_eq!(
+        last.close_time(),
+        Kolkata.with_ymd_and_hms(2026, 3, 2, 15, 30, 0).unwrap()
+    );
+    // Minutes k = 370..=374: open 470, high 574 (200+374), low 420 (50+370), close 474.5,
+    // volume 371+372+373+374+375 = 1865.
+    assert_eq!(
+        [last.open(), last.high(), last.low(), last.close()],
+        [d("470"), d("574"), d("420"), d("474.5")]
+    );
+    assert_eq!(last.volume(), 1865);
+    assert_eq!(s.incomplete_buckets, 0);
+    assert_eq!(s.gap_minutes, 0);
+    assert_eq!(s.accepted, 375);
+}
+
+#[test]
+fn short_final_bar_min60_on_real_hours() {
+    let (bars, s) = real_run(Interval::Min60, &real_session());
+    // 6 full hours 09:15-15:15 plus 15:15-15:30.
+    assert_eq!(bars.len(), 7);
+    let last = bars.last().unwrap();
+    assert_eq!(
+        last.close_time(),
+        Kolkata.with_ymd_and_hms(2026, 3, 2, 15, 30, 0).unwrap()
+    );
+    // Minutes k = 360..=374: open 460, high 574, low 410, close 474.5, volume sum(361..=375).
+    assert_eq!(
+        [last.open(), last.high(), last.low(), last.close()],
+        [d("460"), d("574"), d("410"), d("474.5")]
+    );
+    assert_eq!(last.volume(), (361..=375).sum::<u64>());
+    assert_eq!(s.incomplete_buckets, 0);
+    assert_eq!(s.emitted, 7);
+}
+
+#[test]
+fn day_bar_on_real_hours_ends_at_session_end() {
+    let (bars, s) = real_run(Interval::Day, &real_session());
+    assert_eq!(bars.len(), 1);
+    let b = &bars[0];
+    assert_eq!(
+        b.close_time(),
+        Kolkata.with_ymd_and_hms(2026, 3, 2, 15, 30, 0).unwrap()
+    );
+    assert_eq!(
+        [b.open(), b.high(), b.low(), b.close()],
+        [d("100"), d("574"), d("50"), d("474.5")]
+    );
+    assert_eq!(b.volume(), (1..=375).sum::<u64>());
+    assert_eq!(s.incomplete_buckets, 0);
+}
+
+#[test]
+fn year_outside_calendar_counts_calendar_errors() {
+    let r = rows();
+    let mut late = r[0];
+    late.0 += Duration::days(365 * 2); // 2028: not in covered_years
+    let (bars, s) = run(Interval::Min5, &[mk(&late, Interval::Min1)]);
+    assert!(bars.is_empty());
+    assert_eq!(s.calendar_errors, 1);
+    assert_eq!(s.out_of_session, 0);
+}
+
+#[test]
+fn special_session_minutes_are_not_aggregated() {
+    let r = rows();
+    let mut muhurat = r[0];
+    muhurat.0 = Kolkata.with_ymd_and_hms(2026, 11, 7, 18, 1, 0).unwrap();
+    let mut input = candles(&r);
+    input.push(mk(&muhurat, Interval::Min1));
+    let (bars, s) = run(Interval::Min5, &input);
+    assert_eq!(bars.len(), 48);
+    assert_eq!(s.out_of_session, 1);
+    assert_eq!(s.accepted, 240);
+}
+
+#[test]
+fn mixed_adjusted_bucket_is_dropped() {
+    let r = rows();
+    let mut input = candles(&r);
+    input[2] = Candle::new(r[2].0, Interval::Min1, r[2].1, r[2].2, true).unwrap();
+    let (bars, s) = run(Interval::Min5, &input);
+    assert_eq!(bars.len(), 47);
+    assert_eq!(s.mixed_adjusted_buckets, 1);
+    // A bucket wholly adjusted keeps its flag.
+    let all: Vec<Candle> = r[..5]
+        .iter()
+        .map(|x| Candle::new(x.0, Interval::Min1, x.1, x.2, true).unwrap())
+        .collect();
+    let (bars, _) = run(Interval::Min5, &all);
+    assert!(bars[0].adjusted());
+}
+
+#[test]
+fn min_timestamp_does_not_panic() {
+    let r = rows();
+    let c = Candle::new(
+        DateTime::<chrono::Utc>::MIN_UTC.with_timezone(&Kolkata),
+        Interval::Min1,
+        r[0].1,
+        r[0].2,
+        false,
+    );
+    if let Ok(c) = c {
+        let (bars, s) = run(Interval::Min5, &[c]);
+        assert!(bars.is_empty());
+        assert_eq!(s.accepted, 0);
+    }
+}
+
+#[test]
+fn rejected_minutes_cannot_force_repeated_probes() {
+    // Alternating out-of-order dates: the second and later are out of order, not re-probed.
+    let r = rows();
+    let day2 = (r[0].0 + Duration::days(1), r[0].1, r[0].2);
+    let mut input = Vec::new();
+    for _ in 0..2000 {
+        input.push(mk(&day2, Interval::Min1));
+        input.push(mk(&r[0], Interval::Min1));
+    }
+    let (_, s) = run(Interval::Min5, &input);
+    assert_eq!(s.accepted, 1);
+    assert_eq!(s.out_of_order, 3999);
+}
+
+#[test]
+fn prefix_of_input_gives_prefix_of_output() {
+    let input = candles(&rows());
+    let (full, _) = run(Interval::Min15, &input);
+    for cut in (0..=input.len()).step_by(7) {
+        let (part, _) = run(Interval::Min15, &input[..cut]);
+        assert!(part.len() <= full.len());
+        assert_eq!(part[..], full[..part.len()]);
+    }
 }

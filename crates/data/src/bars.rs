@@ -4,6 +4,11 @@
 //! A bar is emitted only when its last minute has arrived, so nothing looks ahead. Malformed,
 //! duplicate, out-of-order or out-of-session minutes are counted and skipped, never repaired; a
 //! bucket with a missing minute is dropped and counted, never filled.
+//!
+//! Only the Normal session is aggregated: special sessions (muhurat, mock) are not, and their
+//! minutes count as `out_of_session`. A bucket still forming when the input ends is neither
+//! emitted nor counted (a trailing partial bucket is indistinguishable from one still arriving).
+//! A bucket that mixes adjusted and unadjusted minutes is dropped and counted.
 
 use bazaar_core::calendar::{CalendarError, MarketCalendar, Session};
 use bazaar_core::candle::{Candle, Interval};
@@ -38,8 +43,13 @@ pub struct BarStats {
     pub malformed: u64,
     /// Close time not after the previous accepted one (duplicate or out of order).
     pub out_of_order: u64,
-    /// Outside the normal session, on a non-trading day, or the calendar had no answer.
+    /// Outside the normal session or on a non-trading day (special sessions included).
     pub out_of_session: u64,
+    /// Minutes on a date the calendar could not answer for (for example a year missing from
+    /// `calendar.toml`); a stale calendar shows up here, not as ordinary overnight data.
+    pub calendar_errors: u64,
+    /// Buckets dropped because adjusted and unadjusted minutes were mixed.
+    pub mixed_adjusted_buckets: u64,
     /// Buckets dropped because a minute was missing.
     pub incomplete_buckets: u64,
     /// Minutes missing from dropped buckets (counted when the next bucket starts).
@@ -62,6 +72,8 @@ struct Bucket {
     count: u64,
     ohlc: [Decimal; 4],
     volume: Option<u64>,
+    adjusted: bool,
+    mixed: bool,
 }
 
 /// Streaming 1-minute to higher-interval builder for one instrument.
@@ -73,8 +85,8 @@ pub struct BarBuilder<'a> {
     target: Interval,
     stats: BarStats,
     cur: Option<Bucket>,
-    last_close: Option<DateTime<Utc>>,
-    window: Option<(NaiveDate, Option<Window>)>,
+    last_seen: Option<DateTime<Utc>>,
+    window: Option<(NaiveDate, Result<Option<Window>, CalendarError>)>,
 }
 
 impl<'a> BarBuilder<'a> {
@@ -98,7 +110,7 @@ impl<'a> BarBuilder<'a> {
             target,
             stats: BarStats::default(),
             cur: None,
-            last_close: None,
+            last_seen: None,
             window: None,
         })
     }
@@ -128,21 +140,22 @@ impl<'a> BarBuilder<'a> {
             };
             if self.cal.session_at(t, self.seg, self.kind)? == Session::Normal {
                 open.get_or_insert(t);
-                end = Some(t + Duration::minutes(1));
+                end = t.checked_add_signed(Duration::minutes(1));
             }
         }
         Ok(open.zip(end).map(|(open, end)| Window { open, end }))
     }
 
-    fn window_for(&mut self, date: NaiveDate) -> Option<Window> {
-        if let Some((d, w)) = self.window
-            && d == date
+    /// Window of a date, probed once per date: input is strictly increasing (see `push`), so one
+    /// cached date is enough and the 1440-minute probe runs at most once per distinct date.
+    fn window_for(&mut self, date: NaiveDate) -> Result<Option<Window>, CalendarError> {
+        if let Some((d, w)) = &self.window
+            && *d == date
         {
-            return w;
+            return w.clone();
         }
-        // A calendar error (for example a year outside calendar.toml) means "no session".
-        let w = self.probe(date).unwrap_or(None);
-        self.window = Some((date, w));
+        let w = self.probe(date);
+        self.window = Some((date, w.clone()));
         w
     }
 
@@ -160,20 +173,29 @@ impl<'a> BarBuilder<'a> {
             self.stats.malformed += 1;
             return None;
         }
-        if self.last_close.is_some_and(|l| close <= l) {
+        if self.last_seen.is_some_and(|l| close <= l) {
             self.stats.out_of_order += 1;
             return None;
         }
-        let start = close - Duration::minutes(1);
+        // Every well-formed minute moves the order mark, accepted or not, so rejected input cannot
+        // make the window probe repeat.
+        self.last_seen = Some(close);
+        let Some(start) = close.checked_sub_signed(Duration::minutes(1)) else {
+            self.stats.malformed += 1;
+            return None;
+        };
         let date = start.with_timezone(&Kolkata).date_naive();
-        let Some(w) = self
-            .window_for(date)
-            .filter(|w| w.open <= start && close <= w.end)
-        else {
+        let w = match self.window_for(date) {
+            Ok(w) => w.filter(|w| w.open <= start && close <= w.end),
+            Err(_) => {
+                self.stats.calendar_errors += 1;
+                return None;
+            }
+        };
+        let Some(w) = w else {
             self.stats.out_of_session += 1;
             return None;
         };
-        self.last_close = Some(close);
         let (id, b_start, b_end) = match self.target.minutes() {
             Some(n) => {
                 let n = i64::from(n);
@@ -198,7 +220,10 @@ impl<'a> BarBuilder<'a> {
             count: 0,
             ohlc: [c.open(), c.high(), c.low(), c.close()],
             volume: Some(0),
+            adjusted: c.adjusted(),
+            mixed: false,
         });
+        b.mixed |= b.adjusted != c.adjusted();
         if b.count > 0 {
             b.ohlc[1] = b.ohlc[1].max(c.high());
             b.ohlc[2] = b.ohlc[2].min(c.low());
@@ -210,12 +235,16 @@ impl<'a> BarBuilder<'a> {
             return None;
         }
         let b = self.cur.take()?;
+        if b.mixed {
+            self.stats.mixed_adjusted_buckets += 1;
+            return None;
+        }
         let Some(volume) = b.volume else {
             self.stats.overflow_buckets += 1;
             return None;
         };
         let end = b.end.with_timezone(&Kolkata);
-        if let Ok(bar) = Candle::new(end, self.target, b.ohlc, volume, c.adjusted()) {
+        if let Ok(bar) = Candle::new(end, self.target, b.ohlc, volume, b.adjusted) {
             self.stats.emitted += 1;
             Some(bar)
         } else {
