@@ -92,3 +92,7 @@ Test fixture `fixtures/config/risk.toml` gained the same sections with synthetic
 - Owner to confirm (CR-56-3): G02 adds the new order's charges allowance to the held risk of a same-side add.
 - Symbols must reach the gate in canonical instrument-master form (RISK-56-5); gate test in slice 11.
 - Deferred: slice 11/11b pass the charges buffer for the FINAL qty into G02 with a cost-grows-with-qty test (RISK-56-3, QR-56-5; below-floor is raised to the floor, `size` rejects it); slice 12 replays boundaries against shipped `config/risk.toml` (RISK-56-4); F10 validates marks at snapshot build.
+
+## Slice 5b (loss limits: G03, G19)
+- `rules/loss_limits.rs`: `g03(ctx, cls, snap)`, `g19(ctx, cls, snap)`. P&L from the snapshot (net of charges, realised + unrealised); base `sizing_equity`; a loss AT the limit blocks (owner to confirm); entry-only, exits and stop moves pass; Hard rows. Unknown P&L, equity, `as_of` or week start returns `RuleResult::input_missing`. No price input, so no reference price.
+- New snapshot field `week_start: Tri<NaiveDate>`: G19 requires it to be the IST Monday of `as_of`, else a stale week figure rejects (Monday reset). F10 must set it from the journal with the weekly P&L.
