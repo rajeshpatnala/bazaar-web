@@ -63,7 +63,7 @@ labels wildly. A wide `Mixed` share is expected and is accepted: fewer signals i
 ## 5. Strategy fit (how F8 and the scanner use it)
 Each strategy declares `regime_fit` as a list of (trend, vol) cells plus the market conditions it needs. Helper `RegimeFit::allows(&market, &stock)` lives in
 `regime`. Hard suppress (no signal): any `Unknown`, `Mixed`, market Breakdown. Soft penalty (scanner score) for allowed-but-weaker cells such as Up x High.
-The Why panel always names the regime and whether it fits.
+The Why panel always names the regime and whether it fits. **Closed bars are the caller's duty:** `classify` checks daily, adjusted, strictly ordered candles but cannot see whether the last bar is still forming, so F8 (scanner) and F9 (backtest) must pass only closed bars (acceptance for both: a test that a forming bar is never in the series passed to `classify`).
 
 Labels (plain English, templated, snapshot-tested):
 | Cell | Label |
@@ -88,6 +88,7 @@ Labels (plain English, templated, snapshot-tested):
 - [ ] Hysteresis test: noise series flips at most N times per 100 bars; a single contrary close never flips a label.
 - [ ] Warm-up: fewer than `min_history_bars` bars gives `Unknown` + reason; zero NaN/inf; flat and zero-volume series handled.
 - [ ] Missing VIX/breadth gives `None` + reason, never a default value; `as_of` equals the last closed bar's close time; no wall-clock reads.
+- [ ] Callers (F8, F9) pass closed bars only, with a test.
 - [ ] Deterministic; thresholds only from config; `RegimeFit` unit tests for each strategy cell table in F8.
 - [ ] Later (F9, not a tuning loop): on real data, report forward-return and drawdown by regime cell as a sanity picture.
 
