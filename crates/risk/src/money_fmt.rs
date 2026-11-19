@@ -16,7 +16,7 @@ pub fn rupees(amount: Decimal) -> String {
     };
     let mut grouped: Vec<char> = Vec::new();
     for (i, c) in int_part.chars().rev().enumerate() {
-        if i == 3 || (i > 3 && (i - 3) % 2 == 0) {
+        if i == 3 || (i > 3 && i.saturating_sub(3).is_multiple_of(2)) {
             grouped.push(',');
         }
         grouped.push(c);
