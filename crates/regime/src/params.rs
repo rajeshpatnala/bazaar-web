@@ -129,18 +129,15 @@ impl RegimeParams {
     /// Bars needed before any label. The indicators warm up side by side over the same bars, so
     /// the need is a max, not a sum: EMA slow (`ema_slow`), ADX (`2 * adx_period`), the EMA-mid
     /// slope (`ema_mid + slope_bars`) and a full ATR% percentile window
-    /// (`atr_period + vol_lookback_bars - 1`); then `confirm_bars - 1` more closes to confirm.
-    /// About 265 at the shipped config.
+    /// (`atr_period + vol_lookback_bars`: the first ATR needs `atr_period + 1` bars, then
+    /// `vol_lookback_bars - 1` more); then `confirm_bars - 1` more closes to confirm.
+    /// 266 at the shipped config; a classification is possible at exactly this many bars.
     pub fn min_history_bars(&self) -> usize {
         let warm = self
             .ema_slow
             .max(self.adx_period.saturating_mul(2))
             .max(self.ema_mid.saturating_add(self.slope_bars))
-            .max(
-                self.atr_period
-                    .saturating_add(self.vol_lookback_bars)
-                    .saturating_sub(1),
-            );
+            .max(self.atr_period.saturating_add(self.vol_lookback_bars));
         warm.saturating_add(self.confirm_bars.saturating_sub(1))
     }
 }
@@ -194,7 +191,7 @@ mod tests {
         let p = RegimeParams::from_config(&c).expect("params");
         assert_eq!(p.ema_slow, 200);
         assert_eq!(p.atr_period, 14);
-        assert_eq!(p.min_history_bars(), 265);
+        assert_eq!(p.min_history_bars(), 266);
     }
 
     #[test]
@@ -266,8 +263,8 @@ mod tests {
     #[test]
     fn min_history_is_a_max_not_a_sum() {
         let p = shipped();
-        // 14 + 250 - 1 = 263 (ATR% window) beats 200 (EMA), 28 (ADX), 60 (slope); plus 2 confirm closes.
-        assert_eq!(p.min_history_bars(), 263 + 2);
+        // 14 + 250 = 264 (ATR% window) beats 200 (EMA), 28 (ADX), 60 (slope); plus 2 confirm closes.
+        assert_eq!(p.min_history_bars(), 264 + 2);
         let q = RegimeParams { ema_slow: 300, ..p };
         assert_eq!(q.min_history_bars(), 300 + 2);
     }

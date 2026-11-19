@@ -30,24 +30,24 @@ pub enum Tri {
     Unknown,
 }
 
-impl Fact {
-    /// Build a Why-panel line.
-    #[must_use]
-    pub fn new(label: &str, value: impl Into<String>, meaning: &str) -> Self {
-        Self {
-            label: label.to_owned(),
-            value: value.into(),
-            meaning: meaning.to_owned(),
-        }
-    }
-}
-
 /// One plain-English line for the Why panel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fact {
     pub label: String,
     pub value: String,
     pub meaning: String,
+}
+
+impl Fact {
+    /// Build a Why-panel line.
+    #[must_use]
+    pub fn new(label: &str, value: impl Into<String>, meaning: impl Into<String>) -> Self {
+        Self {
+            label: label.to_owned(),
+            value: value.into(),
+            meaning: meaning.into(),
+        }
+    }
 }
 
 /// Result of classifying one series at its last closed bar.
