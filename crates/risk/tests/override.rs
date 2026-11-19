@@ -11,11 +11,12 @@ use bazaar_core::mode::ExecutionMode;
 use bazaar_core::money::Qty;
 use bazaar_risk::config::{Baseline, ConfigHash, GateConfig, RuleCtx};
 use bazaar_risk::override_::{
-    AcceptedOverride, IntentDigest, OverrideError, OverrideRequest, ReasonType, evaluate,
+    AcceptedOverride, IntentDigest, OverrideChallenge, OverrideError, OverrideRequest, ReasonType,
+    evaluate,
 };
 use bazaar_risk::snapshot::PortfolioSnapshot;
 use bazaar_risk::types::{OrderIntent, Side, Tri};
-use bazaar_risk::verdict::{GateVerdict, RuleId, RuleResult};
+use bazaar_risk::verdict::{GateVerdict, OverrideLevel, RuleId, RuleResult};
 use chrono::{DateTime, Duration, TimeZone};
 use chrono_tz::{Asia::Kolkata, Tz};
 use rust_decimal::Decimal;
@@ -57,18 +58,31 @@ fn ctx(mode: ExecutionMode) -> RuleCtx {
     }
 }
 
-fn verdict(c: &RuleCtx, failing: &[RuleId]) -> GateVerdict {
+fn verdict_for(
+    hash: &ConfigHash,
+    i: &OrderIntent,
+    failing: &[RuleId],
+    missing: &[RuleId],
+) -> GateVerdict {
     let results: Vec<RuleResult> = RuleId::EVALUATION_ORDER
         .iter()
         .map(|&r| {
-            if failing.contains(&r) {
+            if missing.contains(&r) {
+                RuleResult::input_missing(r, "o", "l", "Input missing.")
+            } else if failing.contains(&r) {
                 RuleResult::fail(r, "o", "l", "Too much.")
             } else {
                 RuleResult::pass(r, "o", "l")
             }
         })
         .collect();
-    GateVerdict::new(c.config_hash.clone(), &results).unwrap()
+    GateVerdict::new(hash.clone(), &results)
+        .unwrap()
+        .bound_to(IntentDigest::of(i))
+}
+
+fn verdict(c: &RuleCtx, failing: &[RuleId]) -> GateVerdict {
+    verdict_for(&c.config_hash, &intent(), failing, &[])
 }
 
 fn snap(day: u32, week: u32) -> PortfolioSnapshot {
@@ -78,14 +92,20 @@ fn snap(day: u32, week: u32) -> PortfolioSnapshot {
     s
 }
 
-fn req(c: &RuleCtx, ids: &[RuleId]) -> OverrideRequest {
+fn delay(c: &RuleCtx) -> Duration {
+    Duration::seconds(i64::from(c.limits.override_confirm_delay_secs))
+}
+
+/// Open a challenge `waited` before `t0()`.
+fn challenge(v: &GateVerdict, waited: Duration) -> OverrideChallenge {
+    OverrideChallenge::open(&At(t0() - waited), &intent(), v).unwrap()
+}
+
+fn request(ch: OverrideChallenge) -> OverrideRequest {
     OverrideRequest {
-        rule_ids: ids.to_vec(),
+        challenge: ch,
         reason: ReasonType::NewInformation,
         note: NOTE.into(),
-        intent_digest: IntentDigest::of(&intent()),
-        config_hash: c.config_hash.clone(),
-        opened_at: t0() - Duration::seconds(i64::from(c.limits.override_confirm_delay_secs)),
     }
 }
 
@@ -97,7 +117,7 @@ fn run(
 ) -> Result<AcceptedOverride, OverrideError> {
     let c = ctx(mode);
     let v = verdict(&c, failing);
-    let mut r = req(&c, failing);
+    let mut r = request(challenge(&v, delay(&c)));
     tweak(&mut r);
     evaluate(r, &intent(), &v, s, &c, &At(t0()))
 }
@@ -117,48 +137,74 @@ fn soft_row_accepts_in_paper_and_semi_auto_with_binding() {
 }
 
 #[test]
-fn several_soft_failures_need_all_named() {
-    let both = [RuleId::G04a, RuleId::G14];
-    assert!(run(ExecutionMode::Paper, &both, |_| {}, &snap(0, 0)).is_ok());
-    let r = run(
-        ExecutionMode::Paper,
-        &both,
-        |r| r.rule_ids = vec![RuleId::G14],
-        &snap(0, 0),
-    );
-    assert_eq!(r.unwrap_err(), OverrideError::RuleMismatch);
-}
-
-#[test]
-fn paper_row_only_in_paper_mode() {
-    assert!(run(ExecutionMode::Paper, &[RuleId::G01], |_| {}, &snap(0, 0)).is_ok());
-    assert_eq!(
-        run(ExecutionMode::SemiAuto, &[RuleId::G01], |_| {}, &snap(0, 0)).unwrap_err(),
-        OverrideError::PaperOnly(RuleId::G01)
-    );
-    assert_eq!(
-        run(ExecutionMode::Auto, &[RuleId::G01], |_| {}, &snap(0, 0)).unwrap_err(),
-        OverrideError::AutoMode
-    );
-}
-
-#[test]
-fn any_hard_or_no_failure_rejects_the_whole_override() {
-    for hard in [RuleId::G03, RuleId::G09, RuleId::G08, RuleId::X02] {
-        let e = run(
-            ExecutionMode::Paper,
-            &[RuleId::G14, hard],
-            |r| r.rule_ids = vec![RuleId::G14],
-            &snap(0, 0),
-        )
-        .unwrap_err();
-        assert_eq!(e, OverrideError::NotOverridable(hard));
+fn level_table_drives_acceptance_for_every_rule() {
+    for rule in RuleId::EVALUATION_ORDER {
+        for failing in [vec![rule], vec![rule, RuleId::G14]] {
+            if rule == RuleId::G14 && failing.len() == 2 {
+                continue;
+            }
+            let ok = |mode| run(mode, &failing, |_| {}, &snap(0, 0));
+            match rule.override_level() {
+                OverrideLevel::HardCeiling | OverrideLevel::No => {
+                    for mode in [ExecutionMode::Paper, ExecutionMode::SemiAuto] {
+                        let e = ok(mode).unwrap_err();
+                        assert_eq!(e, OverrideError::NotOverridable(rule), "{rule}");
+                    }
+                }
+                OverrideLevel::Soft => assert!(ok(ExecutionMode::SemiAuto).is_ok(), "{rule}"),
+                OverrideLevel::Paper => {
+                    assert!(ok(ExecutionMode::Paper).is_ok(), "{rule}");
+                    assert_eq!(
+                        ok(ExecutionMode::SemiAuto).unwrap_err(),
+                        OverrideError::PaperOnly(rule)
+                    );
+                }
+            }
+        }
     }
+}
+
+#[test]
+fn missing_input_is_never_overridable_even_on_soft_rows() {
+    for rule in [RuleId::G05, RuleId::G07, RuleId::G04a, RuleId::G14] {
+        let c = ctx(ExecutionMode::Paper);
+        let v = verdict_for(&c.config_hash, &intent(), &[], &[rule]);
+        let r = request(challenge(&v, delay(&c)));
+        let e = evaluate(r, &intent(), &v, &snap(0, 0), &c, &At(t0())).unwrap_err();
+        assert_eq!(e, OverrideError::InputMissing(rule));
+    }
+    // A real breach on the same rule is accepted.
+    assert!(run(ExecutionMode::Paper, &[RuleId::G05], |_| {}, &snap(0, 0)).is_ok());
+}
+
+#[test]
+fn paper_experiment_reason_only_in_paper_mode() {
+    let set = |r: &mut OverrideRequest| r.reason = ReasonType::PaperExperiment;
+    assert!(run(ExecutionMode::Paper, &[RuleId::G14], set, &snap(0, 0)).is_ok());
+    let e = run(ExecutionMode::SemiAuto, &[RuleId::G14], set, &snap(0, 0)).unwrap_err();
+    assert_eq!(e, OverrideError::ReasonNotAllowed);
+    let e = run(ExecutionMode::Auto, &[RuleId::G14], set, &snap(0, 0)).unwrap_err();
+    assert_eq!(e, OverrideError::AutoMode);
+}
+
+#[test]
+fn several_soft_failures_must_match_the_challenge() {
+    let both = [RuleId::G04a, RuleId::G14];
+    let a = run(ExecutionMode::Paper, &both, |_| {}, &snap(0, 0)).unwrap();
+    assert_eq!(a.rule_ids(), &[RuleId::G04a, RuleId::G14]);
+    // Challenge opened for one rule, evaluated against a verdict with two.
+    let c = ctx(ExecutionMode::Paper);
+    let one = challenge(&verdict(&c, &[RuleId::G14]), delay(&c));
+    let v2 = verdict(&c, &both);
+    let e = evaluate(request(one), &intent(), &v2, &snap(0, 0), &c, &At(t0()));
+    assert_eq!(e.unwrap_err(), OverrideError::RuleMismatch);
 }
 
 #[test]
 fn auto_mode_never_accepts() {
     let e = run(ExecutionMode::Auto, &[RuleId::G14], |_| {}, &snap(0, 0)).unwrap_err();
+    assert_eq!(e, OverrideError::AutoMode);
+    let e = run(ExecutionMode::Auto, &[RuleId::G01], |_| {}, &snap(0, 0)).unwrap_err();
     assert_eq!(e, OverrideError::AutoMode);
 }
 
@@ -169,41 +215,54 @@ fn passing_verdict_has_nothing_to_override() {
 }
 
 #[test]
-fn extra_or_duplicate_rule_ids_are_refused() {
-    let e = run(
-        ExecutionMode::Paper,
-        &[RuleId::G14],
-        |r| r.rule_ids.push(RuleId::G05),
-        &snap(0, 0),
-    );
-    assert_eq!(e.unwrap_err(), OverrideError::RuleMismatch);
-    let e = run(
-        ExecutionMode::Paper,
-        &[RuleId::G14],
-        |r| r.rule_ids.push(RuleId::G14),
-        &snap(0, 0),
-    );
-    assert_eq!(e.unwrap_err(), OverrideError::RuleMismatch);
+fn verdict_must_be_bound_to_the_intent() {
+    let c = ctx(ExecutionMode::Paper);
+    let mut other = intent();
+    other.qty = Qty(400);
+    // A G14-only verdict computed for a small order, reused for a big one.
+    let v_small = verdict(&c, &[RuleId::G14]);
+    let ch = challenge(&v_small, delay(&c));
+    let e = evaluate(request(ch), &other, &v_small, &snap(0, 0), &c, &At(t0()));
+    assert_eq!(e.unwrap_err(), OverrideError::IntentMismatch);
+    // Opening a challenge for an intent the verdict was not computed for is refused too.
+    let e = OverrideChallenge::open(&At(t0()), &other, &v_small);
+    assert_eq!(e.unwrap_err(), OverrideError::IntentMismatch);
+    // An unbound verdict is refused.
+    let results: Vec<RuleResult> = RuleId::EVALUATION_ORDER
+        .iter()
+        .map(|&r| RuleResult::pass(r, "o", "l"))
+        .collect();
+    let unbound = GateVerdict::new(c.config_hash.clone(), &results).unwrap();
+    let e = OverrideChallenge::open(&At(t0()), &intent(), &unbound);
+    assert_eq!(e.unwrap_err(), OverrideError::IntentMismatch);
 }
 
 #[test]
-fn bound_to_intent_digest_and_config_hash() {
+fn bound_to_config_hash_of_verdict_and_ctx() {
+    let c = ctx(ExecutionMode::Paper);
+    let other = ConfigHash::of_text("other");
+    // Verdict, challenge and request all carry the other hash; ctx differs.
+    let v = verdict_for(&other, &intent(), &[RuleId::G14], &[]);
+    let r = request(challenge(&v, delay(&c)));
+    let e = evaluate(r, &intent(), &v, &snap(0, 0), &c, &At(t0()));
+    assert_eq!(e.unwrap_err(), OverrideError::ConfigMismatch);
+    // Challenge from a verdict under the right hash, evaluated against another-hash verdict.
+    let v_ok = verdict(&c, &[RuleId::G14]);
+    let r = request(challenge(&v_ok, delay(&c)));
+    let e = evaluate(r, &intent(), &v, &snap(0, 0), &c, &At(t0()));
+    assert_eq!(e.unwrap_err(), OverrideError::ConfigMismatch);
+}
+
+#[test]
+fn challenge_for_another_intent_is_refused_at_evaluate() {
+    let c = ctx(ExecutionMode::Paper);
     let mut other = intent();
     other.qty = Qty(11);
-    let e = run(
-        ExecutionMode::Paper,
-        &[RuleId::G14],
-        |r| r.intent_digest = IntentDigest::of(&other),
-        &snap(0, 0),
-    );
+    let v_other = verdict_for(&c.config_hash, &other, &[RuleId::G14], &[]);
+    let ch = OverrideChallenge::open(&At(t0() - delay(&c)), &other, &v_other).unwrap();
+    let v = verdict(&c, &[RuleId::G14]);
+    let e = evaluate(request(ch), &intent(), &v, &snap(0, 0), &c, &At(t0()));
     assert_eq!(e.unwrap_err(), OverrideError::IntentMismatch);
-    let e = run(
-        ExecutionMode::Paper,
-        &[RuleId::G14],
-        |r| r.config_hash = ConfigHash::of_text("other"),
-        &snap(0, 0),
-    );
-    assert_eq!(e.unwrap_err(), OverrideError::ConfigMismatch);
 }
 
 #[test]
@@ -228,15 +287,19 @@ fn digest_changes_with_every_field() {
 }
 
 #[test]
-fn note_needs_30_trimmed_characters_for_every_reason() {
+fn note_rules_apply_for_every_reason() {
+    let note = |n: String| move |r: &mut OverrideRequest| r.note = n;
     for reason in [ReasonType::Other, ReasonType::PlanChanged] {
+        let set = |n: String| {
+            move |r: &mut OverrideRequest| {
+                r.reason = reason;
+                r.note = n;
+            }
+        };
         let e = run(
             ExecutionMode::Paper,
             &[RuleId::G14],
-            |r| {
-                r.reason = reason;
-                r.note = format!("  {}  ", "x".repeat(29));
-            },
+            set(format!("  {}  ", "x".repeat(29))),
             &snap(0, 0),
         );
         assert_eq!(
@@ -244,13 +307,30 @@ fn note_needs_30_trimmed_characters_for_every_reason() {
             OverrideError::NoteTooShort { have: 29, need: 30 }
         );
     }
-    let ok = run(
-        ExecutionMode::Paper,
-        &[RuleId::G14],
-        |r| r.note = format!(" {} ", "x".repeat(30)),
-        &snap(0, 0),
+    let p = ExecutionMode::Paper;
+    // Thirty repeated letters are one word.
+    let e = run(p, &[RuleId::G14], note("x".repeat(30)), &snap(0, 0));
+    assert_eq!(
+        e.unwrap_err(),
+        OverrideError::NoteTooFewWords { have: 1, need: 5 }
     );
-    assert_eq!(ok.unwrap().note().len(), 30);
+    let four = "aaaaaaa bbbbbbb ccccccc ddddddd eeeee".replace(" eeeee", "");
+    let e = run(p, &[RuleId::G14], note(four), &snap(0, 0));
+    assert!(matches!(
+        e.unwrap_err(),
+        OverrideError::NoteTooFewWords { have: 4, .. }
+    ));
+    let long = format!("{} end", "word ".repeat(250));
+    let e = run(p, &[RuleId::G14], note(long), &snap(0, 0));
+    assert!(matches!(
+        e.unwrap_err(),
+        OverrideError::NoteTooLong { max: 1000, .. }
+    ));
+    let ctl = format!("{NOTE}\u{7}");
+    let e = run(p, &[RuleId::G14], note(ctl), &snap(0, 0));
+    assert_eq!(e.unwrap_err(), OverrideError::NoteControlChars);
+    let ok = run(p, &[RuleId::G14], note(format!(" {NOTE} ")), &snap(0, 0));
+    assert_eq!(ok.unwrap().note(), NOTE);
 }
 
 #[test]
@@ -280,36 +360,40 @@ fn unknown_counts_refuse() {
 }
 
 #[test]
-fn confirm_delay_runs_on_the_clock() {
+fn confirm_delay_runs_from_the_crate_stamped_clock_time() {
     let c = ctx(ExecutionMode::Paper);
-    let delay = i64::from(c.limits.override_confirm_delay_secs);
+    let d = delay(&c);
     let v = verdict(&c, &[RuleId::G14]);
-    let try_at = |waited: i64| {
-        let mut r = req(&c, &[RuleId::G14]);
-        r.opened_at = t0() - Duration::seconds(waited);
+    let try_after = |waited: Duration| {
+        let r = request(challenge(&v, waited));
         evaluate(r, &intent(), &v, &snap(0, 0), &c, &At(t0()))
     };
     assert_eq!(
-        try_at(delay - 1).unwrap_err(),
+        try_after(d - Duration::seconds(1)).unwrap_err(),
         OverrideError::TooSoon { wait_secs: 1 }
     );
-    assert!(try_at(delay).is_ok());
-    // Opened in the future: clock skew never shortens the wait (full delay applies).
+    assert!(try_after(d).is_ok());
+    // A challenge stamped in the future (clock skew) never shortens the wait.
     assert_eq!(
-        try_at(-5).unwrap_err(),
+        try_after(Duration::seconds(-5)).unwrap_err(),
         OverrideError::TooSoon {
-            wait_secs: u32::try_from(delay).unwrap()
+            wait_secs: u32::try_from(d.num_seconds()).unwrap()
         }
     );
 }
 
+/// Compiles only when `T` is not `Clone` (two blanket impls make the call ambiguous otherwise).
+trait AmbiguousIfClone<A> {
+    fn check() {}
+}
+impl<T> AmbiguousIfClone<()> for T {}
+impl<T: Clone> AmbiguousIfClone<u8> for T {}
+
 #[test]
-fn accepted_override_is_moved_not_copied() {
-    // `evaluate` takes the request by value and neither type is Clone, so a second use of
-    // the same request or accepted override does not compile.
-    let a = run(ExecutionMode::Paper, &[RuleId::G14], |_| {}, &snap(0, 0)).unwrap();
-    let moved = a;
-    assert_eq!(moved.rule_ids().len(), 1);
+fn single_use_types_are_not_clone() {
+    <OverrideRequest as AmbiguousIfClone<_>>::check();
+    <OverrideChallenge as AmbiguousIfClone<_>>::check();
+    <AcceptedOverride as AmbiguousIfClone<_>>::check();
 }
 
 #[test]
@@ -320,5 +404,10 @@ fn errors_read_in_plain_english() {
         OverrideError::TooSoon { wait_secs: 3 }
             .to_string()
             .contains("3 more seconds")
+    );
+    assert!(
+        OverrideError::InputMissing(RuleId::G07)
+            .to_string()
+            .contains("Fix the input")
     );
 }

@@ -1,6 +1,7 @@
 //! Rule ids, the single override-level table, rule results and the gate verdict.
 
 use crate::config::ConfigHash;
+use crate::override_::IntentDigest;
 
 /// Every rule the gate evaluates. G12 (liquidity) is not in F6 scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -146,6 +147,9 @@ pub struct RuleResult {
     observed: String,
     limit: String,
     message: String,
+    /// True when the rule failed because an input was missing or unknown, not because a limit
+    /// was breached. Such a failure can never be overridden.
+    input_missing: bool,
 }
 
 impl RuleResult {
@@ -157,6 +161,7 @@ impl RuleResult {
             rule,
             passed: true,
             message: format!("{observed} is within {limit} ({rule})"),
+            input_missing: false,
             observed,
             limit,
         }
@@ -176,7 +181,28 @@ impl RuleResult {
             observed: observed.into(),
             limit: limit.into(),
             message: format!("{} ({rule})", message.trim_end()),
+            input_missing: false,
         }
+    }
+
+    /// A failing result because an input is missing or unknown (fail closed). `message` says
+    /// what would make it pass. Never overridable, whatever the rule's override level.
+    #[must_use]
+    pub fn input_missing(
+        rule: RuleId,
+        observed: impl Into<String>,
+        limit: impl Into<String>,
+        message: &str,
+    ) -> Self {
+        let mut r = Self::fail(rule, observed, limit, message);
+        r.input_missing = true;
+        r
+    }
+
+    /// True when the failure is a missing or unknown input.
+    #[must_use]
+    pub const fn is_input_missing(&self) -> bool {
+        self.input_missing
     }
 
     /// The rule this result belongs to.
@@ -245,6 +271,7 @@ impl std::error::Error for VerdictError {}
 pub struct GateVerdict {
     config_hash: ConfigHash,
     results: Vec<RuleResult>,
+    intent_digest: Option<IntentDigest>,
 }
 
 impl GateVerdict {
@@ -266,7 +293,22 @@ impl GateVerdict {
         Ok(Self {
             config_hash,
             results: ordered,
+            intent_digest: None,
         })
+    }
+
+    /// Record which intent this verdict was computed for. The gate calls this; an override is
+    /// refused for a verdict that is not bound to the intent being overridden.
+    #[must_use]
+    pub fn bound_to(mut self, digest: IntentDigest) -> Self {
+        self.intent_digest = Some(digest);
+        self
+    }
+
+    /// The digest of the intent this verdict was computed for, if bound.
+    #[must_use]
+    pub const fn intent_digest(&self) -> Option<&IntentDigest> {
+        self.intent_digest.as_ref()
     }
 
     /// The hash of the config the rules ran under.

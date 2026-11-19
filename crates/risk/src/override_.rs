@@ -5,8 +5,8 @@
 
 use crate::config::{ConfigHash, RuleCtx};
 use crate::snapshot::PortfolioSnapshot;
-use crate::types::OrderIntent;
-use crate::verdict::{GateVerdict, OverrideLevel, RuleId};
+use crate::types::{OrderIntent, Side};
+use crate::verdict::{GateVerdict, OverrideLevel, RuleId, RuleResult};
 use bazaar_core::clock::Clock;
 use bazaar_core::mode::ExecutionMode;
 use chrono::DateTime;
@@ -17,6 +17,10 @@ use std::fmt::Write as _;
 
 /// Shortest accepted note, in characters (trimmed).
 pub const MIN_NOTE_CHARS: usize = 30;
+/// Fewest whitespace-separated words in a note (thirty repeated letters are not a reason).
+pub const MIN_NOTE_WORDS: usize = 5;
+/// Longest accepted note, in characters.
+pub const MAX_NOTE_CHARS: usize = 1000;
 
 /// SHA-256 of the intent's fields, lower-case hex. An override is bound to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,7 +34,11 @@ impl IntentDigest {
             |v: Option<Decimal>| v.map_or_else(|| "-".to_owned(), |d| d.normalize().to_string());
         let parts = [
             intent.symbol.clone(),
-            format!("{:?}", intent.side),
+            match intent.side {
+                Side::Buy => "BUY",
+                Side::Sell => "SELL",
+            }
+            .to_owned(),
             intent.qty.0.to_string(),
             intent.price.normalize().to_string(),
             opt(intent.stop),
@@ -67,17 +75,47 @@ pub enum ReasonType {
     Other,
 }
 
-/// A user's override request. Not `Clone` and consumed by [`evaluate`]: one request, one use.
-/// There is deliberately no field a caller could set to claim the order is already overridden.
+/// Opened by the crate when the confirm dialog is shown: it stamps `opened_at` from the injected
+/// `Clock` (never from the client) and captures the failed rule ids, the intent digest and the
+/// config hash of the verdict. Not `Clone`; consumed with the request.
+#[derive(Debug)]
+pub struct OverrideChallenge {
+    rule_ids: Vec<RuleId>,
+    intent_digest: IntentDigest,
+    config_hash: ConfigHash,
+    opened_at: DateTime<Tz>,
+}
+
+impl OverrideChallenge {
+    /// Open a challenge for `verdict`, which must be bound to `intent` (the gate binds it).
+    pub fn open(
+        clock: &dyn Clock,
+        intent: &OrderIntent,
+        verdict: &GateVerdict,
+    ) -> Result<Self, OverrideError> {
+        let digest = IntentDigest::of(intent);
+        if verdict.intent_digest() != Some(&digest) {
+            return Err(OverrideError::IntentMismatch);
+        }
+        let mut rule_ids: Vec<RuleId> = verdict.failures().map(RuleResult::rule).collect();
+        rule_ids.sort();
+        Ok(Self {
+            rule_ids,
+            intent_digest: digest,
+            config_hash: verdict.config_hash().clone(),
+            opened_at: clock.now_ist(),
+        })
+    }
+}
+
+/// A user's override request: the challenge plus the typed reason and note. Not `Clone` and
+/// consumed by [`evaluate`]: one request, one use. There is no field a caller could set to claim
+/// the order is already overridden, and no caller-set time.
 #[derive(Debug)]
 pub struct OverrideRequest {
-    pub rule_ids: Vec<RuleId>,
+    pub challenge: OverrideChallenge,
     pub reason: ReasonType,
     pub note: String,
-    pub intent_digest: IntentDigest,
-    pub config_hash: ConfigHash,
-    /// When the confirm dialog was shown; the delay runs from here.
-    pub opened_at: DateTime<Tz>,
 }
 
 /// Why an override was refused. No variant leaves a half-accepted override.
@@ -96,6 +134,19 @@ pub enum OverrideError {
         have: usize,
         need: usize,
     },
+    NoteTooLong {
+        have: usize,
+        max: usize,
+    },
+    NoteTooFewWords {
+        have: usize,
+        need: usize,
+    },
+    NoteControlChars,
+    /// The rule failed because an input is missing or unknown; fix the input, do not override.
+    InputMissing(RuleId),
+    /// `PaperExperiment` is valid only in paper mode.
+    ReasonNotAllowed,
     AutoMode,
     CountUnknown,
     DayCapReached {
@@ -136,6 +187,24 @@ impl std::fmt::Display for OverrideError {
                     "The note has {have} characters; at least {need} are needed."
                 )
             }
+            Self::NoteTooLong { have, max } => {
+                write!(
+                    f,
+                    "The note has {have} characters; at most {max} are allowed."
+                )
+            }
+            Self::NoteTooFewWords { have, need } => {
+                write!(f, "The note has {have} words; at least {need} are needed.")
+            }
+            Self::NoteControlChars => write!(f, "The note must not contain control characters."),
+            Self::InputMissing(r) => write!(
+                f,
+                "{r} failed because an input is missing, so it cannot be overridden. Fix the input."
+            ),
+            Self::ReasonNotAllowed => write!(
+                f,
+                "The paper experiment reason is valid in paper mode only."
+            ),
             Self::AutoMode => write!(f, "Overrides are not allowed in auto mode."),
             Self::CountUnknown => {
                 write!(f, "Override counts are unknown, so no override is allowed.")
@@ -198,6 +267,39 @@ impl AcceptedOverride {
     }
 }
 
+/// Note rules: length bounds, no control characters, enough distinct words.
+fn check_note(note: &str) -> Result<(), OverrideError> {
+    let have = note.chars().count();
+    if have < MIN_NOTE_CHARS {
+        return Err(OverrideError::NoteTooShort {
+            have,
+            need: MIN_NOTE_CHARS,
+        });
+    }
+    if have > MAX_NOTE_CHARS {
+        return Err(OverrideError::NoteTooLong {
+            have,
+            max: MAX_NOTE_CHARS,
+        });
+    }
+    if note.chars().any(char::is_control) {
+        return Err(OverrideError::NoteControlChars);
+    }
+    let words = note.split_whitespace().count();
+    if words < MIN_NOTE_WORDS {
+        return Err(OverrideError::NoteTooFewWords {
+            have: words,
+            need: MIN_NOTE_WORDS,
+        });
+    }
+    Ok(())
+}
+
+/// Accept or refuse `req`. The one time source is `clock.now_ist()` (also stamps `accepted_at`);
+/// `ctx.now` is not read, so the delay and the accepted time can never disagree. Single use is by
+/// move; the day and week counts are read from `snapshot`, so the gate (11b) must write and
+/// acknowledge the audit record and bump the journal count before the next call.
+///
 /// Accept or refuse `req` for `intent` against the same-run `verdict`. Every refusal is a typed
 /// error; nothing is accepted partially.
 pub fn evaluate(
@@ -211,8 +313,24 @@ pub fn evaluate(
     if ctx.mode == ExecutionMode::Auto {
         return Err(OverrideError::AutoMode);
     }
+    if req.reason == ReasonType::PaperExperiment && ctx.mode != ExecutionMode::Paper {
+        return Err(OverrideError::ReasonNotAllowed);
+    }
+    let OverrideRequest {
+        challenge,
+        reason,
+        note,
+    } = req;
+    // The verdict must have been computed for this very intent.
+    let digest = IntentDigest::of(intent);
+    if verdict.intent_digest() != Some(&digest) || challenge.intent_digest != digest {
+        return Err(OverrideError::IntentMismatch);
+    }
     let mut failed: Vec<RuleId> = Vec::new();
     for r in verdict.failures() {
+        if r.is_input_missing() {
+            return Err(OverrideError::InputMissing(r.rule()));
+        }
         match r.level() {
             OverrideLevel::HardCeiling | OverrideLevel::No => {
                 return Err(OverrideError::NotOverridable(r.rule()));
@@ -226,25 +344,15 @@ pub fn evaluate(
     if failed.is_empty() {
         return Err(OverrideError::NothingToOverride);
     }
-    let mut named = req.rule_ids.clone();
-    named.sort();
     failed.sort();
-    if named != failed {
+    if challenge.rule_ids != failed {
         return Err(OverrideError::RuleMismatch);
     }
-    if req.intent_digest != IntentDigest::of(intent) {
-        return Err(OverrideError::IntentMismatch);
-    }
-    if &req.config_hash != verdict.config_hash() || req.config_hash != ctx.config_hash {
+    if &challenge.config_hash != verdict.config_hash() || challenge.config_hash != ctx.config_hash {
         return Err(OverrideError::ConfigMismatch);
     }
-    let have = req.note.trim().chars().count();
-    if have < MIN_NOTE_CHARS {
-        return Err(OverrideError::NoteTooShort {
-            have,
-            need: MIN_NOTE_CHARS,
-        });
-    }
+    let note = note.trim().to_owned();
+    check_note(&note)?;
     let (Some(&day), Some(&week)) = (
         snapshot.overrides_today.known(),
         snapshot.overrides_week.known(),
@@ -268,7 +376,7 @@ pub fn evaluate(
         });
     }
     let now = clock.now_ist();
-    let waited = now.signed_duration_since(req.opened_at).num_seconds();
+    let waited = now.signed_duration_since(challenge.opened_at).num_seconds();
     let need = i64::from(ctx.limits.override_confirm_delay_secs);
     if waited < need {
         let wait = need
@@ -280,10 +388,10 @@ pub fn evaluate(
     }
     Ok(AcceptedOverride {
         rule_ids: failed,
-        reason: req.reason,
-        note: req.note.trim().to_owned(),
-        intent_digest: req.intent_digest,
-        config_hash: req.config_hash,
+        reason,
+        note,
+        intent_digest: digest,
+        config_hash: challenge.config_hash,
         accepted_at: now,
         size_factor: ctx.limits.override_size_factor,
     })
