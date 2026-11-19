@@ -2,7 +2,8 @@
 # Source: NSE "Exchange Communication - Holidays" page, text pasted by the owner on 2026-11-20
 # (copy in docs/owner-input/F2-calendar.md). Holiday rows have no per-row source field in the
 # schema, so every [[holiday]] row comes from the page URL in the top-level `source`.
-# The circular id (reported 172/2025 dated 2025-12-12) is UNVERIFIED and is not recorded here.
+# The circular id and the Muhurat 2026-11-08 timings are unconfirmed, so no Muhurat [[special_session]]
+# row ships: 2026-11-08 stays closed (fail closed). Notes are in docs/owner-input/F2-calendar.md.
 # Not in the owner's source, so deliberately absent: derivatives/currency/commodity session
 # windows, closing-auction / closing-session rows (applicability by instrument kind and start date
 # unknown), and any year other than 2026. Holidays are applied to equity and equity_derivatives
@@ -172,16 +173,4 @@ name = "Independence Day (Saturday)"
 date = "2026-11-08"
 segments = ["equity", "equity_derivatives"]
 kind = "trading"
-name = "Diwali Laxmi Pujan (Sunday); Muhurat session below"
-
-# Muhurat trading, Sunday 2026-11-08. UNVERIFIED: the NSE page says timings are "notified subsequently
-# through a circular". 14:20-15:50 IST is from a web search report only; confirm against the circular
-# before relying on it.
-[[special_session]]
-date = "2026-11-08"
-segments = ["equity", "equity_derivatives"]
-kind = "muhurat"
-start = "14:20"
-end = "15:50"
-live_data = true
-source = "UNVERIFIED: timings 14:20-15:50 reported by web search, not confirmed from an NSE circular; date from NSE holidays page (owner-pasted 2026-11-20)"
+name = "Diwali Laxmi Pujan (Sunday)"

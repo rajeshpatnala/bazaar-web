@@ -34,3 +34,7 @@ Muhurat trading: Sunday 2026-11-08, timings "notified subsequently through a cir
 - Closing auction: order entry 15:20-15:30; matching 15:30-15:35; transition 15:35-15:50.
 - Closing session: 15:50-16:00.
 - Block deal windows: morning 08:45-09:00; afternoon 14:05-14:20.
+
+## Notes from dev-data (2026-11-20)
+- Muhurat 2026-11-08 is NOT in config/calendar.toml: the owner decided to leave the day closed (fail closed) until the timings are confirmed from the NSE circular. Reported but UNVERIFIED: 14:20-15:50 IST; circular 172/2025 dated 2025-12-12.
+- The source host `www.nseindia.in` is as pasted by the owner; owner to confirm it is the official NSE host.

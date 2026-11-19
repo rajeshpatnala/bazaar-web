@@ -30,20 +30,50 @@ fn ist(date: NaiveDate, h: u32, mi: u32) -> DateTime<Utc> {
         .with_timezone(&Utc)
 }
 
+const WEEKDAY_HOLIDAYS: [(u32, u32); 16] = [
+    (1, 15),
+    (1, 26),
+    (3, 3),
+    (3, 26),
+    (3, 31),
+    (4, 3),
+    (4, 14),
+    (5, 1),
+    (5, 28),
+    (6, 26),
+    (9, 14),
+    (10, 2),
+    (10, 20),
+    (11, 10),
+    (11, 24),
+    (12, 25),
+];
+const WEEKEND_HOLIDAYS: [(u32, u32); 4] = [(2, 15), (3, 21), (8, 15), (11, 8)];
+
 #[test]
 fn shipped_calendar_is_real_dated_and_sourced() {
     let c = cfg();
     assert!(!c.placeholder);
     assert_eq!(c.verified_on, Some(d(2026, 11, 20)));
     assert_eq!(c.covered_years, vec![2026]);
-    assert!(c.source.contains("nseindia"));
-    assert!(c.session.iter().all(|s| !s.source.trim().is_empty()));
     assert!(
-        c.special_session
-            .iter()
-            .all(|s| !s.source.trim().is_empty())
+        c.source
+            .starts_with("https://www.nseindia.in/resources/exchange-communication-holidays ")
     );
-    assert_eq!(c.holiday.len(), 20); // 16 weekday + 4 weekend holidays
+    assert!(c.session.iter().all(|s| !s.source.trim().is_empty()));
+    // Holiday rows have no per-row source in the schema; the top-level source covers them.
+    let mut got: Vec<NaiveDate> = c.holiday.iter().map(|h| h.date).collect();
+    got.sort();
+    got.dedup();
+    let mut want: Vec<NaiveDate> = WEEKDAY_HOLIDAYS
+        .iter()
+        .chain(WEEKEND_HOLIDAYS.iter())
+        .map(|&(m, day)| d(2026, m, day))
+        .collect();
+    want.sort();
+    assert_eq!(got, want);
+    // Muhurat timings are unconfirmed, so no special session ships.
+    assert!(c.special_session.is_empty());
 }
 
 #[test]
@@ -103,22 +133,29 @@ fn weekday_session_phases_come_from_the_file() {
 }
 
 #[test]
-fn weekend_holidays_stay_closed_and_muhurat_opens_the_sunday() {
+fn weekend_holidays_and_unconfirmed_muhurat_day_stay_closed() {
     let cal = MarketCalendar::from_config(&cfg());
-    for (m, day) in [(2, 15), (3, 21), (8, 15)] {
+    for (m, day) in WEEKEND_HOLIDAYS {
         let h = d(2026, m, day);
-        assert!(!cal.is_trading_day(h, Segment::Equity).unwrap());
+        assert!(!cal.is_trading_day(h, Segment::Equity).unwrap(), "{h}");
     }
     let m = d(2026, 11, 8);
-    assert!(cal.is_trading_day(m, Segment::Equity).unwrap());
-    // Timings are UNVERIFIED in the file; this checks the file is honoured, not the real times.
     assert_eq!(
         cal.session_at(ist(m, 14, 30), Segment::Equity, InstrumentKind::CashFno)
             .unwrap(),
-        Session::Special("muhurat".to_owned())
+        Session::Closed
     );
+}
+
+#[test]
+fn derivatives_follow_holidays_but_have_no_session_windows() {
+    let cal = MarketCalendar::from_config(&cfg());
+    let seg = Segment::EquityDerivatives;
+    assert!(!cal.is_trading_day(d(2026, 1, 26), seg).unwrap());
+    assert!(cal.is_trading_day(d(2026, 1, 14), seg).unwrap());
+    // Known gap: the owner's source has no derivatives windows, so no phase is reported.
     assert_eq!(
-        cal.session_at(ist(m, 16, 0), Segment::Equity, InstrumentKind::CashFno)
+        cal.session_at(ist(d(2026, 1, 14), 10, 0), seg, InstrumentKind::Derivative)
             .unwrap(),
         Session::Closed
     );
