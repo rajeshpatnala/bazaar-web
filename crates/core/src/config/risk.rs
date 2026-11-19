@@ -4,7 +4,7 @@
 //! The mode is read from the file only: no env var, CLI flag or HTTP route sets it.
 //! A missing key is a load error: nothing here has a serde default.
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, NaiveTime};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
@@ -52,6 +52,13 @@ pub struct Limits {
     /// G14 (Soft).
     #[serde(deserialize_with = "super::decimal_str::deserialize")]
     pub max_position_value_pct: Decimal,
+    /// G16 orders per minute (Hard ceiling).
+    pub max_orders_per_minute: u32,
+    /// Floor for the charges + slippage buffer the sizer accepts (rupees).
+    #[serde(deserialize_with = "super::decimal_str::deserialize")]
+    pub min_charges_slippage_buffer: Decimal,
+    /// Sizing equity never rises above starting cash when true.
+    pub cap_equity_at_starting_cash: bool,
 }
 
 /// `[hard_limits]`: ceilings for the `[limits]` and `[behaviour]` keys.
@@ -74,6 +81,20 @@ pub struct HardLimits {
     pub min_reentry_lockout_minutes: u32,
     /// Largest allowed `behaviour.entry_zone_tolerance_bps`.
     pub max_entry_zone_tolerance_bps: u32,
+    /// Ceiling for `limits.max_position_value_pct` (G14).
+    #[serde(deserialize_with = "super::decimal_str::deserialize")]
+    pub max_position_value_pct: Decimal,
+    /// Ceiling for `exposure.max_sector_pct` (G05).
+    #[serde(deserialize_with = "super::decimal_str::deserialize")]
+    pub max_sector_pct: Decimal,
+    /// Ceiling for `limits.max_open_positions` (G04a).
+    pub max_open_positions: u32,
+    /// Ceiling for `limits.max_orders_per_minute` (G16).
+    pub max_orders_per_minute: u32,
+    /// Ceiling for `override.max_per_day`.
+    pub max_override_per_day: u32,
+    /// Ceiling for `override.max_per_week`.
+    pub max_override_per_week: u32,
 }
 
 /// `[exposure]`: G05.
@@ -101,6 +122,75 @@ pub struct Behaviour {
     pub max_new_entries_per_day: u32,
 }
 
+/// `[options]`: G13.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Options {
+    /// Loader refuses `true` (needs a config change, an ADR and the owner's opt-in).
+    pub allow_naked_short: bool,
+}
+
+/// `[events]`: G06 and G07.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Events {
+    pub block_ban_list: bool,
+    pub ban_list_max_age_hours: u32,
+    pub block_results_days: bool,
+    pub block_policy_days: bool,
+    /// IST wall time, `HH:MM`.
+    #[serde(deserialize_with = "hhmm")]
+    pub expiry_day_no_new_after_ist: NaiveTime,
+    /// Relative path of the events file under the config dir.
+    #[serde(rename = "events_file")]
+    pub file: String,
+}
+
+fn hhmm<'de, D: serde::Deserializer<'de>>(d: D) -> Result<NaiveTime, D::Error> {
+    let s = String::deserialize(d)?;
+    NaiveTime::parse_from_str(&s, "%H:%M").map_err(serde::de::Error::custom)
+}
+
+/// `[data]`: G15 and the snapshot age limit.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DataSection {
+    pub max_quote_age_secs: u32,
+    /// Own key (RG-F6-15): a journal-built snapshot older than this is Reject.
+    pub max_snapshot_age_secs: u32,
+}
+
+/// `[gate.evidence]`: G01.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Evidence {
+    pub min_oos_trades: u32,
+    #[serde(deserialize_with = "super::decimal_str::deserialize")]
+    pub min_profit_factor: Decimal,
+    #[serde(deserialize_with = "super::decimal_str::deserialize")]
+    pub min_expectancy_r: Decimal,
+    pub require_walk_forward_pass: bool,
+}
+
+/// `[gate]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GateSection {
+    pub evidence: Evidence,
+}
+
+/// `[override]`: section 3 of the discipline skill.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OverrideSection {
+    pub max_per_day: u32,
+    pub max_per_week: u32,
+    /// Fraction of the normal size an overridden trade gets, in (0,1].
+    #[serde(deserialize_with = "super::decimal_str::deserialize")]
+    pub size_factor: Decimal,
+    pub confirm_delay_secs: u32,
+}
+
 /// `[execution]`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -124,6 +214,12 @@ pub struct RiskConfig {
     pub hard_limits: HardLimits,
     pub exposure: Exposure,
     pub behaviour: Behaviour,
+    pub options: Options,
+    pub events: Events,
+    pub data: DataSection,
+    pub gate: GateSection,
+    #[serde(rename = "override")]
+    pub override_: OverrideSection,
     pub execution: ExecutionSection,
 }
 
@@ -137,6 +233,14 @@ const COOLOFF_LOSSES: (u32, u32) = (1, 10);
 const ENTRY_ZONE_BPS: (u32, u32) = (0, 50);
 const REENTRY_MINUTES: (u32, u32) = (1, 480);
 const ENTRIES_PER_DAY: (u32, u32) = (1, 20);
+const QUOTE_AGE_SECS: (u32, u32) = (1, 60);
+const SNAPSHOT_AGE_SECS: (u32, u32) = (1, 300);
+const BAN_LIST_HOURS: (u32, u32) = (1, 48);
+const ORDERS_PER_MINUTE: (u32, u32) = (1, 600);
+const OVERRIDES_PER_DAY: (u32, u32) = (1, 10);
+const OVERRIDES_PER_WEEK: (u32, u32) = (1, 50);
+const CONFIRM_DELAY_SECS: (u32, u32) = (1, 300);
+const MIN_OOS_TRADES: (u32, u32) = (1, 100_000);
 
 /// A percentage must be above 0 and at most 100.
 fn check_pct(key: &str, v: Decimal) -> Result<(), ConfigError> {
@@ -220,6 +324,11 @@ impl RiskConfig {
         check_pct("limits.max_total_open_risk_pct", l.max_total_open_risk_pct)?;
         check_pct("limits.max_weekly_loss_pct", l.max_weekly_loss_pct)?;
         check_pct("limits.max_position_value_pct", l.max_position_value_pct)?;
+        check_pct(
+            "hard_limits.max_position_value_pct",
+            h.max_position_value_pct,
+        )?;
+        check_pct("hard_limits.max_sector_pct", h.max_sector_pct)?;
         check_pct("exposure.max_sector_pct", self.exposure.max_sector_pct)?;
         for (key, v, c) in [
             (
@@ -241,6 +350,16 @@ impl RiskConfig {
                 "limits.max_weekly_loss_pct",
                 l.max_weekly_loss_pct,
                 h.max_weekly_loss_pct,
+            ),
+            (
+                "limits.max_position_value_pct",
+                l.max_position_value_pct,
+                h.max_position_value_pct,
+            ),
+            (
+                "exposure.max_sector_pct",
+                self.exposure.max_sector_pct,
+                h.max_sector_pct,
             ),
         ] {
             check_ceiling(key, v, c)?;
@@ -353,6 +472,141 @@ impl RiskConfig {
             h.min_reentry_lockout_minutes,
         )
     }
+
+    /// G01, G06, G07, G13, G15, G16 and override keys.
+    fn validate_gate_keys(&self) -> Result<(), ConfigError> {
+        let ev = &self.events;
+        let bad = |key: &str, why: &str| Err(ConfigError::invalid(Self::FILE, key, why));
+        forbid_true(
+            "options.allow_naked_short",
+            self.options.allow_naked_short,
+            "must be false (G13 needs an ADR and the owner's opt-in)",
+        )?;
+        for (key, on) in [
+            ("events.block_ban_list", ev.block_ban_list),
+            ("events.block_results_days", ev.block_results_days),
+            ("events.block_policy_days", ev.block_policy_days),
+        ] {
+            if !on {
+                return bad(key, "must be true (this guard cannot be switched off)");
+            }
+        }
+        let f = ev.file.as_str();
+        if f.is_empty() || f.starts_with('/') || f.contains("..") || f.contains('\\') {
+            return bad(
+                "events.events_file",
+                "must be a relative path inside config",
+            );
+        }
+        check_range(
+            "events.ban_list_max_age_hours",
+            ev.ban_list_max_age_hours,
+            BAN_LIST_HOURS,
+        )?;
+        check_range(
+            "data.max_quote_age_secs",
+            self.data.max_quote_age_secs,
+            QUOTE_AGE_SECS,
+        )?;
+        check_range(
+            "data.max_snapshot_age_secs",
+            self.data.max_snapshot_age_secs,
+            SNAPSHOT_AGE_SECS,
+        )?;
+        self.validate_evidence_and_override()?;
+        self.validate_rate_ceilings()
+    }
+
+    /// G01 evidence keys, the charges floor and `[override]`.
+    fn validate_evidence_and_override(&self) -> Result<(), ConfigError> {
+        let (l, o, e) = (&self.limits, &self.override_, &self.gate.evidence);
+        let bad = |key: &str, why: &str| Err(ConfigError::invalid(Self::FILE, key, why));
+        check_range(
+            "gate.evidence.min_oos_trades",
+            e.min_oos_trades,
+            MIN_OOS_TRADES,
+        )?;
+        if e.min_profit_factor <= Decimal::ZERO {
+            return bad("gate.evidence.min_profit_factor", "must be above 0");
+        }
+        if e.min_expectancy_r <= Decimal::ZERO {
+            return bad("gate.evidence.min_expectancy_r", "must be above 0");
+        }
+        if l.min_charges_slippage_buffer <= Decimal::ZERO {
+            return bad("limits.min_charges_slippage_buffer", "must be above 0");
+        }
+        if o.size_factor <= Decimal::ZERO || o.size_factor > Decimal::ONE {
+            return bad("override.size_factor", "must be above 0 and at most 1");
+        }
+        check_range(
+            "override.confirm_delay_secs",
+            o.confirm_delay_secs,
+            CONFIRM_DELAY_SECS,
+        )?;
+        if o.max_per_week < o.max_per_day {
+            return bad("override.max_per_week", "must not be below max_per_day");
+        }
+        Ok(())
+    }
+
+    /// G04a, G16 and override-count ceilings and their ranges.
+    fn validate_rate_ceilings(&self) -> Result<(), ConfigError> {
+        let (l, h, o) = (&self.limits, &self.hard_limits, &self.override_);
+        check_range(
+            "hard_limits.max_open_positions",
+            h.max_open_positions,
+            OPEN_POSITIONS,
+        )?;
+        check_ceiling_u32(
+            "limits.max_open_positions",
+            l.max_open_positions,
+            h.max_open_positions,
+        )?;
+        for (key, v, c, r) in [
+            (
+                "hard_limits.max_orders_per_minute",
+                h.max_orders_per_minute,
+                None,
+                ORDERS_PER_MINUTE,
+            ),
+            (
+                "hard_limits.max_override_per_day",
+                h.max_override_per_day,
+                None,
+                OVERRIDES_PER_DAY,
+            ),
+            (
+                "hard_limits.max_override_per_week",
+                h.max_override_per_week,
+                None,
+                OVERRIDES_PER_WEEK,
+            ),
+            (
+                "limits.max_orders_per_minute",
+                l.max_orders_per_minute,
+                Some(h.max_orders_per_minute),
+                ORDERS_PER_MINUTE,
+            ),
+            (
+                "override.max_per_day",
+                o.max_per_day,
+                Some(h.max_override_per_day),
+                OVERRIDES_PER_DAY,
+            ),
+            (
+                "override.max_per_week",
+                o.max_per_week,
+                Some(h.max_override_per_week),
+                OVERRIDES_PER_WEEK,
+            ),
+        ] {
+            check_range(key, v, r)?;
+            if let Some(c) = c {
+                check_ceiling_u32(key, v, c)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl ConfigFile for RiskConfig {
@@ -362,6 +616,7 @@ impl ConfigFile for RiskConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         self.validate_percentages()?;
         self.validate_guards()?;
+        self.validate_gate_keys()?;
         if self.execution.paper_starting_cash_inr <= Decimal::ZERO {
             return Err(ConfigError::invalid(
                 Self::FILE,
@@ -384,17 +639,30 @@ mod tests {
         on_daily_loss = \"lockout_entries\"\nmax_open_positions = 3\n\
         max_total_open_risk_pct = \"3\"\nmax_weekly_loss_pct = \"6\"\n\
         max_position_value_pct = \"25\"\n\
+        max_orders_per_minute = 10\nmin_charges_slippage_buffer = \"20\"\n\
+        cap_equity_at_starting_cash = true\n\
         [hard_limits]\nmax_risk_per_trade_pct = \"1\"\nmax_daily_loss_pct = \"3\"\n\
         max_total_open_risk_pct = \"3\"\nmax_weekly_loss_pct = \"6\"\n\
         max_cooloff_after_losses = 2\nmax_new_entries_per_day = 3\n\
         min_reentry_lockout_minutes = 60\nmax_entry_zone_tolerance_bps = 0\n\
+        max_position_value_pct = \"25\"\nmax_sector_pct = \"30\"\nmax_open_positions = 3\n\
+        max_orders_per_minute = 10\nmax_override_per_day = 1\nmax_override_per_week = 3\n\
         [exposure]\nmax_sector_pct = \"30\"\nmax_correlated_positions = 2\n\
         correlation_threshold = \"0.7\"\ncorrelation_window_days = 60\n\
         [behaviour]\ncooloff_after_losses = 2\ncooloff_until = \"end_of_session\"\n\
         allow_stop_widening = false\nallow_averaging_down = false\n\
         entry_zone_tolerance_bps = 0\nreentry_lockout_minutes = 60\n\
         max_new_entries_per_day = 3\n\
-        [execution]\npaper_starting_cash_inr = \"100000\"\n";
+        [execution]\npaper_starting_cash_inr = \"100000\"\n\
+        [options]\nallow_naked_short = false\n\
+        [events]\nblock_ban_list = true\nban_list_max_age_hours = 24\n\
+        block_results_days = true\nblock_policy_days = true\n\
+        expiry_day_no_new_after_ist = \"13:30\"\nevents_file = \"events.toml\"\n\
+        [data]\nmax_quote_age_secs = 5\nmax_snapshot_age_secs = 10\n\
+        [gate.evidence]\nmin_oos_trades = 30\nmin_profit_factor = \"1.3\"\n\
+        min_expectancy_r = \"0.1\"\nrequire_walk_forward_pass = true\n\
+        [override]\nmax_per_day = 1\nmax_per_week = 3\nsize_factor = \"0.5\"\n\
+        confirm_delay_secs = 10\n";
 
     fn with(from: &str, to: &str) -> String {
         assert!(OK.contains(from), "{from}");
@@ -543,6 +811,32 @@ mod tests {
         ("behaviour", "entry_zone_tolerance_bps"),
         ("behaviour", "reentry_lockout_minutes"),
         ("behaviour", "max_new_entries_per_day"),
+        ("limits", "max_orders_per_minute"),
+        ("limits", "min_charges_slippage_buffer"),
+        ("limits", "cap_equity_at_starting_cash"),
+        ("hard_limits", "max_position_value_pct"),
+        ("hard_limits", "max_sector_pct"),
+        ("hard_limits", "max_open_positions"),
+        ("hard_limits", "max_orders_per_minute"),
+        ("hard_limits", "max_override_per_day"),
+        ("hard_limits", "max_override_per_week"),
+        ("options", "allow_naked_short"),
+        ("events", "block_ban_list"),
+        ("events", "ban_list_max_age_hours"),
+        ("events", "block_results_days"),
+        ("events", "block_policy_days"),
+        ("events", "expiry_day_no_new_after_ist"),
+        ("events", "events_file"),
+        ("data", "max_quote_age_secs"),
+        ("data", "max_snapshot_age_secs"),
+        ("gate.evidence", "min_oos_trades"),
+        ("gate.evidence", "min_profit_factor"),
+        ("gate.evidence", "min_expectancy_r"),
+        ("gate.evidence", "require_walk_forward_pass"),
+        ("override", "max_per_day"),
+        ("override", "max_per_week"),
+        ("override", "size_factor"),
+        ("override", "confirm_delay_secs"),
     ];
 
     /// Each new key removed on its own must fail the load (no serde default to a loose value).
@@ -563,15 +857,15 @@ mod tests {
     #[test]
     fn values_at_the_boundary_are_accepted() {
         let ok: &[(&str, &str, &str)] = &[
-            ("limits", "max_position_value_pct", "\"100\""),
-            ("exposure", "max_sector_pct", "\"100\""),
+            ("hard_limits", "max_position_value_pct", "\"100\""),
+            ("hard_limits", "max_sector_pct", "\"100\""),
             ("exposure", "correlation_threshold", "\"1\""),
             ("exposure", "max_correlated_positions", "1"),
             ("exposure", "max_correlated_positions", "10"),
             ("exposure", "correlation_window_days", "20"),
             ("exposure", "correlation_window_days", "250"),
             ("limits", "max_open_positions", "1"),
-            ("limits", "max_open_positions", "20"),
+            ("hard_limits", "max_open_positions", "20"),
             ("hard_limits", "max_total_open_risk_pct", "\"100\""),
             ("hard_limits", "max_weekly_loss_pct", "\"100\""),
             ("hard_limits", "max_cooloff_after_losses", "10"),
@@ -855,6 +1149,102 @@ mod tests {
         assert!(parse_str::<RiskConfig>(&with("\"end_of_session\"", "\"never\"")).is_err());
     }
 
+    /// (section, key, bad value, text the error must contain)
+    #[test]
+    fn slice1_table_refuses_degenerate_and_loose_values() {
+        let rows: &[(&str, &str, &str)] = &[
+            ("limits", "max_orders_per_minute", "0"),
+            ("limits", "max_orders_per_minute", "601"),
+            ("limits", "max_orders_per_minute", "11"),
+            ("limits", "min_charges_slippage_buffer", "\"0\""),
+            ("limits", "max_position_value_pct", "\"26\""),
+            ("limits", "max_open_positions", "4"),
+            ("exposure", "max_sector_pct", "\"31\""),
+            ("hard_limits", "max_orders_per_minute", "0"),
+            ("hard_limits", "max_open_positions", "0"),
+            ("hard_limits", "max_override_per_day", "0"),
+            ("hard_limits", "max_override_per_week", "51"),
+            ("hard_limits", "max_position_value_pct", "\"0\""),
+            ("hard_limits", "max_sector_pct", "\"101\""),
+            ("options", "allow_naked_short", "true"),
+            ("events", "block_ban_list", "false"),
+            ("events", "block_results_days", "false"),
+            ("events", "block_policy_days", "false"),
+            ("events", "ban_list_max_age_hours", "0"),
+            ("events", "ban_list_max_age_hours", "49"),
+            ("events", "events_file", "\"\""),
+            ("events", "events_file", "\"/etc/x.toml\""),
+            ("events", "events_file", "\"../x.toml\""),
+            ("data", "max_quote_age_secs", "0"),
+            ("data", "max_quote_age_secs", "61"),
+            ("data", "max_snapshot_age_secs", "0"),
+            ("data", "max_snapshot_age_secs", "301"),
+            ("gate.evidence", "min_oos_trades", "0"),
+            ("gate.evidence", "min_oos_trades", "100001"),
+            ("gate.evidence", "min_profit_factor", "\"0\""),
+            ("gate.evidence", "min_expectancy_r", "\"-0.1\""),
+            ("override", "max_per_day", "0"),
+            ("override", "max_per_day", "2"),
+            ("override", "max_per_week", "4"),
+            ("override", "size_factor", "\"0\""),
+            ("override", "size_factor", "\"1.01\""),
+            ("override", "size_factor", "\"-0.5\""),
+            ("override", "confirm_delay_secs", "0"),
+            ("override", "confirm_delay_secs", "301"),
+        ];
+        for (sec, key, bad) in rows {
+            let err = parse_str::<RiskConfig>(&edit(sec, key, Some(bad)))
+                .expect_err(&format!("{sec}.{key} = {bad}"));
+            assert!(err.to_string().contains(key), "{sec}.{key} = {bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn slice1_week_override_cap_not_below_day_cap() {
+        let t = edit("override", "max_per_day", Some("2"));
+        let t = t.replace("max_override_per_day = 1", "max_override_per_day = 2");
+        let t = t.replace("max_override_per_week = 3", "max_override_per_week = 1");
+        let t = t.replace("max_per_week = 3", "max_per_week = 1");
+        assert!(parse_str::<RiskConfig>(&t).is_err());
+    }
+
+    #[test]
+    fn slice1_bad_time_and_wrong_types_are_refused() {
+        for bad in ["\"1330\"", "\"25:00\"", "13"] {
+            let t = edit("events", "expiry_day_no_new_after_ist", Some(bad));
+            assert!(parse_str::<RiskConfig>(&t).is_err(), "{bad}");
+        }
+        // Money-like keys must be strings, not TOML floats.
+        let t = edit("override", "size_factor", Some("0.5"));
+        assert!(parse_str::<RiskConfig>(&t).is_err());
+    }
+
+    #[test]
+    fn slice1_keys_parse_and_boundaries_pass() {
+        let cfg = parse_str::<RiskConfig>(OK).unwrap();
+        assert_eq!(cfg.override_.size_factor.to_string(), "0.5");
+        assert_eq!(cfg.data.max_snapshot_age_secs, 10);
+        assert_eq!(
+            cfg.events.expiry_day_no_new_after_ist.to_string(),
+            "13:30:00"
+        );
+        assert!(cfg.limits.cap_equity_at_starting_cash);
+        for (sec, key, ok) in [
+            ("override", "size_factor", "\"1\""),
+            ("override", "confirm_delay_secs", "300"),
+            ("data", "max_quote_age_secs", "60"),
+            ("data", "max_snapshot_age_secs", "300"),
+            ("gate.evidence", "min_oos_trades", "1"),
+            ("limits", "max_orders_per_minute", "1"),
+            ("limits", "max_position_value_pct", "\"25\""),
+        ] {
+            assert!(
+                parse_str::<RiskConfig>(&edit(sec, key, Some(ok))).is_ok(),
+                "{sec}.{key} = {ok}"
+            );
+        }
+    }
+
     #[test]
     fn shipped_file_has_owner_decided_values_and_unchanged_verified_on() {
         let cfg: RiskConfig = crate::config::load(std::path::Path::new(concat!(
@@ -878,6 +1268,10 @@ mod tests {
         assert_eq!(cfg.limits.max_weekly_loss_pct, Decimal::from(6));
         assert_eq!(cfg.behaviour.reentry_lockout_minutes, 60);
         assert_eq!(cfg.behaviour.max_new_entries_per_day, 3);
+        assert_eq!(cfg.hard_limits.max_position_value_pct, Decimal::from(25));
+        assert_eq!(cfg.hard_limits.max_sector_pct, Decimal::from(30));
+        assert_eq!(cfg.hard_limits.max_open_positions, 3);
+        assert_eq!(cfg.override_.max_per_day, 1);
         assert_eq!(cfg.verified_on, NaiveDate::from_ymd_opt(2026, 11, 18));
     }
 }

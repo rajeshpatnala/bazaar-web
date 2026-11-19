@@ -1,11 +1,11 @@
 # F6: Risk crate
 
-Status: building (slice 0 done: config). Plan: `.agents/plans/F6-risk-crate.md`. Owner area: `crates/risk`, `config/risk.toml`.
+Status: building (slices 0 and 1 done: config). Plan: `.agents/plans/F6-risk-crate.md`. Owner area: `crates/risk`, `config/risk.toml`.
 Summary: deterministic DecisionGate, sizing, portfolio and behaviour rules, override engine in `crates/risk`; keys in `risk.toml`.
 Decisions: owner 2026-11-19 (G08 = 2 losses, until end of session; max 3 positions; G17/G18/G19 approved; G14 cap 25%; No-rows loosenable only within `[hard_limits]` ceilings; sizing equity capped at starting cash); fail closed by type; gate classifies Entry/Exit/StopMove; one override-level table; `GatedIntent` mintable only in `gate.rs`; config hash = sha256 of file text. Skill G-table updated first (own commit) so reviewers check against it.
 Known limits: G12, readiness bar, real audit/baseline/journal deferred; in-memory baseline loosens on restart until F10; inputs for G01/G06/G07/G15/X01/X03 reject until F3/F9/F10; every key not owner-decided is `owner-to-confirm, unverified`; file-level `verified_on` (2026-11-18) not bumped.
 F10 handoff: snapshot built only from the journal (journal read failure = no snapshot = no order); G10 entry zone from the stored recommendation, not the request; gate re-run and expiry at approval via `evaluated_at` and config hash.
-Deferred: first-15-minute rule; broker order-rate figure and the new hard ceilings (G04b 3, override caps, orders/min) stay Owner actions until confirmed; keys for slice 1 (`[options]`, `[override]`, `gate.evidence`, `events`, `data`, G16, charges floor).
+Deferred: first-15-minute rule; broker order-rate figure and the new hard ceilings (G04b 3, override caps, orders/min) stay Owner actions until confirmed; slice 1 values (`[hard_limits]` G05/G04a/override/orders-per-minute ceilings, `max_orders_per_minute` 10, charges floor 20) are placeholders, unverified, owner to confirm.
 
 ## Slice 0 config keys: loader bounds (inclusive; load error outside)
 
@@ -29,5 +29,27 @@ Deferred: first-15-minute rule; broker order-rate figure and the new hard ceilin
 | `behaviour.max_new_entries_per_day` (G18) | 3 | 1..=20, <= `hard_limits.max_new_entries_per_day` (3) | owner 2026-11-19 |
 | `hard_limits.max_cooloff_after_losses`, `max_new_entries_per_day`, `min_reentry_lockout_minutes`, `max_entry_zone_tolerance_bps` | 2, 3, 60, 0 | same ranges as the key they bound | ceilings equal defaults; changing one needs an ADR and the owner |
 
-Not in slice 0 (slice 1): `block_ban_list`, `block_results_days`, `block_policy_days`, `max_quote_age_secs`, `min_oos_trades`, `confirm_delay_secs`, `size_factor`, override caps and `max_orders_per_minute` ranges and ceilings.
+## Slice 1 config keys (inclusive bounds; load error outside; all unverified unless noted)
+
+| Key | Default | Bound |
+|---|---|---|
+| `hard_limits.max_position_value_pct` (G14 ceiling) | 25 (owner) | (0,100]; limit <= ceiling |
+| `hard_limits.max_sector_pct` (G05), `max_open_positions` (G04a) | 30, 3 | (0,100], 1..=20; limit <= ceiling |
+| `limits.max_orders_per_minute` / `hard_limits.max_orders_per_minute` (G16) | 10 / 10 | 1..=600; no cited broker source: owner action |
+| `hard_limits.max_override_per_day` / `max_override_per_week` | 1 / 3 | 1..=10 / 1..=50 |
+| `override.max_per_day` / `max_per_week` | 1 / 3 | same ranges, <= ceiling, week >= day |
+| `override.size_factor` | 0.5 | 0 < x <= 1 |
+| `override.confirm_delay_secs` | 10 | 1..=300 |
+| `gate.evidence.min_oos_trades` (G01) | 30 | 1..=100000 |
+| `gate.evidence.min_profit_factor`, `min_expectancy_r` | 1.3, 0.1 | > 0 |
+| `events.block_ban_list`, `block_results_days`, `block_policy_days` | true | `false` refused |
+| `events.ban_list_max_age_hours` | 24 | 1..=48 |
+| `events.expiry_day_no_new_after_ist`, `events_file` | "13:30", events.toml | `HH:MM`; relative path, no `..` |
+| `data.max_quote_age_secs` (G15) | 5 | 1..=60 |
+| `data.max_snapshot_age_secs` (RG-F6-15, own key) | 10 | 1..=300 |
+| `options.allow_naked_short` (G13) | false | `true` refused |
+| `limits.min_charges_slippage_buffer` | 20 (rupees) | > 0; placeholder until the F9 cost model |
+| `limits.cap_equity_at_starting_cash` | true | bool (owner Q2 default) |
+
+Ceilings for G05 and G04a sit at their defaults; changing any `[hard_limits]` value needs an ADR and the owner.
 Test fixture `fixtures/config/risk.toml` gained the same sections with synthetic values.
