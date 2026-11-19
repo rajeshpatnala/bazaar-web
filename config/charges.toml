@@ -1,12 +1,14 @@
 # charges.toml: Zerodha equity charges as listed on the page the owner pasted on 2026-11-20
-# (copy in docs/owner-input/F2-charges.md). Only numbers from that paste are used.
+# (copies in docs/owner-input/F2-charges.md). Only numbers from those pastes are used.
 # effective_from = 2026-11-20 for every row: the source gives no effective date, so the verified date is used.
-# NOT shipped: equity_delivery rate sets (the schema requires [dp], and the DP charge Rs 15.34 and delivery
-# minimum seen only in an agent web fetch are UNVERIFIED), physically settled F&O rates, IPFT (not in the
-# source: ipft_pct = "0" means "not listed", not "verified zero"). No contract-note cross-check yet.
+# Delivery rows and [dp] come from the owner's "Charges explained" paste (same date and page).
+# Not modelled (no schema place): delivery minimum Rs 0.01 per contract note; physically settled F&O rates;
+# DP discounts (female first holder, MF/bond); currency segments. IPFT is the NSE rate (Rs 0.01 per crore =
+# 0.0000001 percent); the paste lists no BSE IPFT, so BSE rows keep "0" meaning not listed.
+# No contract-note cross-check yet.
 schema_version = 1
 verified_on = "2026-11-20"
-source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp) as listed by Zerodha, not checked against NSE/SEBI circulars"
+source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp, IPFT) as listed by Zerodha, not checked against NSE/SEBI circulars"
 
 [meta]
 broker = "zerodha"
@@ -17,12 +19,78 @@ history_policy = "effective_dated"
 [gst]
 rate_pct = "18"
 verified_on = "2026-11-20"
-source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp) as listed by Zerodha, not checked against NSE/SEBI circulars: 18% on brokerage + SEBI charges + transaction charges"
+source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp, IPFT) as listed by Zerodha, not checked against NSE/SEBI circulars: 18% on brokerage + SEBI charges + transaction charges"
+
+[dp]
+per_scrip_total = "15.34"
+includes_gst = true
+verified_on = "2026-11-20"
+source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp, IPFT) as listed by Zerodha, not checked against NSE/SEBI circulars: Rs 15.34 per scrip on sale = 3.5 CDSL + 9.5 Zerodha + 2.34 GST, irrespective of quantity"
 
 [option_exercise]
 stt_pct = "0.15"
 verified_on = "2026-11-20"
-source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp) as listed by Zerodha, not checked against NSE/SEBI circulars: 0.15% of intrinsic value on options bought and exercised"
+source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp, IPFT) as listed by Zerodha, not checked against NSE/SEBI circulars: 0.15% of intrinsic value on options bought and exercised"
+
+[[rate_set]]
+exchange = "NSE"
+segment = "equity_delivery"
+side = "buy"
+effective_from = "2026-11-20"
+verified_on = "2026-11-20"
+source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp, IPFT) as listed by Zerodha, not checked against NSE/SEBI circulars"
+turnover_basis = "notional"
+brokerage = { kind = "zero" }
+stt_ctt_pct = "0.1"
+exchange_txn_pct = "0.00307"
+sebi_per_crore = "10"
+ipft_pct = "0.0000001"
+stamp_pct = "0.015"
+
+[[rate_set]]
+exchange = "NSE"
+segment = "equity_delivery"
+side = "sell"
+effective_from = "2026-11-20"
+verified_on = "2026-11-20"
+source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp, IPFT) as listed by Zerodha, not checked against NSE/SEBI circulars"
+turnover_basis = "notional"
+brokerage = { kind = "zero" }
+stt_ctt_pct = "0.1"
+exchange_txn_pct = "0.00307"
+sebi_per_crore = "10"
+ipft_pct = "0.0000001"
+stamp_pct = "0"
+
+[[rate_set]]
+exchange = "BSE"
+segment = "equity_delivery"
+side = "buy"
+effective_from = "2026-11-20"
+verified_on = "2026-11-20"
+source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp, IPFT) as listed by Zerodha, not checked against NSE/SEBI circulars"
+turnover_basis = "notional"
+brokerage = { kind = "zero" }
+stt_ctt_pct = "0.1"
+exchange_txn_pct = "0.00375"
+sebi_per_crore = "10"
+ipft_pct = "0"
+stamp_pct = "0.015"
+
+[[rate_set]]
+exchange = "BSE"
+segment = "equity_delivery"
+side = "sell"
+effective_from = "2026-11-20"
+verified_on = "2026-11-20"
+source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp, IPFT) as listed by Zerodha, not checked against NSE/SEBI circulars"
+turnover_basis = "notional"
+brokerage = { kind = "zero" }
+stt_ctt_pct = "0.1"
+exchange_txn_pct = "0.00375"
+sebi_per_crore = "10"
+ipft_pct = "0"
+stamp_pct = "0"
 
 [[rate_set]]
 exchange = "NSE"
@@ -30,13 +98,13 @@ segment = "equity_intraday"
 side = "buy"
 effective_from = "2026-11-20"
 verified_on = "2026-11-20"
-source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp) as listed by Zerodha, not checked against NSE/SEBI circulars"
+source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp, IPFT) as listed by Zerodha, not checked against NSE/SEBI circulars"
 turnover_basis = "notional"
 brokerage = { kind = "flat_or_pct_lower", flat = "20", pct = "0.03" }
 stt_ctt_pct = "0"
 exchange_txn_pct = "0.00307"
 sebi_per_crore = "10"
-ipft_pct = "0"
+ipft_pct = "0.0000001"
 stamp_pct = "0.003"
 
 [[rate_set]]
@@ -45,13 +113,13 @@ segment = "equity_intraday"
 side = "sell"
 effective_from = "2026-11-20"
 verified_on = "2026-11-20"
-source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp) as listed by Zerodha, not checked against NSE/SEBI circulars"
+source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp, IPFT) as listed by Zerodha, not checked against NSE/SEBI circulars"
 turnover_basis = "notional"
 brokerage = { kind = "flat_or_pct_lower", flat = "20", pct = "0.03" }
 stt_ctt_pct = "0.025"
 exchange_txn_pct = "0.00307"
 sebi_per_crore = "10"
-ipft_pct = "0"
+ipft_pct = "0.0000001"
 stamp_pct = "0"
 
 [[rate_set]]
@@ -60,7 +128,7 @@ segment = "equity_intraday"
 side = "buy"
 effective_from = "2026-11-20"
 verified_on = "2026-11-20"
-source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp) as listed by Zerodha, not checked against NSE/SEBI circulars"
+source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp, IPFT) as listed by Zerodha, not checked against NSE/SEBI circulars"
 turnover_basis = "notional"
 brokerage = { kind = "flat_or_pct_lower", flat = "20", pct = "0.03" }
 stt_ctt_pct = "0"
@@ -75,7 +143,7 @@ segment = "equity_intraday"
 side = "sell"
 effective_from = "2026-11-20"
 verified_on = "2026-11-20"
-source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp) as listed by Zerodha, not checked against NSE/SEBI circulars"
+source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp, IPFT) as listed by Zerodha, not checked against NSE/SEBI circulars"
 turnover_basis = "notional"
 brokerage = { kind = "flat_or_pct_lower", flat = "20", pct = "0.03" }
 stt_ctt_pct = "0.025"
@@ -90,13 +158,13 @@ segment = "equity_futures"
 side = "buy"
 effective_from = "2026-11-20"
 verified_on = "2026-11-20"
-source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp) as listed by Zerodha, not checked against NSE/SEBI circulars"
+source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp, IPFT) as listed by Zerodha, not checked against NSE/SEBI circulars"
 turnover_basis = "notional"
 brokerage = { kind = "flat_or_pct_lower", flat = "20", pct = "0.03" }
 stt_ctt_pct = "0"
 exchange_txn_pct = "0.00183"
 sebi_per_crore = "10"
-ipft_pct = "0"
+ipft_pct = "0.0000001"
 stamp_pct = "0.002"
 
 [[rate_set]]
@@ -105,13 +173,13 @@ segment = "equity_futures"
 side = "sell"
 effective_from = "2026-11-20"
 verified_on = "2026-11-20"
-source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp) as listed by Zerodha, not checked against NSE/SEBI circulars"
+source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp, IPFT) as listed by Zerodha, not checked against NSE/SEBI circulars"
 turnover_basis = "notional"
 brokerage = { kind = "flat_or_pct_lower", flat = "20", pct = "0.03" }
 stt_ctt_pct = "0.05"
 exchange_txn_pct = "0.00183"
 sebi_per_crore = "10"
-ipft_pct = "0"
+ipft_pct = "0.0000001"
 stamp_pct = "0"
 
 [[rate_set]]
@@ -120,7 +188,7 @@ segment = "equity_futures"
 side = "buy"
 effective_from = "2026-11-20"
 verified_on = "2026-11-20"
-source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp) as listed by Zerodha, not checked against NSE/SEBI circulars"
+source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp, IPFT) as listed by Zerodha, not checked against NSE/SEBI circulars"
 turnover_basis = "notional"
 brokerage = { kind = "flat_or_pct_lower", flat = "20", pct = "0.03" }
 stt_ctt_pct = "0"
@@ -135,7 +203,7 @@ segment = "equity_futures"
 side = "sell"
 effective_from = "2026-11-20"
 verified_on = "2026-11-20"
-source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp) as listed by Zerodha, not checked against NSE/SEBI circulars"
+source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp, IPFT) as listed by Zerodha, not checked against NSE/SEBI circulars"
 turnover_basis = "notional"
 brokerage = { kind = "flat_or_pct_lower", flat = "20", pct = "0.03" }
 stt_ctt_pct = "0.05"
@@ -150,13 +218,13 @@ segment = "equity_options"
 side = "buy"
 effective_from = "2026-11-20"
 verified_on = "2026-11-20"
-source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp) as listed by Zerodha, not checked against NSE/SEBI circulars"
+source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp, IPFT) as listed by Zerodha, not checked against NSE/SEBI circulars"
 turnover_basis = "premium"
 brokerage = { kind = "flat", flat = "20" }
 stt_ctt_pct = "0"
 exchange_txn_pct = "0.03553"
 sebi_per_crore = "10"
-ipft_pct = "0"
+ipft_pct = "0.0000001"
 stamp_pct = "0.003"
 
 [[rate_set]]
@@ -165,13 +233,13 @@ segment = "equity_options"
 side = "sell"
 effective_from = "2026-11-20"
 verified_on = "2026-11-20"
-source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp) as listed by Zerodha, not checked against NSE/SEBI circulars"
+source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp, IPFT) as listed by Zerodha, not checked against NSE/SEBI circulars"
 turnover_basis = "premium"
 brokerage = { kind = "flat", flat = "20" }
 stt_ctt_pct = "0.15"
 exchange_txn_pct = "0.03553"
 sebi_per_crore = "10"
-ipft_pct = "0"
+ipft_pct = "0.0000001"
 stamp_pct = "0"
 
 [[rate_set]]
@@ -180,7 +248,7 @@ segment = "equity_options"
 side = "buy"
 effective_from = "2026-11-20"
 verified_on = "2026-11-20"
-source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp) as listed by Zerodha, not checked against NSE/SEBI circulars"
+source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp, IPFT) as listed by Zerodha, not checked against NSE/SEBI circulars"
 turnover_basis = "premium"
 brokerage = { kind = "flat", flat = "20" }
 stt_ctt_pct = "0"
@@ -195,7 +263,7 @@ segment = "equity_options"
 side = "sell"
 effective_from = "2026-11-20"
 verified_on = "2026-11-20"
-source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp) as listed by Zerodha, not checked against NSE/SEBI circulars"
+source = "Zerodha charges page https://zerodha.com/charges/#tab-equities (owner-pasted 2026-11-20); statutory rates (STT/CTT, exchange, SEBI, stamp, IPFT) as listed by Zerodha, not checked against NSE/SEBI circulars"
 turnover_basis = "premium"
 brokerage = { kind = "flat", flat = "20" }
 stt_ctt_pct = "0.15"
