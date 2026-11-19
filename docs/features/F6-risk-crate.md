@@ -56,3 +56,8 @@ Deferred to slice 1b: ceilings for `ban_list_max_age_hours`, `max_quote_age_secs
 
 Ceilings for G05 and G04a sit at their defaults; changing any `[hard_limits]` value needs an ADR and the owner.
 Test fixture `fixtures/config/risk.toml` gained the same sections with synthetic values.
+
+## Slice 3 decisions
+- X01 (market open), X02 (lot and tick) and X03 (margin) are not in the skill G-table. Their override level is **No** in `RuleId::override_level()`. Owner to confirm.
+- G12 (liquidity) has no `RuleId` (outside F6).
+- Keys without a baseline entry (quote and snapshot age, size factor, confirm delay, correlation, evidence, event flags) can be loosened within their ceilings or bounds mid-session until F10 persists a baseline for them.

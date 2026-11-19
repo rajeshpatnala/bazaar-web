@@ -1,9 +1,9 @@
 //! `GateConfig` (validated `risk.toml` plus its hash), `EffectiveLimits` (file value combined with
 //! the baseline, stricter wins) and `RuleCtx` (what rules see: effective limits only).
 
-use bazaar_core::config::{ConfigError, RiskConfig, parse_str};
+use bazaar_core::config::{ConfigError, CooloffUntil, OnDailyLoss, RiskConfig, parse_str};
 use bazaar_core::mode::ExecutionMode;
-use chrono::DateTime;
+use chrono::{DateTime, NaiveTime};
 use chrono_tz::Tz;
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
@@ -127,6 +127,25 @@ impl GateConfig {
             max_snapshot_age_secs: dat.max_snapshot_age_secs,
             override_size_factor: ovr.size_factor,
             override_confirm_delay_secs: ovr.confirm_delay_secs,
+            correlation_threshold: exp.correlation_threshold,
+            max_correlated_positions: exp.max_correlated_positions,
+            correlation_window_days: exp.correlation_window_days,
+            min_oos_trades: r.gate.evidence.min_oos_trades,
+            min_profit_factor: r.gate.evidence.min_profit_factor,
+            min_expectancy_r: r.gate.evidence.min_expectancy_r,
+            require_walk_forward_pass: r.gate.evidence.require_walk_forward_pass,
+            block_ban_list: r.events.block_ban_list,
+            ban_list_max_age_hours: r.events.ban_list_max_age_hours,
+            block_results_days: r.events.block_results_days,
+            block_policy_days: r.events.block_policy_days,
+            expiry_day_no_new_after_ist: r.events.expiry_day_no_new_after_ist,
+            events_file: r.events.file.clone(),
+            allow_naked_short: r.options.allow_naked_short,
+            allow_stop_widening: beh.allow_stop_widening,
+            allow_averaging_down: beh.allow_averaging_down,
+            cooloff_until: beh.cooloff_until,
+            on_daily_loss: lim.on_daily_loss,
+            paper_starting_cash_inr: r.execution.paper_starting_cash_inr,
         }
     }
 
@@ -209,7 +228,12 @@ impl Baseline {
     }
 }
 
+#[allow(clippy::struct_excessive_bools)] // mirrors the flag keys of risk.toml one for one
 /// The limits rules may read: file value combined with the baseline, stricter wins.
+///
+/// Known limit: the freshness, override-size, confirm-delay, correlation, evidence and event keys
+/// have no baseline entry, so they can be loosened within their `[hard_limits]` ceilings or sane
+/// bounds mid-session until F10 persists a baseline for them. The ceilings equal the defaults today.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveLimits {
     pub max_risk_per_trade_pct: Decimal,
@@ -234,6 +258,26 @@ pub struct EffectiveLimits {
     pub max_snapshot_age_secs: u32,
     pub override_size_factor: Decimal,
     pub override_confirm_delay_secs: u32,
+    // Pass-through keys (no baseline entry): rules read them here, never from the raw file.
+    pub correlation_threshold: Decimal,
+    pub max_correlated_positions: u32,
+    pub correlation_window_days: u32,
+    pub min_oos_trades: u32,
+    pub min_profit_factor: Decimal,
+    pub min_expectancy_r: Decimal,
+    pub require_walk_forward_pass: bool,
+    pub block_ban_list: bool,
+    pub ban_list_max_age_hours: u32,
+    pub block_results_days: bool,
+    pub block_policy_days: bool,
+    pub expiry_day_no_new_after_ist: NaiveTime,
+    pub events_file: String,
+    pub allow_naked_short: bool,
+    pub allow_stop_widening: bool,
+    pub allow_averaging_down: bool,
+    pub cooloff_until: CooloffUntil,
+    pub on_daily_loss: OnDailyLoss,
+    pub paper_starting_cash_inr: Decimal,
 }
 
 /// What every rule receives: effective limits, mode, config hash and the injected time. It holds
@@ -325,12 +369,27 @@ mod tests {
         );
         assert!(e.cap_equity_at_starting_cash);
 
-        let mut loose = Baseline::none();
-        loose.max_daily_loss_pct = Some(d("50"));
-        loose.max_open_positions = Some(file.max_open_positions + 5);
-        loose.reentry_lockout_minutes = Some(0);
-        loose.min_charges_slippage_buffer = Some(Decimal::ZERO);
-        loose.cap_equity_at_starting_cash = Some(false);
+        let big = d("1000000");
+        let loose = Baseline {
+            max_risk_per_trade_pct: Some(big),
+            max_daily_loss_pct: Some(big),
+            max_total_open_risk_pct: Some(big),
+            max_weekly_loss_pct: Some(big),
+            max_position_value_pct: Some(big),
+            max_notional_per_order_inr: Some(big),
+            min_charges_slippage_buffer: Some(Decimal::ZERO),
+            cap_equity_at_starting_cash: Some(false),
+            max_open_positions: Some(u32::MAX),
+            max_orders_per_minute: Some(u32::MAX),
+            max_orders_per_day: Some(u32::MAX),
+            cooloff_after_losses: Some(u32::MAX),
+            max_new_entries_per_day: Some(u32::MAX),
+            entry_zone_tolerance_bps: Some(u32::MAX),
+            reentry_lockout_minutes: Some(0),
+            max_sector_pct: Some(big),
+            override_max_per_day: Some(u32::MAX),
+            override_max_per_week: Some(u32::MAX),
+        };
         let e = c.effective(&loose);
         assert_eq!(
             e, file,
@@ -383,6 +442,46 @@ mod tests {
         // Non-tightenable keys pass through from the file.
         assert_eq!(e.max_quote_age_secs, file.max_quote_age_secs);
         assert_eq!(e.override_size_factor, file.override_size_factor);
+    }
+
+    #[test]
+    fn effective_limits_pass_through_the_other_keys() {
+        let e = cfg().effective(&Baseline::none());
+        assert!(!e.allow_stop_widening && !e.allow_averaging_down && !e.allow_naked_short);
+        assert!(e.block_ban_list && e.block_results_days && e.block_policy_days);
+        assert!(e.correlation_threshold > Decimal::ZERO && e.correlation_threshold <= Decimal::ONE);
+        assert!(e.max_correlated_positions > 0 && e.correlation_window_days > 0);
+        assert!(e.min_oos_trades > 0 && e.min_profit_factor > Decimal::ZERO);
+        assert!(e.ban_list_max_age_hours > 0 && !e.events_file.is_empty());
+        assert!(e.paper_starting_cash_inr > Decimal::ZERO);
+        assert_eq!(e.cooloff_until, CooloffUntil::EndOfSession);
+        assert_eq!(e.on_daily_loss, OnDailyLoss::LockoutEntries);
+        let _ = (
+            e.min_expectancy_r,
+            e.require_walk_forward_pass,
+            e.expiry_day_no_new_after_ist,
+        );
+    }
+
+    #[test]
+    fn rule_ctx_and_limits_hold_no_risk_config() {
+        let source = include_str!("config.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap_or_default();
+        for name in ["pub struct EffectiveLimits", "pub struct RuleCtx"] {
+            let body = production
+                .split(name)
+                .nth(1)
+                .and_then(|r| r.split("\n}").next())
+                .unwrap();
+            assert!(
+                !body.contains("RiskConfig"),
+                "{name} must not hold RiskConfig"
+            );
+            assert!(
+                !body.contains("GateConfig"),
+                "{name} must not hold GateConfig"
+            );
+        }
     }
 
     #[test]

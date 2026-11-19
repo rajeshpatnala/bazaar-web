@@ -1,11 +1,13 @@
 //! Plain-English number formatting for gate messages: rupees with Indian grouping, percentages.
 
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, RoundingStrategy};
 
-/// Rupees first, Indian digit grouping, paise only when present: `Rs 3,050`, `-Rs 1,00,000.50`.
+/// Rupees first (half rounds away from zero, so a loss is never understated), Indian digit grouping, paise only when present: `Rs 3,050`, `-Rs 1,00,000.50`.
 #[must_use]
 pub fn rupees(amount: Decimal) -> String {
-    let rounded = amount.round_dp(2).normalize();
+    let rounded = amount
+        .round_dp_with_strategy(2, RoundingStrategy::MidpointAwayFromZero)
+        .normalize();
     let negative = rounded.is_sign_negative() && !rounded.is_zero();
     let text = rounded.abs().to_string();
     let (int_part, frac_part) = match text.split_once('.') {
@@ -57,6 +59,14 @@ mod tests {
             ("940.00", "Rs 940"),
             ("0.004", "Rs 0"),
             ("-0.004", "Rs 0"),
+            ("3000.005", "Rs 3,000.01"),
+            ("-3000.005", "-Rs 3,000.01"),
+            ("0.005", "Rs 0.01"),
+            ("0.015", "Rs 0.02"),
+            ("0.0049", "Rs 0"),
+            ("10000000", "Rs 1,00,00,000"),
+            ("123456789012", "Rs 1,23,45,67,89,012"),
+            ("-100000000.5", "-Rs 10,00,00,000.50"),
         ];
         for (input, want) in cases {
             assert_eq!(rupees(d(input)), want, "input {input}");

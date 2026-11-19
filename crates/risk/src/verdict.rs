@@ -138,14 +138,14 @@ impl std::fmt::Display for RuleId {
 }
 
 /// Outcome of one rule: observed value, limit, pass or fail, and a plain-English message.
+/// Fields are private: build with `pass` or `fail`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuleResult {
-    pub rule: RuleId,
-    pub passed: bool,
-    pub observed: String,
-    pub limit: String,
-    /// Failures end with the rule id in brackets, e.g. `... (G03)`.
-    pub message: String,
+    rule: RuleId,
+    passed: bool,
+    observed: String,
+    limit: String,
+    message: String,
 }
 
 impl RuleResult {
@@ -179,6 +179,36 @@ impl RuleResult {
         }
     }
 
+    /// The rule this result belongs to.
+    #[must_use]
+    pub const fn rule(&self) -> RuleId {
+        self.rule
+    }
+
+    /// True when the rule passed.
+    #[must_use]
+    pub const fn passed(&self) -> bool {
+        self.passed
+    }
+
+    /// The observed value, formatted.
+    #[must_use]
+    pub fn observed(&self) -> &str {
+        &self.observed
+    }
+
+    /// The limit, formatted.
+    #[must_use]
+    pub fn limit(&self) -> &str {
+        &self.limit
+    }
+
+    /// Plain-English message; failures end with the rule id in brackets.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
     /// The override level of this rule (from the single table).
     #[must_use]
     pub const fn level(&self) -> OverrideLevel {
@@ -186,18 +216,75 @@ impl RuleResult {
     }
 }
 
-/// All rule results for one intent, with the hash of the config they ran under.
+/// A verdict that does not hold exactly one result per rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerdictError {
+    /// No results at all.
+    Empty,
+    /// A rule in `EVALUATION_ORDER` has no result.
+    Missing(RuleId),
+    /// A rule has more than one result.
+    Duplicate(RuleId),
+}
+
+impl std::fmt::Display for VerdictError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => f.write_str("the gate produced no rule results"),
+            Self::Missing(r) => write!(f, "the gate produced no result for rule {r}"),
+            Self::Duplicate(r) => write!(f, "the gate produced two results for rule {r}"),
+        }
+    }
+}
+
+impl std::error::Error for VerdictError {}
+
+/// All rule results for one intent, with the hash of the config they ran under. Built only by
+/// [`GateVerdict::new`], which requires every rule exactly once, so a partial verdict cannot pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateVerdict {
-    pub config_hash: ConfigHash,
-    pub results: Vec<RuleResult>,
+    config_hash: ConfigHash,
+    results: Vec<RuleResult>,
 }
 
 impl GateVerdict {
-    /// An empty verdict is not a pass: no rules ran.
+    /// Check that every id in `EVALUATION_ORDER` appears exactly once, then keep the results in
+    /// evaluation order.
+    pub fn new(config_hash: ConfigHash, results: &[RuleResult]) -> Result<Self, VerdictError> {
+        if results.is_empty() {
+            return Err(VerdictError::Empty);
+        }
+        let mut ordered = Vec::with_capacity(RuleId::EVALUATION_ORDER.len());
+        for rule in RuleId::EVALUATION_ORDER {
+            let mut found = results.iter().filter(|r| r.rule == rule);
+            let first = found.next().ok_or(VerdictError::Missing(rule))?;
+            if found.next().is_some() {
+                return Err(VerdictError::Duplicate(rule));
+            }
+            ordered.push(first.clone());
+        }
+        Ok(Self {
+            config_hash,
+            results: ordered,
+        })
+    }
+
+    /// The hash of the config the rules ran under.
+    #[must_use]
+    pub const fn config_hash(&self) -> &ConfigHash {
+        &self.config_hash
+    }
+
+    /// Every rule result, in evaluation order.
+    #[must_use]
+    pub fn results(&self) -> &[RuleResult] {
+        &self.results
+    }
+
+    /// True when every rule passed (a verdict always holds every rule).
     #[must_use]
     pub fn passed(&self) -> bool {
-        !self.results.is_empty() && self.results.iter().all(|r| r.passed)
+        self.results.iter().all(|r| r.passed)
     }
 
     /// Failed results, in evaluation order.
@@ -252,6 +339,79 @@ mod tests {
         (RuleId::X03, No),
     ];
 
+    /// Compile-time exhaustiveness: adding a `RuleId` variant breaks the match in `check` until
+    /// `ALL`, `GOLDEN` and `EVALUATION_ORDER` are updated too.
+    fn all_rules() -> Vec<RuleId> {
+        const fn check(r: RuleId) {
+            match r {
+                RuleId::G01
+                | RuleId::G02
+                | RuleId::G03
+                | RuleId::G04a
+                | RuleId::G04b
+                | RuleId::G05
+                | RuleId::G06
+                | RuleId::G07
+                | RuleId::G08
+                | RuleId::G09
+                | RuleId::G10
+                | RuleId::G11
+                | RuleId::G13
+                | RuleId::G14
+                | RuleId::G15
+                | RuleId::G16
+                | RuleId::G17
+                | RuleId::G18
+                | RuleId::G19
+                | RuleId::X01
+                | RuleId::X02
+                | RuleId::X03 => {}
+            }
+        }
+        let all = vec![
+            RuleId::G01,
+            RuleId::G02,
+            RuleId::G03,
+            RuleId::G04a,
+            RuleId::G04b,
+            RuleId::G05,
+            RuleId::G06,
+            RuleId::G07,
+            RuleId::G08,
+            RuleId::G09,
+            RuleId::G10,
+            RuleId::G11,
+            RuleId::G13,
+            RuleId::G14,
+            RuleId::G15,
+            RuleId::G16,
+            RuleId::G17,
+            RuleId::G18,
+            RuleId::G19,
+            RuleId::X01,
+            RuleId::X02,
+            RuleId::X03,
+        ];
+        for r in &all {
+            check(*r);
+        }
+        all
+    }
+
+    #[test]
+    fn all_list_equals_order_and_golden() {
+        let mut all = all_rules();
+        let mut order = RuleId::EVALUATION_ORDER.to_vec();
+        let mut golden: Vec<RuleId> = GOLDEN.iter().map(|(r, _)| *r).collect();
+        all.sort();
+        order.sort();
+        golden.sort();
+        assert_eq!(all, order);
+        assert_eq!(all, golden);
+        all.dedup();
+        assert_eq!(all.len(), RuleId::EVALUATION_ORDER.len(), "duplicate id");
+    }
+
     #[test]
     fn override_levels_match_the_golden_table() {
         for (rule, level) in GOLDEN {
@@ -260,24 +420,16 @@ mod tests {
     }
 
     #[test]
-    fn evaluation_order_covers_every_rule_once_in_skill_order() {
-        let order = RuleId::EVALUATION_ORDER;
-        assert_eq!(
-            &order[..4],
-            &[RuleId::G16, RuleId::G15, RuleId::G03, RuleId::G08]
-        );
-        let mut sorted = order.to_vec();
-        sorted.sort();
-        sorted.dedup();
-        assert_eq!(sorted.len(), GOLDEN.len());
-        for (rule, _) in GOLDEN {
-            assert!(
-                order.contains(&rule),
-                "{rule} missing from evaluation order"
-            );
-        }
-        // G01 and the exposure rules run last.
-        assert_eq!(&order[20..], &[RuleId::G01, RuleId::G05]);
+    fn evaluation_order_is_pinned() {
+        use RuleId::*;
+        let want = [
+            G16, G15, G03, G08, G19, G18, G17, X01, X02, X03, G06, G07, G13, G09, G10, G11, G02,
+            G14, G04a, G04b, G01, G05,
+        ];
+        assert_eq!(RuleId::EVALUATION_ORDER, want);
+        let n = RuleId::EVALUATION_ORDER.len();
+        assert_eq!(n, GOLDEN.len());
+        assert_eq!(RuleId::EVALUATION_ORDER.get(n - 2..), Some(&[G01, G05][..]));
     }
 
     #[test]
@@ -302,41 +454,91 @@ mod tests {
             "Rs 3,000",
             "You are down Rs 3,050. ",
         );
-        assert!(!r.passed);
-        assert!(r.message.ends_with("(G03)"), "{}", r.message);
+        assert!(!r.passed());
+        assert!(r.message().ends_with("(G03)"), "{}", r.message());
         assert_eq!(r.level(), HardCeiling);
-        assert!(RuleResult::pass(RuleId::G02, "a", "b").passed);
+        assert_eq!(
+            (r.rule(), r.observed(), r.limit()),
+            (RuleId::G03, "-Rs 3,050", "Rs 3,000")
+        );
+        assert!(RuleResult::pass(RuleId::G02, "a", "b").passed());
     }
 
-    fn verdict(results: Vec<RuleResult>) -> GateVerdict {
-        GateVerdict {
-            config_hash: ConfigHash::of_text("x"),
-            results,
-        }
+    fn hash() -> ConfigHash {
+        ConfigHash::of_text("x")
     }
 
-    fn fail(rule: RuleId) -> RuleResult {
-        RuleResult::fail(rule, "o", "l", "no")
+    fn pass_all() -> Vec<RuleResult> {
+        all_rules()
+            .into_iter()
+            .map(|r| RuleResult::pass(r, "a", "b"))
+            .collect()
+    }
+
+    fn with_fail(rules: &[RuleId]) -> GateVerdict {
+        let results: Vec<RuleResult> = pass_all()
+            .into_iter()
+            .map(|r| {
+                if rules.contains(&r.rule()) {
+                    RuleResult::fail(r.rule(), "o", "l", "no")
+                } else {
+                    r
+                }
+            })
+            .collect();
+        GateVerdict::new(hash(), &results).unwrap()
     }
 
     #[test]
-    fn empty_verdict_is_not_a_pass() {
-        assert!(!verdict(vec![]).passed());
-        assert!(!verdict(vec![]).overridable());
-    }
-
-    #[test]
-    fn all_pass_is_a_pass_and_not_overridable_input() {
-        let v = verdict(vec![RuleResult::pass(RuleId::G02, "a", "b")]);
+    fn full_pass_is_a_pass_in_evaluation_order() {
+        let mut shuffled = pass_all();
+        shuffled.reverse();
+        let v = GateVerdict::new(hash(), &shuffled).unwrap();
         assert!(v.passed() && !v.overridable());
         assert_eq!(v.failures().count(), 0);
+        assert_eq!(v.results().len(), 22);
+        let got: Vec<RuleId> = v.results().iter().map(RuleResult::rule).collect();
+        assert_eq!(got, RuleId::EVALUATION_ORDER.to_vec());
+        assert_eq!(v.config_hash(), &hash());
+    }
+
+    #[test]
+    fn partial_empty_duplicate_and_missing_verdicts_are_errors() {
+        assert_eq!(GateVerdict::new(hash(), &[]), Err(VerdictError::Empty));
+        let partial = vec![RuleResult::pass(RuleId::G02, "a", "b")];
+        assert!(matches!(
+            GateVerdict::new(hash(), &partial),
+            Err(VerdictError::Missing(_))
+        ));
+
+        let mut dup = pass_all();
+        dup.push(RuleResult::fail(RuleId::G03, "o", "l", "no"));
+        assert_eq!(
+            GateVerdict::new(hash(), &dup),
+            Err(VerdictError::Duplicate(RuleId::G03))
+        );
+
+        let mut missing = pass_all();
+        missing.retain(|r| r.rule() != RuleId::G10);
+        assert_eq!(
+            GateVerdict::new(hash(), &missing),
+            Err(VerdictError::Missing(RuleId::G10))
+        );
+        for e in [
+            VerdictError::Empty,
+            VerdictError::Missing(RuleId::G10),
+            VerdictError::Duplicate(RuleId::G03),
+        ] {
+            assert!(e.to_string().contains("rule") || e.to_string().contains("results"));
+        }
     }
 
     #[test]
     fn hard_or_no_failure_blocks_the_whole_override() {
-        assert!(verdict(vec![fail(RuleId::G14), fail(RuleId::G05)]).overridable());
-        assert!(!verdict(vec![fail(RuleId::G14), fail(RuleId::G03)]).overridable());
-        assert!(!verdict(vec![fail(RuleId::G05), fail(RuleId::G17)]).overridable());
-        assert!(verdict(vec![fail(RuleId::G01)]).overridable());
+        assert!(with_fail(&[RuleId::G14, RuleId::G05]).overridable());
+        assert!(!with_fail(&[RuleId::G14, RuleId::G03]).overridable());
+        assert!(!with_fail(&[RuleId::G05, RuleId::G17]).overridable());
+        assert!(with_fail(&[RuleId::G01]).overridable());
+        assert!(!with_fail(&[RuleId::G01]).passed());
     }
 }
