@@ -30,6 +30,7 @@ pub mod params;
 pub mod registry;
 pub mod signal;
 pub mod strategy;
+#[cfg(test)]
 pub mod testkit;
 pub mod trend_pullback;
 

@@ -8,8 +8,8 @@ use bazaar_core::segment::InstrumentKind;
 use bazaar_regime::{Fit, Trend, Tri, label};
 use chrono::DateTime;
 use chrono_tz::Tz;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::{Decimal, RoundingStrategy};
 
 use crate::context::{ContextError, StrategyContext};
 use crate::strategy::StrategyMeta;
@@ -45,8 +45,21 @@ pub enum Reject {
     ForbiddenWord(&'static str),
 }
 
-/// Words a why-text must never carry (we never imply certainty).
-const FORBIDDEN: [&str; 3] = ["sure", "safe", "guaranteed"];
+/// Whole words a why-text must never carry (we never imply certainty or give a tip).
+const FORBIDDEN_WORDS: [&str; 9] = [
+    "sure",
+    "safe",
+    "safely",
+    "guarantee",
+    "guarantees",
+    "guaranteed",
+    "riskfree",
+    "tip",
+    "recommended",
+];
+
+/// Phrases a why-text must never carry (matched on the lowercase text).
+const FORBIDDEN_PHRASES: [&str; 4] = ["risk-free", "risk free", "buy now", "you should"];
 
 /// The one f64 -> Decimal boundary.
 ///
@@ -95,6 +108,8 @@ pub fn entry_guards(
     if ctx.portfolio.holds(ctx.instrument.instrument_token) {
         return Err(Reject::Held);
     }
+    // Fail closed: a market `breakdown` of Unknown (no stress check made) also blocks, stricter
+    // than "not Breakdown" on purpose (unsure means no trade; matches `RegimeFit::allows`).
     let m = ctx.market_regime;
     if !matches!(m.trend, Trend::Up | Trend::Range) || m.breakdown != Tri::False {
         return Err(Reject::MarketGate(label(m)));
@@ -122,7 +137,8 @@ fn snap(raw: Decimal, tick: Decimal, mode: Mode) -> Result<Decimal, Reject> {
     let n = match mode {
         Mode::Floor => steps.floor(),
         Mode::Ceil => steps.ceil(),
-        Mode::Nearest => steps.round(),
+        // Ties go away from zero (not banker's rounding): a price on a tick midpoint rounds up.
+        Mode::Nearest => steps.round_dp_with_strategy(0, RoundingStrategy::MidpointAwayFromZero),
     };
     n.checked_mul(tick).ok_or(Reject::BadTick)
 }
@@ -165,12 +181,19 @@ pub fn on_tick(ctx: &StrategyContext<'_>, price: Decimal) -> Result<bool, Reject
 /// Entry zone `[close, close + frac x ATR]` (unrounded; pass it through [`round_levels`]).
 ///
 /// # Errors
-/// `NotFinite`.
+/// `Indicator("atr")` for a non-positive ATR, `NotFinite` for a bad width or overflow.
 pub fn entry_zone(close: Decimal, atr: f64, frac: f64) -> Result<(Decimal, Decimal), Reject> {
+    if atr <= 0.0 {
+        return Err(Reject::Indicator("atr"));
+    }
+    if frac < 0.0 {
+        return Err(Reject::NotFinite);
+    }
     let width = to_decimal(atr)?
         .checked_mul(to_decimal(frac)?)
         .ok_or(Reject::NotFinite)?;
-    Ok((close, close.saturating_add(width)))
+    let high = close.checked_add(width).ok_or(Reject::NotFinite)?;
+    Ok((close, high))
 }
 
 /// Close of the next trading session from the calendar: the signal's `valid_until`.
@@ -194,7 +217,10 @@ pub fn check_stop(l: &Levels, atr: f64, max_stop_atr: f64) -> Result<Decimal, Re
     if l.stop >= l.entry_low {
         return Err(Reject::WrongSideStop);
     }
-    let risk = l.entry_high - l.stop;
+    let risk = l.entry_high.checked_sub(l.stop).ok_or(Reject::NotFinite)?;
+    if atr <= 0.0 || max_stop_atr <= 0.0 {
+        return Err(Reject::Indicator("atr"));
+    }
     let cap = to_decimal(atr)?
         .checked_mul(to_decimal(max_stop_atr)?)
         .ok_or(Reject::NotFinite)?;
@@ -207,19 +233,22 @@ pub fn check_stop(l: &Levels, atr: f64, max_stop_atr: f64) -> Result<Decimal, Re
     Ok(risk)
 }
 
-/// `(target - entry_low) / (entry_high - stop)` to two places (the `Signal` tolerance), rejected
-/// when below `min_rr`.
+/// `(target - entry_low) / (entry_high - stop)`, rejected when below `min_rr` (compared before
+/// rounding); returned to two places rounded down (within the `Signal` tolerance).
 ///
 /// # Errors
 /// `WrongSideStop` for a non-positive risk, `RrTooLow`, `NotFinite`.
 pub fn check_rr(l: &Levels, min_rr: f64) -> Result<Decimal, Reject> {
-    let risk = l.entry_high - l.stop;
+    let risk = l.entry_high.checked_sub(l.stop).ok_or(Reject::NotFinite)?;
     if risk <= Decimal::ZERO {
         return Err(Reject::WrongSideStop);
     }
-    let rr = ((l.target - l.entry_low) / risk).round_dp(2);
+    let reward = l.target.checked_sub(l.entry_low).ok_or(Reject::NotFinite)?;
+    let exact = reward.checked_div(risk).ok_or(Reject::NotFinite)?;
     let floor = to_decimal(min_rr)?;
-    if rr < floor {
+    // The floor is a hard gate: compare the unrounded ratio, then report it rounded DOWN.
+    let rr = exact.round_dp_with_strategy(2, RoundingStrategy::ToZero);
+    if exact < floor {
         return Err(Reject::RrTooLow { rr, min_rr: floor });
     }
     Ok(rr)
@@ -230,35 +259,53 @@ pub fn check_rr(l: &Levels, min_rr: f64) -> Result<Decimal, Reject> {
 /// target, caution).
 #[derive(Debug, Clone, Copy)]
 pub struct Why<'a> {
+    /// Rupee risk, in the unit named by `risk_basis`.
     pub risk_rupees: Decimal,
+    /// Whether `risk_rupees` is per share (a strategy knows no quantity) or for the whole trade
+    /// (sizing supplied the quantity). The text says which, so the two are never confused.
+    pub risk_basis: RiskBasis,
     pub setup: &'a str,
     /// Plain-English regime label (`bazaar_regime::label`).
     pub regime_label: &'a str,
-    pub proven_wrong_below: Decimal,
+    /// The stop level; the text says price "falls to or below" it, because a stop is an order that
+    /// can trigger inside the day, not only at the close.
+    pub proven_wrong_at: Decimal,
     pub closing: &'a str,
 }
 
-/// Build the why-text.
+/// What a rupee-risk figure is measured over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RiskBasis {
+    PerShare,
+    WholeTrade,
+}
+
+/// Build the why-text. Risk is rounded UP to paise and prices shown to two places.
 ///
 /// # Errors
-/// `ForbiddenWord` when any part contains the word "sure", "safe" or "guaranteed".
+/// `ForbiddenWord` when any part carries a banned word or phrase (certainty, tips, "buy now").
 pub fn why_text(w: &Why<'_>) -> Result<String, Reject> {
+    let basis = match w.risk_basis {
+        RiskBasis::PerShare => "per share",
+        RiskBasis::WholeTrade => "on this trade",
+    };
+    let risk = w
+        .risk_rupees
+        .round_dp_with_strategy(2, RoundingStrategy::ToPositiveInfinity);
     let text = format!(
-        "Risk first: you could lose about Rs {}. {} Market today: {}. Proven wrong if: price closes below {}. {}",
-        w.risk_rupees.round_dp(2).normalize(),
-        w.setup,
-        w.regime_label,
-        w.proven_wrong_below.normalize(),
-        w.closing
+        "Risk first: you could lose about Rs {risk:.2} {basis}. {} Market today: {}. Proven wrong if: price falls to or below {:.2}. {}",
+        w.setup, w.regime_label, w.proven_wrong_at, w.closing
     );
     let lower = text.to_lowercase();
-    for word in FORBIDDEN {
-        if lower
-            .split(|c: char| !c.is_alphanumeric())
-            .any(|t| t == word)
-        {
-            return Err(Reject::ForbiddenWord(word));
+    let tokens = || lower.split(|c: char| !c.is_alphanumeric());
+    if let Some(word) = FORBIDDEN_WORDS.iter().chain(&FORBIDDEN_PHRASES).find(|f| {
+        if f.contains(['-', ' ']) {
+            lower.contains(**f)
+        } else {
+            tokens().any(|t| t == **f)
         }
+    }) {
+        return Err(Reject::ForbiddenWord(word));
     }
     Ok(text.trim_end().to_owned())
 }
@@ -434,6 +481,50 @@ mod tests {
             check_rr(&lv("100", "102", "102", "116"), 1.0),
             Err(Reject::WrongSideStop)
         );
+        // True rr 7.48 / 5 = 1.496: the floor 1.5 compares before rounding, so this fails.
+        let near = lv("100", "105", "100", "107.48");
+        assert!(matches!(check_rr(&near, 1.5), Err(Reject::RrTooLow { .. })));
+        assert_eq!(check_rr(&near, 1.4), Ok(d("1.49")), "reported rounded down");
+        // Overflow is an error, not a panic.
+        let huge = Levels {
+            entry_low: Decimal::MIN,
+            entry_high: Decimal::MAX,
+            stop: Decimal::MIN,
+            target: Decimal::MAX,
+        };
+        assert_eq!(check_rr(&huge, 1.0), Err(Reject::NotFinite));
+        let wide = Levels {
+            entry_low: Decimal::MAX,
+            ..huge
+        };
+        assert_eq!(check_stop(&wide, 1.0, 1.0), Err(Reject::NotFinite));
+    }
+
+    #[test]
+    fn nearest_tick_ties_go_away_from_zero_and_noise_does_not_add_a_tick() {
+        let w = ok_world(); // tick 0.05
+        // 100.025 is exactly half a tick above 100.00: banker's would give 100.00.
+        let r = round_levels(&w.ctx(), &lv("100.025", "100.05", "94", "116.025")).unwrap();
+        assert_eq!((r.entry_low, r.target), (d("100.05"), d("116.05")));
+        // f64 noise on the zone width must not push the top of the zone up a whole tick.
+        let (lo, hi) = entry_zone(d("100"), 7.999_999_999_999_999, 0.25).unwrap();
+        let r = round_levels(&w.ctx(), &lv("100", &hi.to_string(), "94", "116")).unwrap();
+        assert_eq!((lo, r.entry_high), (d("100"), d("102.00")));
+    }
+
+    #[test]
+    fn bad_atr_or_fraction_is_rejected_with_the_right_reason() {
+        assert_eq!(
+            entry_zone(d("100"), 0.0, 0.25),
+            Err(Reject::Indicator("atr"))
+        );
+        assert_eq!(
+            entry_zone(d("100"), -1.0, 0.25),
+            Err(Reject::Indicator("atr"))
+        );
+        assert_eq!(entry_zone(d("100"), 2.0, -0.1), Err(Reject::NotFinite));
+        let l = lv("100", "102", "94", "116");
+        assert_eq!(check_stop(&l, 0.0, 2.0), Err(Reject::Indicator("atr")));
     }
 
     #[test]
@@ -448,31 +539,53 @@ mod tests {
     #[test]
     fn why_text_leads_with_risk_and_names_regime_and_stop() {
         let t = why_text(&Why {
-            risk_rupees: d("1000.00"),
+            risk_rupees: d("1000.001"),
+            risk_basis: RiskBasis::WholeTrade,
             setup: "ABC closed above its 20-day high.",
             regime_label: "Uptrend, normal swings",
-            proven_wrong_below: d("94.50"),
+            proven_wrong_at: d("94.5"),
             closing: "We leave after 60 days.",
         })
         .unwrap();
         assert_eq!(
             t,
-            "Risk first: you could lose about Rs 1000. ABC closed above its 20-day high. \
-             Market today: Uptrend, normal swings. Proven wrong if: price closes below 94.5. \
-             We leave after 60 days."
+            "Risk first: you could lose about Rs 1000.01 on this trade. ABC closed above its \
+             20-day high. Market today: Uptrend, normal swings. Proven wrong if: price falls to \
+             or below 94.50. We leave after 60 days."
         );
+        let per = why_text(&Why {
+            risk_rupees: d("8"),
+            risk_basis: RiskBasis::PerShare,
+            setup: "s.",
+            regime_label: "r",
+            proven_wrong_at: d("1"),
+            closing: "",
+        })
+        .unwrap();
+        assert!(per.starts_with("Risk first: you could lose about Rs 8.00 per share."));
     }
 
     #[test]
     fn why_text_refuses_certainty_words_but_not_substrings() {
         let mk = |setup: &'static str| Why {
             risk_rupees: d("1"),
+            risk_basis: RiskBasis::PerShare,
             setup,
             regime_label: "x",
-            proven_wrong_below: d("1"),
+            proven_wrong_at: d("1"),
             closing: "",
         };
-        for w in ["A sure thing.", "It is SAFE.", "Guaranteed gains."] {
+        for w in [
+            "A sure thing.",
+            "It is SAFE.",
+            "Guaranteed gains.",
+            "A risk-free idea.",
+            "Buy now!",
+            "You should act.",
+            "A hot tip.",
+            "Safely done.",
+            "Recommended.",
+        ] {
             assert!(
                 matches!(why_text(&mk(w)), Err(Reject::ForbiddenWord(_))),
                 "{w}"

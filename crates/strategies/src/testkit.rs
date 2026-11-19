@@ -27,7 +27,11 @@ use crate::strategy::StrategyMeta;
 /// `(open, high, low, close, volume)` with whole-rupee prices.
 pub type Row = (i64, i64, i64, i64, u64);
 
-/// First fixture session (a Monday). Later sessions follow the calendar, holidays skipped.
+/// `([open, high, low, close], volume)` with exact `Decimal` prices (fractional closes).
+pub type DRow = ([Decimal; 4], u64);
+
+/// First fixture session (a Monday). Later sessions follow the calendar, holidays skipped. The
+/// fixtures depend on `calendar.toml` marking Tue 2026-03-03 a holiday (a test pins it).
 const FIRST_SESSION: (i32, u32, u32) = (2026, 3, 2);
 
 /// Index of the decision bar a fresh [`World`] is aligned to (a 5-bar series).
@@ -65,24 +69,27 @@ pub fn session_time(i: usize) -> DateTime<Tz> {
     close_at(&cal, sessions(&cal, i + 1)[i])
 }
 
-/// Daily candles on consecutive sessions. Asserts the strictly increasing times the engine must
-/// guarantee, and that every row is a valid candle.
+/// Daily candles on consecutive sessions from whole-rupee rows (see [`bars_dec`] for fractions).
 #[must_use]
 pub fn bars(rows: &[Row], adjusted: bool) -> Vec<Candle> {
+    let p = |x: i64| Decimal::from(x);
+    let dec: Vec<DRow> = rows
+        .iter()
+        .map(|&(o, h, l, c, v)| ([p(o), p(h), p(l), p(c)], v))
+        .collect();
+    bars_dec(&dec, adjusted)
+}
+
+/// Daily candles on consecutive sessions from `([open, high, low, close], volume)` rows. Asserts
+/// the strictly increasing times the engine must guarantee, and that every row is a valid candle.
+#[must_use]
+pub fn bars_dec(rows: &[DRow], adjusted: bool) -> Vec<Candle> {
     let cal = calendar();
     let out: Vec<Candle> = sessions(&cal, rows.len())
         .into_iter()
         .zip(rows)
-        .map(|(day, &(o, h, l, c, v))| {
-            let p = |x: i64| Decimal::from(x);
-            Candle::new(
-                close_at(&cal, day),
-                Interval::Day,
-                [p(o), p(h), p(l), p(c)],
-                v,
-                adjusted,
-            )
-            .unwrap()
+        .map(|(day, &(ohlc, v))| {
+            Candle::new(close_at(&cal, day), Interval::Day, ohlc, v, adjusted).unwrap()
         })
         .collect();
     assert!(
@@ -202,6 +209,12 @@ mod tests {
         assert_eq!(session_time(1), b[1].close_time());
         assert!(b.iter().all(Candle::adjusted));
         assert!(!bars(&[(1, 1, 1, 1, 1)], false)[0].adjusted());
+        let p = |s: &str| s.parse::<Decimal>().unwrap();
+        let f = bars_dec(
+            &[([p("100.10"), p("100.40"), p("99.95"), p("100.25")], 5)],
+            true,
+        );
+        assert_eq!(f[0].close(), p("100.25"));
     }
 
     #[test]
