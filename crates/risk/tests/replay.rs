@@ -130,11 +130,12 @@ fn eval(i: &OrderIntent, s: &PortfolioSnapshot, at: DateTime<Tz>) -> Evaluation 
     let inst = instrument(i.lot_size);
     let quote = at;
     // The margin need is worked out for the opening part of the order (X03 checks the quantity).
-    let held: u32 = s
-        .positions
-        .known()
-        .map(|v| v.iter().filter(|p| p.symbol == i.symbol).map(|p| p.qty).sum())
-        .unwrap_or(0);
+    let held: u32 = s.positions.known().map_or(0, |v| {
+        v.iter()
+            .filter(|p| p.symbol == i.symbol)
+            .map(|p| p.qty)
+            .sum()
+    });
     let entry_qty = if i.side == Side::Sell {
         i.qty.0.saturating_sub(held)
     } else {
