@@ -7,7 +7,7 @@
 )]
 
 use bazaar_risk::config::{Baseline, EffectiveLimits, GateConfig};
-use bazaar_risk::sizing::{Sized, SizingError, SizingInput, size, sizing_equity};
+use bazaar_risk::sizing::{Sized, SizingError, SizingInput, size, size_with_cost, sizing_equity};
 use bazaar_risk::snapshot::PortfolioSnapshot;
 use bazaar_risk::types::{Side, Tri};
 use proptest::prelude::*;
@@ -279,6 +279,7 @@ fn error_messages_are_plain_english() {
     for e in [
         SizingError::ZeroLot,
         SizingError::ZeroTick,
+        SizingError::PriceOffTick,
         SizingError::BadPrice,
         SizingError::EntryEqualsStop,
         SizingError::StopOnWrongSide,
@@ -354,5 +355,98 @@ proptest! {
     fn same_inputs_same_size(eq in 10_000i64..1_000_000, entry in 50i64..2000) {
         let dist = (entry / 20).max(1);
         prop_assert_eq!(run(eq, entry, dist, 1, false), run(eq, entry, dist, 1, false));
+    }
+}
+
+#[test]
+fn cost_that_grows_with_qty_steps_the_size_down() {
+    let mut l = limits();
+    l.max_position_value_pct = d(100);
+    // Flat Rs 60 gives 94 shares; Rs 1 a share of cost cannot fit at 94 (940 + 94 > 1000).
+    let cost = |q: u32| Tri::Known(d(60) + d(i64::from(q)));
+    let s = size_with_cost(&l, &input(), &cost).unwrap();
+    assert!(s.qty < 94);
+    let total = s.risk_at_stop + d(60) + d(i64::from(s.qty));
+    assert!(total <= s.budget);
+    // One more share would not have fit.
+    let more = d(10) * d(i64::from(s.qty) + 1) + d(60) + d(i64::from(s.qty) + 1);
+    assert!(more > s.budget);
+}
+
+#[test]
+fn cost_below_floor_or_unknown_at_the_final_qty_rejects() {
+    let l = limits();
+    let low = |q: u32| Tri::Known(if q > 1 { d(10) } else { d(60) });
+    assert_eq!(
+        size_with_cost(&l, &input(), &low),
+        Err(SizingError::BufferBelowFloor)
+    );
+    let unk = |q: u32| {
+        if q > 1 {
+            Tri::Unknown
+        } else {
+            Tri::Known(d(60))
+        }
+    };
+    assert!(matches!(
+        size_with_cost(&l, &input(), &unk),
+        Err(SizingError::InputUnknown(_))
+    ));
+}
+
+#[test]
+fn cost_that_eats_the_budget_is_no_trade() {
+    let l = limits();
+    let huge = |q: u32| Tri::Known(d(60) + d(i64::from(q)) * d(1000));
+    assert_eq!(
+        size_with_cost(&l, &input(), &huge),
+        Err(SizingError::BudgetBelowOneLot)
+    );
+}
+
+#[test]
+fn prices_off_the_tick_are_rejected() {
+    let mut i = input();
+    i.stop = Decimal::new(48997, 2); // 489.97 on a 0.05 tick
+    assert_eq!(size(&limits(), &i), Err(SizingError::PriceOffTick));
+    let mut i = input();
+    i.entry = Decimal::new(50003, 2);
+    assert_eq!(size(&limits(), &i), Err(SizingError::PriceOffTick));
+    let mut i = input();
+    i.entry = Decimal::new(51235, 2); // 512.35
+    i.stop = Decimal::new(50810, 2); // 508.10
+    let s = size(&limits(), &i).unwrap();
+    assert_eq!(s.risk_at_stop, d(i64::from(s.qty)) * Decimal::new(425, 2));
+    assert!(s.risk_at_stop + d(60) <= s.budget);
+}
+
+proptest! {
+    #[test]
+    fn paise_prices_both_sides_stay_within_budget(
+        eq in 10_000i64..10_000_000,
+        entry_p in 5_000i64..500_000, // paise, tick 0.05 => multiples of 5
+        dist_p in 1i64..100,
+        sell in any::<bool>(),
+        lot in prop::sample::select(vec![1u32, 5, 25, 75]),
+        over in any::<bool>(),
+    ) {
+        let l = limits();
+        let entry = Decimal::new(entry_p * 5, 2);
+        let dist = Decimal::new(dist_p * 5, 2);
+        prop_assume!(dist < entry);
+        let mut i = input();
+        i.equity = d(eq);
+        i.entry = entry;
+        i.stop = if sell { entry + dist } else { entry - dist };
+        i.side = if sell { Side::Sell } else { Side::Buy };
+        i.lot_size = lot;
+        i.overridden = over;
+        let cost = |q: u32| Tri::Known(l.min_charges_slippage_buffer + Decimal::new(i64::from(q), 1));
+        if let Ok(s) = size_with_cost(&l, &i, &cost) {
+            prop_assert_eq!(s.qty % lot, 0);
+            let c = l.min_charges_slippage_buffer + Decimal::new(i64::from(s.qty), 1);
+            prop_assert!(s.risk_at_stop + c <= s.budget);
+            prop_assert!(s.notional <= d(eq) * l.max_position_value_pct / d(100));
+        }
     }
 }

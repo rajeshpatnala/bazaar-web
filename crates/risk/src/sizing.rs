@@ -3,6 +3,16 @@
 //!
 //! `qty = floor((equity x risk% - buffer) / per-unit risk)`, floored to lots, then capped by the
 //! position-value cap (G14), then (overridden trades) by `size_factor`, floored to lots again.
+//! Finally the size steps down a lot at a time until `risk at stop + cost(qty) <= budget`, where
+//! the cost (charges + slippage) is worked out for that quantity (`size_with_cost`).
+//!
+//! Scope: `size` is for stop-defined linear instruments (equity, futures) only. Options sizing is
+//! out of F6 scope: a short option leg has unbounded loss and a bought option risks its premium,
+//! so rule G13 must keep those entries away from `size`.
+//!
+//! Not applied here: the cash/margin cap and the G16 per-order notional cap. The gate rejects an
+//! order above either (X03 margin, G16), and G14 counts an existing same-symbol position; the
+//! sizer does not shrink the size for them.
 
 use crate::config::EffectiveLimits;
 use crate::snapshot::PortfolioSnapshot;
@@ -20,6 +30,8 @@ pub enum SizingError {
     ZeroLot,
     /// Tick size is 0 or negative.
     ZeroTick,
+    /// Entry or stop is not a multiple of the tick size.
+    PriceOffTick,
     /// Entry price is 0 or negative.
     BadPrice,
     EntryEqualsStop,
@@ -48,6 +60,7 @@ impl fmt::Display for SizingError {
         let text = match self {
             Self::ZeroLot => "the lot size is 0, so the size cannot be worked out",
             Self::ZeroTick => "the tick size is 0, so the size cannot be worked out",
+            Self::PriceOffTick => "the entry or stop price is not on a valid price step",
             Self::BadPrice => "the entry price must be above 0",
             Self::EntryEqualsStop => "the stop is at the entry price, so there is no risk to size",
             Self::StopOnWrongSide => "the stop is on the wrong side of the entry price",
@@ -82,7 +95,8 @@ pub struct SizingInput {
     pub stop: Decimal,
     pub lot_size: u32,
     pub tick_size: Decimal,
-    /// Total estimated charges + slippage for the trade, rupees; `Unknown` rejects.
+    /// Total estimated charges + slippage, rupees, used by [`size`] as a flat figure (compute it
+    /// for the largest candidate quantity); `Unknown` rejects. [`size_with_cost`] ignores it.
     pub buffer: Tri<Decimal>,
     /// Apply `override.size_factor` (an overridden trade).
     pub overridden: bool,
@@ -148,9 +162,8 @@ fn lots_in(qty: Decimal, lot: u32) -> Result<u32, SizingError> {
         .ok_or(SizingError::Arithmetic)
 }
 
-/// Size one trade. Rejects: lot or tick 0, entry == stop, stop on the wrong side, zero equity,
-/// unknown or too-small buffer, budget below one lot, bad `size_factor`.
-pub fn size(limits: &EffectiveLimits, input: &SizingInput) -> Result<Sized, SizingError> {
+/// Input checks: lot, tick, prices on the tick grid, stop side, equity.
+fn validate(input: &SizingInput) -> Result<(), SizingError> {
     if input.lot_size == 0 {
         return Err(SizingError::ZeroLot);
     }
@@ -159,6 +172,11 @@ pub fn size(limits: &EffectiveLimits, input: &SizingInput) -> Result<Sized, Sizi
     }
     if input.entry <= Decimal::ZERO || input.stop <= Decimal::ZERO {
         return Err(SizingError::BadPrice);
+    }
+    if input.entry.checked_rem(input.tick_size) != Some(Decimal::ZERO)
+        || input.stop.checked_rem(input.tick_size) != Some(Decimal::ZERO)
+    {
+        return Err(SizingError::PriceOffTick);
     }
     if input.entry == input.stop {
         return Err(SizingError::EntryEqualsStop);
@@ -173,12 +191,36 @@ pub fn size(limits: &EffectiveLimits, input: &SizingInput) -> Result<Sized, Sizi
     if input.equity <= Decimal::ZERO {
         return Err(SizingError::ZeroEquity);
     }
-    let buffer = *input.buffer.known().ok_or(SizingError::InputUnknown(
-        "the charges and slippage allowance",
-    ))?;
-    if buffer < limits.min_charges_slippage_buffer || buffer < Decimal::ZERO {
-        return Err(SizingError::BufferBelowFloor);
-    }
+    Ok(())
+}
+
+/// Size one trade with a flat `input.buffer` as the cost at every quantity. See [`size_with_cost`].
+pub fn size(limits: &EffectiveLimits, input: &SizingInput) -> Result<Sized, SizingError> {
+    size_with_cost(limits, input, &|_| input.buffer)
+}
+
+/// Size one trade; `cost(qty)` is the total charges + slippage for that quantity, rupees.
+/// Rejects: lot or tick 0, entry == stop, stop on the wrong side, zero equity,
+/// unknown or too-small buffer, budget below one lot, bad `size_factor`.
+pub fn size_with_cost(
+    limits: &EffectiveLimits,
+    input: &SizingInput,
+    cost: &dyn Fn(u32) -> Tri<Decimal>,
+) -> Result<Sized, SizingError> {
+    validate(input)?;
+    // Cost for a quantity: known, non-negative and not below the configured floor.
+    let cost_at = |qty: Decimal| -> Result<Decimal, SizingError> {
+        let q = qty.to_u32().ok_or(SizingError::Arithmetic)?;
+        let c = *cost(q).known().ok_or(SizingError::InputUnknown(
+            "the charges and slippage allowance",
+        ))?;
+        if c < limits.min_charges_slippage_buffer || c < Decimal::ZERO {
+            return Err(SizingError::BufferBelowFloor);
+        }
+        Ok(c)
+    };
+    // First estimate from the cost of one lot; the step-down below fixes it for the final size.
+    let buffer = cost_at(Decimal::from(input.lot_size))?;
 
     let per_unit = input
         .entry
@@ -232,23 +274,30 @@ pub fn size(limits: &EffectiveLimits, input: &SizingInput) -> Result<Sized, Sizi
         lots = scaled;
     }
 
-    let qty_dec = Decimal::from(lots)
-        .checked_mul(Decimal::from(input.lot_size))
-        .ok_or(SizingError::Arithmetic)?;
+    // Step down a lot at a time until risk at the stop plus the cost of that quantity fits.
+    let lot_dec = Decimal::from(input.lot_size);
+    let (qty_dec, risk_at_stop) = loop {
+        if lots == 0 {
+            return Err(SizingError::BudgetBelowOneLot);
+        }
+        let qty_dec = Decimal::from(lots)
+            .checked_mul(lot_dec)
+            .ok_or(SizingError::Arithmetic)?;
+        let risk = qty_dec
+            .checked_mul(per_unit)
+            .ok_or(SizingError::Arithmetic)?;
+        let total = risk
+            .checked_add(cost_at(qty_dec)?)
+            .ok_or(SizingError::Arithmetic)?;
+        if total <= budget {
+            break (qty_dec, risk);
+        }
+        lots = lots.saturating_sub(1);
+    };
     let qty = qty_dec.to_u32().ok_or(SizingError::Arithmetic)?;
-    let risk_at_stop = qty_dec
-        .checked_mul(per_unit)
-        .ok_or(SizingError::Arithmetic)?;
     let notional = qty_dec
         .checked_mul(input.entry)
         .ok_or(SizingError::Arithmetic)?;
-    // Re-check: rounding must never leave the trade above budget.
-    let total = risk_at_stop
-        .checked_add(buffer)
-        .ok_or(SizingError::Arithmetic)?;
-    if total > budget {
-        return Err(SizingError::Arithmetic);
-    }
     Ok(Sized {
         qty,
         lots,
