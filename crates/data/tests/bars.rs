@@ -363,7 +363,7 @@ fn year_outside_calendar_counts_calendar_errors() {
     let mut late = r[0];
     late.0 += Duration::days(365 * 2); // 2028: not in covered_years
     let (bars, s) = run(Interval::Min5, &[mk(&late, Interval::Min1)]);
-    assert!(bars.is_empty());
+    assert_eq!(bars.len(), 0);
     assert_eq!(s.calendar_errors, 1);
     assert_eq!(s.out_of_session, 0);
 }
@@ -410,7 +410,7 @@ fn min_timestamp_does_not_panic() {
     );
     if let Ok(c) = c {
         let (bars, s) = run(Interval::Min5, &[c]);
-        assert!(bars.is_empty());
+        assert_eq!(bars.len(), 0);
         assert_eq!(s.accepted, 0);
     }
 }
