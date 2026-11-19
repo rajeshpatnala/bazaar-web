@@ -8,6 +8,7 @@ pub mod calendar;
 pub mod candle;
 pub mod clock;
 pub mod config;
+pub mod dataview;
 pub mod disclaimer;
 pub mod error;
 pub mod instrument;
