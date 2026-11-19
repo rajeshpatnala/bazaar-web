@@ -83,3 +83,7 @@ Test fixture `fixtures/config/risk.toml` gained the same sections with synthetic
 
 ## Slice 5 (portfolio rules: G02, G04a, G04b, G14)
 - `rules/portfolio.rs`: pure fns taking the gate's one `ref_price`. G02 = new risk + max(charges buffer, floor) + held risk of a same-side holding (stored stop) vs `max_risk_per_trade_pct`; G04b = new risk + risk of surviving positions; G14 = new qty at ref plus same-side holding at its mark. Stops in profit count as 0 risk; a flip drops the closed position. Unknown stop, risk price, mark, equity or buffer rejects entries. Tests are inline (need `pub(crate)` rule_ctx), not `tests/portfolio.rs`.
+- Fix round (PR 56): G02/G04b take `risk_ref` (Buy `max(intent, live)`, Sell `min(intent, live)`), G14 keeps `ref_price = max`; the gate (slice 11) must compute both. Opposite holding leaves only when `exit_qty > 0`; G14 rejects mark <= 0 or duplicate marks; symbols compare trimmed, case-insensitive.
+- Owner to confirm (CR-56-3): G02 adds the new order's charges allowance to the held risk of a same-side add.
+- Symbols must reach the gate in canonical instrument-master form (RISK-56-5); gate test in slice 11.
+- Deferred: slice 11/11b pass the charges buffer for the FINAL qty into G02 with a cost-grows-with-qty test (RISK-56-3, QR-56-5; below-floor is raised to the floor, `size` rejects it); slice 12 replays boundaries against shipped `config/risk.toml` (RISK-56-4); F10 validates marks at snapshot build.

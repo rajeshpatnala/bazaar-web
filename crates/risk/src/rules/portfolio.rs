@@ -1,7 +1,12 @@
 //! Portfolio rules: G02 (risk per trade), G04a (open positions), G04b (total open risk) and
 //! G14 (position value cap). Pure checks: thresholds come from `RuleCtx.limits`, equity from
-//! `sizing_equity` (the figure `size` uses), and the entry is valued at `ref_price`, the worst
-//! case `max(intent.price, live price)` computed once by the gate and never re-derived here.
+//! `sizing_equity` (the figure `size` uses), and the entry is priced by the gate once, never
+//! re-derived here: G14 value uses `ref_price = max(intent.price, live)`; the risk rules (G02,
+//! G04b) use `risk_ref`, the worst case for the side: `max(intent, live)` for a Buy and
+//! `min(intent, live)` for a Sell (a lower short fill widens the stop distance).
+//! G02 takes the charges allowance from the snapshot (floored); the gate must supply the figure
+//! computed for the FINAL quantity (RISK-50-2, RISK-56-3; below-floor is raised to the floor).
+//! Symbols are compared trimmed and case-insensitively.
 //!
 //! Entry-only: exits and stop moves pass. Any unknown input (positions, stops, marks, equity,
 //! charges buffer) rejects an entry. Comparisons are exact `Decimal` (cross-multiplied, no
@@ -34,12 +39,15 @@ fn over_cap(amount: Decimal, cap_pct: Decimal, equity: Decimal) -> Option<bool> 
     Some(amount.checked_mul(Decimal::ONE_HUNDRED)? > cap_pct.checked_mul(equity)?)
 }
 
-/// Rupee value of a cap, for the message only.
-fn cap_amount(cap_pct: Decimal, equity: Decimal) -> Decimal {
+/// Rupee value of a cap, for the message. `None` on overflow (the rule then cannot confirm).
+fn cap_amount(cap_pct: Decimal, equity: Decimal) -> Option<Decimal> {
     cap_pct
-        .checked_mul(equity)
-        .and_then(|v| v.checked_div(Decimal::ONE_HUNDRED))
-        .unwrap_or(Decimal::ZERO)
+        .checked_mul(equity)?
+        .checked_div(Decimal::ONE_HUNDRED)
+}
+
+fn same_symbol(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
 }
 
 /// True when the order opens exposure; otherwise the rule has nothing to check.
@@ -47,14 +55,20 @@ fn is_entry(cls: &Classification) -> bool {
     cls.action == Action::Entry && cls.entry_qty > 0
 }
 
-/// Positions that stay open after this order: a flip closes the same-symbol opposite position.
+/// Positions that stay open after this order: an opposite-side holding in the intent's symbol
+/// leaves only when the gate's classification really closes quantity (`exit_qty > 0`); with
+/// duplicate rows `classify` closes nothing and the holding stays (RISK-56-1).
 fn surviving<'a>(
     positions: &'a [Position],
     intent: &'a OrderIntent,
+    cls: &'a Classification,
 ) -> impl Iterator<Item = &'a Position> {
-    positions
-        .iter()
-        .filter(move |p| p.qty > 0 && (p.symbol != intent.symbol || p.side == intent.side))
+    positions.iter().filter(move |p| {
+        p.qty > 0
+            && (!same_symbol(&p.symbol, &intent.symbol)
+                || p.side == intent.side
+                || cls.exit_qty == 0)
+    })
 }
 
 /// Rupees at risk from `from` to `stop` for `qty` (a stop in profit counts as 0).
@@ -66,7 +80,7 @@ fn risk_of(side: Side, qty: u32, from: Decimal, stop: Decimal) -> Option<Decimal
     per.max(Decimal::ZERO).checked_mul(Decimal::from(qty))
 }
 
-/// Risk of the new quantity from the reference price to the intent's own stop.
+/// Risk of the new quantity from the side-aware risk reference to the intent's own stop.
 fn new_risk(
     intent: &OrderIntent,
     cls: &Classification,
@@ -81,6 +95,11 @@ fn new_risk(
         return Err("the stop is not on the loss side of the price".into());
     }
     risk_of(intent.side, cls.entry_qty, ref_price, stop).ok_or_else(|| OVERFLOW.into())
+}
+
+/// A held position in the intent's symbol on the intent's side (an add).
+fn held_same(p: &Position, intent: &OrderIntent) -> bool {
+    p.qty > 0 && same_symbol(&p.symbol, &intent.symbol) && p.side == intent.side
 }
 
 /// Risk of one held position from its stored risk price to its stored stop.
@@ -100,20 +119,22 @@ fn verdict(
     what: &str,
 ) -> RuleResult {
     let limit = pct(cap_pct);
-    match over_cap(total, cap_pct, equity) {
-        Some(false) => RuleResult::pass(rule, rupees(total), limit),
-        Some(true) => RuleResult::fail(
+    match (
+        over_cap(total, cap_pct, equity),
+        cap_amount(cap_pct, equity),
+    ) {
+        (Some(false), _) => RuleResult::pass(rule, rupees(total), limit),
+        (Some(true), Some(cap)) => RuleResult::fail(
             rule,
             rupees(total),
             &limit,
             &format!(
-                "{} {}, above your {} cap ({limit} of your account).",
-                what,
+                "{what} {}, above your {} cap ({limit} of your account).",
                 rupees(total),
-                rupees(cap_amount(cap_pct, equity))
+                rupees(cap)
             ),
         ),
-        None => unsure(rule, &limit, OVERFLOW),
+        _ => unsure(rule, &limit, OVERFLOW),
     }
 }
 
@@ -126,7 +147,7 @@ pub fn g02(
     intent: &OrderIntent,
     cls: &Classification,
     snap: &PortfolioSnapshot,
-    ref_price: Decimal,
+    risk_ref: Decimal,
 ) -> RuleResult {
     let rule = RuleId::G02;
     let l = &ctx.limits;
@@ -145,12 +166,11 @@ pub fn g02(
             "positions, account value or the charges allowance is unknown",
         );
     };
-    let total = new_risk(intent, cls, ref_price).and_then(|new| {
+    let total = new_risk(intent, cls, risk_ref).and_then(|new| {
         let mut sum = new
             .checked_add((*buffer).max(l.min_charges_slippage_buffer))
             .ok_or(OVERFLOW)?;
-        let same = |p: &&Position| p.qty > 0 && p.symbol == intent.symbol && p.side == intent.side;
-        for p in positions.iter().filter(same) {
+        for p in positions.iter().filter(|p| held_same(p, intent)) {
             sum = sum.checked_add(held_risk(p)?).ok_or(OVERFLOW)?;
         }
         Ok(sum)
@@ -185,10 +205,11 @@ pub fn g04a(
     let Some(positions) = snap.positions.known() else {
         return unsure(rule, &limit, "open positions are unknown");
     };
-    let mut symbols: Vec<&str> = surviving(positions, intent)
-        .map(|p| p.symbol.as_str())
+    let norm = |s: &str| s.trim().to_ascii_uppercase();
+    let mut symbols: Vec<String> = surviving(positions, intent, cls)
+        .map(|p| norm(&p.symbol))
         .collect();
-    symbols.push(&intent.symbol);
+    symbols.push(norm(&intent.symbol));
     symbols.sort_unstable();
     symbols.dedup();
     let after = u32::try_from(symbols.len()).unwrap_or(u32::MAX);
@@ -214,7 +235,7 @@ pub fn g04b(
     intent: &OrderIntent,
     cls: &Classification,
     snap: &PortfolioSnapshot,
-    ref_price: Decimal,
+    risk_ref: Decimal,
 ) -> RuleResult {
     let rule = RuleId::G04b;
     let l = &ctx.limits;
@@ -225,9 +246,9 @@ pub fn g04b(
     let (Some(positions), Ok(equity)) = (snap.positions.known(), sizing_equity(snap, l)) else {
         return unsure(rule, &limit, "positions or account value are unknown");
     };
-    let total = new_risk(intent, cls, ref_price).and_then(|new| {
+    let total = new_risk(intent, cls, risk_ref).and_then(|new| {
         let mut sum = new;
-        for p in surviving(positions, intent) {
+        for p in surviving(positions, intent, cls) {
             sum = sum.checked_add(held_risk(p)?).ok_or(OVERFLOW)?;
         }
         Ok(sum)
@@ -274,25 +295,41 @@ pub fn g14(
     if ref_price <= Decimal::ZERO {
         return unsure(rule, &limit, "the reference price is not positive");
     }
-    let mut value = ref_price.checked_mul(Decimal::from(cls.entry_qty));
-    let same = |p: &&Position| p.qty > 0 && p.symbol == intent.symbol && p.side == intent.side;
-    for p in positions.iter().filter(same) {
-        let Some(mark) = marks.iter().find(|m| m.symbol == p.symbol) else {
-            return unsure(rule, &limit, &format!("{} has no mark price", p.symbol));
+    let mut value = ref_price
+        .checked_mul(Decimal::from(cls.entry_qty))
+        .ok_or(OVERFLOW);
+    for p in positions.iter().filter(|p| held_same(p, intent)) {
+        let mut found = marks.iter().filter(|m| same_symbol(&m.symbol, &p.symbol));
+        let (Some(mark), None) = (found.next(), found.next()) else {
+            return unsure(
+                rule,
+                &limit,
+                &format!("{} needs exactly one mark price", p.symbol),
+            );
         };
-        value = value
-            .zip(mark.price.checked_mul(Decimal::from(p.qty)))
-            .and_then(|(a, b)| a.checked_add(b));
+        if mark.price <= Decimal::ZERO {
+            return unsure(
+                rule,
+                &limit,
+                &format!("the mark for {} is not positive", p.symbol),
+            );
+        }
+        value = value.and_then(|v| {
+            mark.price
+                .checked_mul(Decimal::from(p.qty))
+                .and_then(|h| v.checked_add(h))
+                .ok_or(OVERFLOW)
+        });
     }
     match value {
-        Some(v) => verdict(
+        Ok(v) => verdict(
             rule,
             v,
             l.max_position_value_pct,
             equity,
             "This position would be worth",
         ),
-        None => unsure(rule, &limit, OVERFLOW),
+        Err(why) => unsure(rule, &limit, why),
     }
 }
 
@@ -523,5 +560,129 @@ mod tests {
         assert!(!g14(&c, &i, &cls(&i, &unknown), &unknown, d("500")).passed());
         let exit = intent("ABC", Side::Sell, 30, None);
         assert!(g14(&c, &exit, &cls(&exit, &held), &held, d("500")).passed());
+    }
+
+    fn short(sym: &str, qty: u32, stop: &str) -> Position {
+        let mut p = pos(sym, Side::Sell, qty, Tri::Known(d(stop)));
+        p.risk_price = Tri::Known(d("500"));
+        p
+    }
+
+    #[test]
+    fn g02_short_uses_lower_price_as_worst_case() {
+        let c = ctx();
+        let s = snap(vec![]);
+        // Intent 500, live 495, stop 505: the gate passes 495 for a Sell: 97 x 10 + 15 > Rs 500.
+        let i = intent("ABC", Side::Sell, 97, Some("505"));
+        assert!(g02(&c, &i, &cls(&i, &s), &s, d("500")).passed());
+        assert!(!g02(&c, &i, &cls(&i, &s), &s, d("495")).passed());
+    }
+
+    #[test]
+    fn g04b_short_boundary_and_held_short() {
+        let c = ctx();
+        let s = snap(vec![short("AAA", 100, "510")]);
+        for (qty, ok) in [(99, true), (100, true), (101, false)] {
+            let i = intent("BBB", Side::Sell, qty, Some("510"));
+            assert_eq!(g04b(&c, &i, &cls(&i, &s), &s, d("500")).passed(), ok);
+        }
+        let i = intent("BBB", Side::Sell, 100, Some("510"));
+        assert!(!g04b(&c, &i, &cls(&i, &s), &s, d("490")).passed());
+    }
+
+    #[test]
+    fn g04b_duplicate_rows_keep_the_opposite_holding() {
+        let c = ctx();
+        let rows = || pos("ABC", Side::Buy, 100, Tri::Known(d("490")));
+        let s = snap(vec![rows(), rows()]);
+        // classify closes nothing with two rows: held 2,000 + new 10 must fail.
+        let i = intent("ABC", Side::Sell, 1, Some("510"));
+        assert_eq!(cls(&i, &s).exit_qty, 0);
+        assert!(msg_ok(&g04b(&c, &i, &cls(&i, &s), &s, d("500")), "G04b"));
+        // G04a counts the symbol once either way.
+        assert!(g04a(&c, &i, &cls(&i, &s), &s).passed());
+    }
+
+    #[test]
+    fn profit_stops_count_as_zero_not_negative() {
+        let c = ctx();
+        let long = snap(vec![pos("AAA", Side::Buy, 400, Tri::Known(d("520")))]);
+        let short_p = snap(vec![short("AAA", 400, "480")]);
+        // New 300 x 10 = Rs 3,000 is over Rs 2,000 unless the held position offsets it.
+        for s in [long, short_p] {
+            let i = intent("BBB", Side::Buy, 300, Some("490"));
+            assert!(!g04b(&c, &i, &cls(&i, &s), &s, d("500")).passed());
+        }
+        // G02 add with a held stop in profit: held risk 0, new 90 x 5 + 15 = 465 passes.
+        let s = snap(vec![pos("ABC", Side::Buy, 400, Tri::Known(d("520")))]);
+        let i = intent("ABC", Side::Buy, 90, Some("495"));
+        assert!(g02(&c, &i, &cls(&i, &s), &s, d("500")).passed());
+    }
+
+    #[test]
+    fn g02_charges_allowance_floor_and_unknown_risk_price() {
+        let c = ctx();
+        let i = intent("ABC", Side::Buy, 98, Some("495"));
+        let mut s = snap(vec![]);
+        s.charges_buffer = Tri::Known(d("5")); // below the Rs 15 floor: floor applies
+        assert!(!g02(&c, &i, &cls(&i, &s), &s, d("500")).passed());
+        s.charges_buffer = Tri::Known(d("40"));
+        let ok = intent("ABC", Side::Buy, 92, Some("495"));
+        assert!(g02(&c, &ok, &cls(&ok, &s), &s, d("500")).passed());
+        let over = intent("ABC", Side::Buy, 93, Some("495"));
+        assert!(!g02(&c, &over, &cls(&over, &s), &s, d("500")).passed());
+        let mut p = pos("ABC", Side::Buy, 5, Tri::Known(d("490")));
+        p.risk_price = Tri::Unknown;
+        let s = snap(vec![p]);
+        assert!(!g02(&c, &ok, &cls(&ok, &s), &s, d("500")).passed());
+    }
+
+    #[test]
+    fn g14_bad_marks_and_short_add() {
+        let c = ctx();
+        let i = intent("ABC", Side::Buy, 40, Some("490"));
+        let held = snap(vec![pos("ABC", Side::Buy, 30, Tri::Known(d("490")))]);
+        for price in ["0", "-500"] {
+            let mut s = held.clone();
+            s.marks = Tri::Known(vec![Mark {
+                symbol: "ABC".into(),
+                price: d(price),
+            }]);
+            assert!(!g14(&c, &i, &cls(&i, &s), &s, d("500")).passed(), "{price}");
+        }
+        let mut dup = held.clone();
+        dup.marks = Tri::Known(vec![
+            Mark {
+                symbol: "ABC".into(),
+                price: d("500"),
+            },
+            Mark {
+                symbol: "abc".into(),
+                price: d("1"),
+            },
+        ]);
+        assert!(!g14(&c, &i, &cls(&i, &dup), &dup, d("500")).passed());
+        let s = snap(vec![short("ABC", 30, "510")]);
+        let ten = intent("ABC", Side::Sell, 10, Some("510"));
+        assert!(g14(&c, &ten, &cls(&ten, &s), &s, d("500")).passed());
+        let eleven = intent("ABC", Side::Sell, 11, Some("510"));
+        assert!(!g14(&c, &eleven, &cls(&eleven, &s), &s, d("500")).passed());
+    }
+
+    #[test]
+    fn overflow_rejects_without_a_zero_cap_message() {
+        let c = ctx();
+        let s = snap(vec![]);
+        let huge = Decimal::MAX / Decimal::from(2);
+        let i = intent("ABC", Side::Buy, 10, Some("495"));
+        let rs = [
+            g02(&c, &i, &cls(&i, &s), &s, huge),
+            g04b(&c, &i, &cls(&i, &s), &s, huge),
+            g14(&c, &i, &cls(&i, &s), &s, huge),
+        ];
+        for r in rs {
+            assert!(msg_ok(&r, r.rule().as_str()) && !r.message().contains("Rs 0 cap"));
+            assert_eq!(r.observed(), "cannot confirm");
+        }
     }
 }
