@@ -1,7 +1,7 @@
 # strategies.toml: strategy-world config (owner: bz-quant). One file, one config hash in provenance.
 # [regime] holds the F7 classifier definitions (docs/strategy/F7-regime-definitions.md, section 4).
 # Every value is a widely used convention, UNVERIFIED for this app. The owner accepted them on 2026-11-20.
-# They are classifier definitions, never tuned on strategy P&L. [strategy.<id>] tables arrive with F8.
+# They are classifier definitions, never tuned on strategy P&L. [strategy.<id>] tables are below (F8).
 schema_version = 1
 source = "owner decision 2026-11-20: UNVERIFIED conventions, see docs/strategy/F7-regime-definitions.md"
 verified_on = "2026-11-20"
@@ -22,3 +22,55 @@ vol_low_pct = 25.0          # percentile at or below: Low (UNVERIFIED)
 vol_high_pct = 75.0         # percentile at or above: High (UNVERIFIED)
 breadth_breakdown_max_pct = 30.0  # breadth below this counts as collapsing (UNVERIFIED)
 market_vol_source = "vix_if_available"  # or "index_atr" (UNVERIFIED)
+
+# [strategy.<id>] tables (F8, docs/strategy/F8-first-strategies.md sections 3-5). All ship disabled.
+# Every value below is a convention or proposal, UNVERIFIED for this app, accepted by the owner on
+# 2026-11-20, and never tuned on strategy P&L. Unknown keys and out-of-range values fail to load.
+# penalty_weight: score multiplier the scanner applies when the regime cell is allowed but weaker.
+# regime_fit cells are "trend:vol"; weak_cells must also be listed in stock_cells.
+
+[strategy.donchian_breakout]
+enabled = false
+penalty_weight = 0.5        # UNVERIFIED
+[strategy.donchian_breakout.regime_fit]
+market_trends = ["up", "range"]
+stock_cells = ["up:low", "up:normal", "up:high"]
+weak_cells = ["up:high"]
+[strategy.donchian_breakout.params]
+entry_n = 20                # days in the breakout channel (range 15-30)
+exit_n = 10                 # days in the exit channel (7-14)
+stop_atr_mult = 2.5         # initial stop distance in ATR (2.0-3.0)
+vol_ratio_min = 1.2         # volume vs its 20-day average (1.0-1.5)
+max_extension_atr = 1.0     # skip if already stretched (0.5-1.5)
+max_hold_bars = 60          # time stop (40-80)
+min_rr = 1.5                # reference reward:risk floor (1.5-2.0)
+
+[strategy.trend_pullback]
+enabled = false
+penalty_weight = 0.5        # UNVERIFIED (no weak cell today, so unused)
+[strategy.trend_pullback.regime_fit]
+market_trends = ["up", "range"]
+stock_cells = ["up:low", "up:normal"]
+weak_cells = []
+[strategy.trend_pullback.params]
+pullback_lookback = 5       # window to look for the dip (3-8)
+stop_buffer_atr = 0.5       # room under the pullback low, in ATR (0.25-1.0)
+target_r = 2.0              # reward in R (1.5-3.0)
+max_stop_atr = 3.0          # skip if the stop is too far (2.0-3.5)
+max_hold_bars = 15          # time stop (10-25)
+min_rr = 1.5                # reward:risk floor (1.5-2.0)
+
+[strategy.bollinger_reversion]
+enabled = false
+penalty_weight = 0.5        # UNVERIFIED (no weak cell today, so unused)
+[strategy.bollinger_reversion.regime_fit]
+market_trends = ["up", "range"]
+stock_cells = ["range:low", "range:normal"]
+weak_cells = []
+[strategy.bollinger_reversion.params]
+bb_n = 20                   # average length (15-30)
+bb_k = 2.0                  # band width in standard deviations (1.8-2.5)
+stop_buffer_atr = 0.25      # room under the lows, in ATR (0.1-0.5)
+max_stop_atr = 2.0          # skip if the stop is too far (1.5-2.5)
+max_hold_bars = 8           # time stop (5-12)
+min_rr = 1.2                # reward:risk floor (1.2-2.0)
