@@ -30,6 +30,9 @@ Owner area: `crates/indicators`, `core/src/candle.rs`, `crates/data/src/bars.rs`
 ## Deferred
 - TA-Lib/pandas-ta reference CSVs (owner or tester with the tools); F4b indicators.
 - CR-36-3: a test that loads `fixtures/indicators/synthetic_60.csv` and builds `Candle`s (validity); add in the first slice that consumes it.
+- QUAN-42-1 (PR 42): TA-Lib/pandas-ta reference CSVs for Bollinger, Donchian, Keltner, Stochastic, OBV, volume SMA; assert at 1e-8 from the first `Some`; do not invent values.
+- CR-42-3 (PR 42): bands/volume windows are O(N) per bar (MAX_PERIOD 10_000); documented on `Window`, no algorithm change.
+- CR-42-4 (PR 42): merge `ParamError`/`TrendParamError` and shared helpers into `util.rs` after PRs 39, 41 and 42 land (also CR-41-1).
 - Product question for the owner: weekly/monthly bars (not Kite intervals; out of scope).
 
 ## History

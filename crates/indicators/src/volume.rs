@@ -5,7 +5,9 @@ use crate::{Indicator, Ohlcv};
 
 /// On-balance volume: running sum adding V when close rises, subtracting when it falls,
 /// unchanged on equal. The first bar yields 0 (warm-up 1). If the running sum would stop being
-/// finite the bar is skipped (state unchanged) and `None` is returned.
+/// finite the bar is skipped (state unchanged, including the previous close, so the next bar is
+/// compared with the last accepted close) and `None` is returned. A non-finite input bar is also
+/// skipped without repair.
 #[derive(Debug, Clone, Default)]
 pub struct Obv {
     prev_close: Option<f64>,
@@ -38,11 +40,11 @@ impl Indicator for Obv {
             Some(pc) if x.c < pc => -x.v,
             _ => 0.0,
         };
-        self.prev_close = Some(x.c);
         let next = self.sum + delta;
         if !next.is_finite() {
             return None;
         }
+        self.prev_close = Some(x.c);
         self.sum = next;
         Some(next)
     }
@@ -191,6 +193,26 @@ mod tests {
         assert_eq!(out[1], Some(f64::MAX));
         assert_eq!(out[2], None);
         assert_eq!(out[3], Some(f64::MAX + 1.0));
+    }
+
+    #[test]
+    fn obv_bar_after_skipped_overflow_uses_last_accepted_close() {
+        // Bar 2 (close 3) overflows and is skipped. Bar 3 (close 2.5) must compare with close 2
+        // (up, +1e300), not with the skipped close 3 (down).
+        let xs = cv(&[(1.0, 0.0), (2.0, 1e308), (3.0, 1e308), (2.5, 1e300)]);
+        let out = batch(Obv::new(), xs);
+        assert_eq!(out[2], None);
+        assert_eq!(out[3], Some(1e308 + 1e300));
+    }
+
+    #[test]
+    fn lookahead_volume_indicators() {
+        let xs = cv(&(0..30)
+            .map(|i| (100.0 + f64::from(i % 7), 10.0 + f64::from(i % 5)))
+            .collect::<Vec<_>>());
+        testkit::check_contract(Obv::new, &xs, true);
+        testkit::check_contract(|| VolumeSma::new(5).unwrap(), &xs, true);
+        testkit::check_contract(|| VolumeSpike::new(5).unwrap(), &xs, false);
     }
 
     #[test]

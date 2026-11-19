@@ -15,6 +15,8 @@ pub struct StochOut {
 /// Stochastic(N, `smooth_k`, `smooth_d`): raw %K = `100 * (C - LL_N) / (HH_N - LL_N)` (50 when the
 /// range is 0); %K = SMA(`smooth_k`) of raw; %D = SMA(`smooth_d`) of %K. First `Some` at bar index
 /// `N-1 + smooth_k-1 + smooth_d-1`, so warm-up is `N + smooth_k + smooth_d - 2` bars.
+/// Raw %K is clamped to [0, 100], so a malformed bar (close outside its own window range) cannot
+/// push the oscillator out of range; a bar whose range overflows yields `None`.
 #[derive(Debug, Clone)]
 pub struct Stochastic {
     hi: Window,
@@ -61,6 +63,10 @@ impl Indicator for Stochastic {
         } else {
             50.0
         };
+        if !raw.is_finite() {
+            return None;
+        }
+        let raw = raw.clamp(0.0, 100.0);
         if !self.raw.push(raw) {
             return None;
         }
@@ -140,6 +146,45 @@ mod tests {
         assert!(out[..3].iter().all(Option::is_none));
         near(out[3].unwrap().k, 60.0);
         near(out[3].unwrap().d, 60.0);
+    }
+
+    #[test]
+    fn slow_hand_case_k_differs_from_d() {
+        // Same bars plus bar4 (H 12, L 9, C 10): window bars 3-4 HH 13, LL 9 -> raw 100*1/4 = 25.
+        // K4 = (100+25)/2 = 62.5; D4 = (K3 + K4)/2 = (60+62.5)/2 = 61.25.
+        let xs = [
+            bar(0, 10.0, 8.0, 9.0, 1.0),
+            bar(1, 12.0, 9.0, 12.0, 1.0),
+            bar(2, 11.0, 7.0, 8.0, 1.0),
+            bar(3, 13.0, 10.0, 13.0, 1.0),
+            bar(4, 12.0, 9.0, 10.0, 1.0),
+        ];
+        let out = batch(Stochastic::new(2, 2, 2).unwrap(), xs);
+        near(out[4].unwrap().k, 62.5);
+        near(out[4].unwrap().d, 61.25);
+    }
+
+    #[test]
+    fn malformed_bars_are_clamped_or_skipped() {
+        let out = batch(
+            Stochastic::new(1, 1, 1).unwrap(),
+            [bar(0, 5.0, 4.0, 9.0, 1.0), bar(1, 5.0, 4.0, -3.0, 1.0)],
+        );
+        assert_eq!(out[0], Some(StochOut { k: 100.0, d: 100.0 }));
+        assert_eq!(out[1], Some(StochOut { k: 0.0, d: 0.0 }));
+        let huge = bar(0, f64::MAX, -f64::MAX, 0.0, 1.0);
+        assert_eq!(batch(Stochastic::new(1, 1, 1).unwrap(), [huge])[0], None);
+    }
+
+    #[test]
+    fn lookahead_stochastic() {
+        let xs: Vec<Ohlcv> = (0..30)
+            .map(|i| {
+                let c = 100.0 + f64::from(i % 7) * 1.5;
+                bar(i64::from(i), c + 1.0, c - 1.0, c, 1.0)
+            })
+            .collect();
+        testkit::check_contract(|| Stochastic::new(5, 3, 3).unwrap(), &xs, true);
     }
 
     #[test]

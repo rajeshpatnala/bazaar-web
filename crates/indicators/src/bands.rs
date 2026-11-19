@@ -48,7 +48,8 @@ pub(crate) const fn nf(n: usize) -> f64 {
     n as f64
 }
 
-/// Fixed-size rolling window of the last `n` values.
+/// Fixed-size rolling window of the last `n` values. `mean`, `max` and `min` are O(n) per bar
+/// (at most [`MAX_PERIOD`] operations); fine for default parameters, so no running sums or deques.
 #[derive(Debug, Clone)]
 pub(crate) struct Window {
     n: usize,
@@ -106,6 +107,7 @@ pub struct BollingerOut {
 }
 
 /// Bollinger bands over closes, population standard deviation (divide by N). Warm-up N bars.
+/// Returns `None` if the result would overflow to inf/NaN (inputs near `f64::MAX`).
 #[derive(Debug, Clone)]
 pub struct Bollinger {
     k: f64,
@@ -159,13 +161,18 @@ impl Indicator for Bollinger {
             0.5
         };
         let bandwidth = if mid == 0.0 { 0.0 } else { width / mid };
-        Some(BollingerOut {
+        let out = BollingerOut {
             mid,
             upper,
             lower,
             pct_b,
             bandwidth,
-        })
+        };
+        // Overflow on huge inputs must not leak inf/NaN: yield None instead.
+        [mid, upper, lower, pct_b, bandwidth]
+            .iter()
+            .all(|v| v.is_finite())
+            .then_some(out)
     }
     fn reset(&mut self) {
         self.w.clear();
@@ -251,7 +258,9 @@ pub struct KeltnerOut {
 }
 
 /// Keltner channel: EMA(N) of closes +/- m * Wilder ATR(M). First `Some` at bar index
-/// `max(N-1, M)`, so warm-up is `max(N, M+1)` bars.
+/// `max(N-1, M)`, so warm-up is `max(N, M+1)` bars. A skipped non-finite bar is not repaired:
+/// `prev_close` keeps the earlier close, so the next true range spans both bars. Returns `None`
+/// if the result would overflow to inf/NaN.
 #[derive(Debug, Clone)]
 pub struct Keltner {
     ema_n: usize,
@@ -328,11 +337,15 @@ impl Indicator for Keltner {
         }
         self.prev_close = Some(x.c);
         let (mid, atr) = (self.ema?, self.atr?);
-        Some(KeltnerOut {
+        let out = KeltnerOut {
             mid,
             upper: self.mult.mul_add(atr, mid),
             lower: self.mult.mul_add(-atr, mid),
-        })
+        };
+        [out.mid, out.upper, out.lower]
+            .iter()
+            .all(|v| v.is_finite())
+            .then_some(out)
     }
     fn reset(&mut self) {
         self.bars = 0;
@@ -350,15 +363,14 @@ pub(crate) mod fixtures {
     use crate::Ohlcv;
 
     /// Deterministic bar from (high, low, close); open = close, volume given.
-    #[allow(clippy::many_single_char_names)]
-    pub(crate) fn bar(i: i64, h: f64, l: f64, c: f64, v: f64) -> Ohlcv {
+    pub(crate) fn bar(i: i64, high: f64, low: f64, close: f64, vol: f64) -> Ohlcv {
         Ohlcv {
             ts_ms: i * 60_000,
-            o: c,
-            h,
-            l,
-            c,
-            v,
+            o: close,
+            h: high,
+            l: low,
+            c: close,
+            v: vol,
         }
     }
 }
@@ -521,23 +533,26 @@ mod tests {
         assert_eq!(Keltner::new(2, 5, 1.0).unwrap().warmup(), 6);
     }
 
-    #[allow(clippy::many_single_char_names)]
     fn naive_boll(xs: &[f64], n: usize, k: f64) -> Vec<Option<BollingerOut>> {
         (0..xs.len())
             .map(|i| {
                 if i + 1 < n {
                     return None;
                 }
-                let w = &xs[i + 1 - n..=i];
-                let m = w.iter().sum::<f64>() / nf(n);
-                let sd = (w.iter().map(|x| (x - m).powi(2)).sum::<f64>() / nf(n)).sqrt();
-                let (u, l) = (m + k * sd, m - k * sd);
+                let win = &xs[i + 1 - n..=i];
+                let mean = win.iter().sum::<f64>() / nf(n);
+                let sd = (win.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / nf(n)).sqrt();
+                let (up, lo) = (mean + k * sd, mean - k * sd);
                 Some(BollingerOut {
-                    mid: m,
-                    upper: u,
-                    lower: l,
-                    pct_b: if u > l { (xs[i] - l) / (u - l) } else { 0.5 },
-                    bandwidth: if m == 0.0 { 0.0 } else { (u - l) / m },
+                    mid: mean,
+                    upper: up,
+                    lower: lo,
+                    pct_b: if up > lo {
+                        (xs[i] - lo) / (up - lo)
+                    } else {
+                        0.5
+                    },
+                    bandwidth: if mean == 0.0 { 0.0 } else { (up - lo) / mean },
                 })
             })
             .collect()
@@ -570,6 +585,31 @@ mod tests {
                 })
             })
             .collect()
+    }
+
+    #[test]
+    fn overflow_yields_none_not_inf() {
+        let out = batch(Bollinger::new(2, 2.0).unwrap(), [1e308, 1e308]);
+        assert_eq!(out[1], None);
+        let wide = bar(1, f64::MAX, -f64::MAX, 0.0, 1.0);
+        let out = batch(
+            Keltner::new(1, 1, 1.0).unwrap(),
+            [bar(0, 1.0, 0.0, 0.5, 1.0), wide],
+        );
+        assert!(out[0].is_none() && out[1].is_none());
+    }
+
+    #[test]
+    fn lookahead_bollinger_donchian_keltner() {
+        let closes: Vec<f64> = (0..30).map(|i| 100.0 + f64::from(i % 7) * 1.5).collect();
+        testkit::check_contract(|| Bollinger::new(5, 2.0).unwrap(), &closes, true);
+        let xs: Vec<Ohlcv> = closes
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| bar(i64::try_from(i).unwrap(), c + 1.0, c - 1.0, c, 1.0))
+            .collect();
+        testkit::check_contract(|| Donchian::new(5).unwrap(), &xs, true);
+        testkit::check_contract(|| Keltner::new(5, 4, 2.0).unwrap(), &xs, true);
     }
 
     fn bars_from(v: &[(f64, f64, f64)]) -> Vec<Ohlcv> {
