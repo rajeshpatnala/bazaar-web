@@ -168,6 +168,7 @@ mod tests {
             qty,
             risk_price: Tri::Unknown,
             stop,
+            avg_cost: Tri::Unknown,
         }]);
         s
     }
@@ -287,6 +288,7 @@ mod tests {
             qty,
             stop: Tri::Unknown,
             risk_price: Tri::Unknown,
+            avg_cost: Tri::Unknown,
         };
         let mut s = PortfolioSnapshot::unknown();
         s.positions = Tri::Known(vec![row(Side::Buy, 10), row(Side::Sell, 20)]);

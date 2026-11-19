@@ -18,6 +18,8 @@ pub struct Position {
     /// Price the open risk to `stop` is measured from (G04b): the average entry price, or the
     /// mark when that is higher risk. `Unknown` rejects entries under G04b.
     pub risk_price: Tri<Decimal>,
+    /// Average entry cost from the journal; `Unknown` rejects adds to the position (G11).
+    pub avg_cost: Tri<Decimal>,
 }
 
 /// Latest mark for one symbol.
@@ -27,9 +29,10 @@ pub struct Mark {
     pub price: Decimal,
 }
 
-/// Last stop-out time for one symbol.
+/// Time of the last losing exit (net of charges) in one symbol, however it was closed: stop, target or manual.
+/// G17 locks re-entry after any losing exit, so a manual exit at a loss counts, not only a stop hit.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StopOut {
+pub struct LosingExit {
     pub symbol: String,
     pub at: DateTime<Tz>,
 }
@@ -61,7 +64,8 @@ pub struct PortfolioSnapshot {
     pub equity_mtm: Tri<Decimal>,
     /// Latest mark per symbol with an open position (G03/G19 unrealised P&L).
     pub marks: Tri<Vec<Mark>>,
-    pub last_stop_outs: Tri<Vec<StopOut>>,
+    /// Last losing exit per symbol, net of charges (not only stop hits); the journal (F10) must supply it so.
+    pub last_losing_exits: Tri<Vec<LosingExit>>,
 }
 
 impl PortfolioSnapshot {
@@ -85,7 +89,7 @@ impl PortfolioSnapshot {
             realised_pnl: Tri::Unknown,
             equity_mtm: Tri::Unknown,
             marks: Tri::Unknown,
-            last_stop_outs: Tri::Unknown,
+            last_losing_exits: Tri::Unknown,
         }
     }
 
@@ -124,6 +128,7 @@ mod tests {
                 qty: 0,
                 stop: Tri::Unknown,
                 risk_price: Tri::Unknown,
+                avg_cost: Tri::Unknown,
             },
             Position {
                 symbol: "XYZ".into(),
@@ -131,6 +136,7 @@ mod tests {
                 qty: 5,
                 stop: Tri::Unknown,
                 risk_price: Tri::Unknown,
+                avg_cost: Tri::Unknown,
             },
         ]);
         assert!(s.position("ABC").is_none());

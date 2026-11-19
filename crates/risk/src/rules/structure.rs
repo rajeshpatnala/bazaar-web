@@ -232,7 +232,9 @@ fn g16_entry_checks(
         why.push("The order price must be above 0 to check the per-order cap.".into());
         return;
     }
-    match notional_price.checked_mul(Decimal::from(cls.entry_qty)) {
+    // Never below the order's own price: a lower reference would understate a Hard ceiling row.
+    let reference = notional_price.max(intent.price);
+    match reference.checked_mul(Decimal::from(cls.entry_qty)) {
         Some(n) if n <= lim.max_notional_per_order_inr => {}
         Some(n) => why.push(format!(
             "This order is {}, above your {} per-order cap.",
@@ -668,8 +670,10 @@ mod tests {
         // Live is higher: the reference price is the live price and the cap bites.
         let r = run16_at(&c, &i, &snap(), limit_price + d("0.05"));
         assert!(!r.passed() && r.message().contains("per-order cap"));
-        // The gate passes max(intent, live), so a lower live price leaves the intent price.
-        assert!(run16_at(&c, &i, &snap(), limit_price).passed());
+        // A lower reference than the order's own price is floored at the order price.
+        let hi = intent(Side::Buy, 50, &(limit_price + d("0.05")).to_string());
+        let r = run16_at(&c, &hi, &snap(), limit_price);
+        assert!(!r.passed() && r.message().contains("per-order cap"));
     }
 
     #[test]
