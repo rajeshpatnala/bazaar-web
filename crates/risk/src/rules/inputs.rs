@@ -75,7 +75,7 @@ pub struct DataInputs {
 }
 
 fn cannot(rule: RuleId, observed: &str, limit: &str, what: &str, to_pass: &str) -> RuleResult {
-    RuleResult::fail(
+    RuleResult::input_missing(
         rule,
         observed,
         limit,
@@ -359,7 +359,12 @@ pub fn g15(
             Tri::Unknown => why.push("Cannot confirm the age of the price quote. To pass, supply the quote time. When unsure, the app says no.".into()),
         }
     }
-    done(rule, seen.join(", "), limit, &why)
+    // Every G15 failure is stale or missing data, so none is overridable.
+    if why.is_empty() {
+        RuleResult::pass(rule, seen.join(", "), limit)
+    } else {
+        RuleResult::input_missing(rule, seen.join(", "), limit, &why.join(" "))
+    }
 }
 
 /// X01: the exchange is accepting orders now. Every order.
@@ -393,7 +398,7 @@ pub fn x03(cls: &Classification, inputs: &DataInputs) -> RuleResult {
         return no_exposure(rule);
     }
     if inputs.margin.qty != cls.entry_qty {
-        return RuleResult::fail(
+        return RuleResult::input_missing(
             rule,
             format!("need worked out for {} units", inputs.margin.qty),
             format!("{} units ordered", cls.entry_qty),
@@ -865,5 +870,33 @@ mod tests {
         assert!(x03(&cls(s.qty), &i).passed());
         i.margin.required = Tri::Known(s.notional + d("100000"));
         assert!(!x03(&cls(s.qty), &i).passed());
+    }
+
+    #[test]
+    fn missing_or_stale_inputs_are_flagged_input_missing_and_real_failures_are_not() {
+        let now = at(11, 0);
+        let c = ctx(ExecutionMode::Paper, now);
+        let mut i = good(now);
+        i.evidence.oos_trades = Tri::Unknown;
+        i.session_open = Tri::Unknown;
+        i.margin.available = Tri::Unknown;
+        i.events.policy_day = Tri::Unknown;
+        i.ban_list = Tri::Unknown;
+        i.quote_at = Tri::Unknown;
+        for r in [
+            g01(&c, &cls(5), &i),
+            g06(&c, &cls(5), &i),
+            g07(&c, &cls(5), &i),
+            g15(&c, &cls(5), &snap(now), &i),
+            x01(&i),
+            x03(&cls(5), &i),
+        ] {
+            assert!(!r.passed() && r.is_input_missing(), "{}", r.message());
+        }
+        let mut real = good(now);
+        real.evidence.oos_trades = Tri::Known(1);
+        real.session_open = Tri::Known(false);
+        assert!(!g01(&c, &cls(5), &real).is_input_missing());
+        assert!(!x01(&real).is_input_missing());
     }
 }

@@ -121,6 +121,8 @@ pub struct HardLimits {
     pub max_override_per_day: u32,
     /// Ceiling for `override.max_per_week`.
     pub max_override_per_week: u32,
+    /// Smallest allowed `exposure.correlation_window_days` (G05).
+    pub min_correlation_window_days: u32,
 }
 
 /// `[exposure]`: G05.
@@ -421,6 +423,27 @@ impl RiskConfig {
         Ok(())
     }
 
+    /// The only place the correlation window is bounded (structural range, then RISK-52-7: not below its `[hard_limits]` floor).
+    fn validate_correlation_floor(&self) -> Result<(), ConfigError> {
+        let (h, e) = (&self.hard_limits, &self.exposure);
+        check_range(
+            "hard_limits.min_correlation_window_days",
+            h.min_correlation_window_days,
+            CORRELATION_WINDOW_DAYS,
+        )?;
+        check_range(
+            "exposure.correlation_window_days",
+            e.correlation_window_days,
+            CORRELATION_WINDOW_DAYS,
+        )?;
+        check_floor_u32(
+            "exposure.correlation_window_days",
+            e.correlation_window_days,
+            h.min_correlation_window_days,
+        )?;
+        Ok(())
+    }
+
     /// Counts, minutes, correlation, the forbidden flags and the behaviour ceilings.
     fn validate_guards(&self) -> Result<(), ConfigError> {
         let (h, e, b) = (&self.hard_limits, &self.exposure, &self.behaviour);
@@ -440,11 +463,6 @@ impl RiskConfig {
             "exposure.max_correlated_positions",
             e.max_correlated_positions,
             CORRELATED_POSITIONS,
-        )?;
-        check_range(
-            "exposure.correlation_window_days",
-            e.correlation_window_days,
-            CORRELATION_WINDOW_DAYS,
         )?;
         forbid_true(
             "behaviour.allow_stop_widening",
@@ -792,6 +810,7 @@ impl ConfigFile for RiskConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         self.validate_percentages()?;
         self.validate_guards()?;
+        self.validate_correlation_floor()?;
         self.validate_gate_keys()?;
         if self.execution.paper_starting_cash_inr <= Decimal::ZERO {
             return Err(ConfigError::invalid(
@@ -825,6 +844,7 @@ mod tests {
         max_position_value_pct = \"25\"\nmax_sector_pct = \"30\"\nmax_open_positions = 3\n\
         max_orders_per_minute = 10\nmax_orders_per_day = 12\n\
         max_notional_per_order_inr = \"25000\"\nmax_override_per_day = 1\nmax_override_per_week = 3\n\
+        min_correlation_window_days = 20\n\
         max_ban_list_age_hours = 24\nmax_quote_age_secs = 5\nmax_snapshot_age_secs = 10\n\
         latest_expiry_day_no_new_after_ist = \"13:30\"\nmin_confirm_delay_secs = 10\n\
         max_size_factor = \"0.5\"\nmin_oos_trades = 30\n\
@@ -1033,6 +1053,7 @@ mod tests {
         ("hard_limits", "min_confirm_delay_secs"),
         ("hard_limits", "max_size_factor"),
         ("hard_limits", "min_oos_trades"),
+        ("hard_limits", "min_correlation_window_days"),
     ];
 
     /// Each new key removed on its own must fail the load (no serde default to a loose value).
@@ -1412,6 +1433,9 @@ mod tests {
             ("hard_limits", "max_size_factor", "\"0\""),
             ("hard_limits", "max_size_factor", "\"1.1\""),
             ("hard_limits", "min_oos_trades", "0"),
+            ("hard_limits", "min_correlation_window_days", "19"),
+            ("hard_limits", "min_correlation_window_days", "251"),
+            ("exposure", "correlation_window_days", "19"),
             ("override", "max_per_day", "0"),
             ("override", "max_per_day", "2"),
             ("override", "max_per_week", "4"),
@@ -1426,6 +1450,16 @@ mod tests {
                 .expect_err(&format!("{sec}.{key} = {bad}"));
             assert!(err.to_string().contains(key), "{sec}.{key} = {bad}: {err}");
         }
+    }
+
+    /// RISK-52-7: a raised floor refuses a window the file itself would otherwise accept.
+    #[test]
+    fn correlation_window_below_raised_floor_is_refused_naming_the_key() {
+        let t = edit("hard_limits", "min_correlation_window_days", Some("70"));
+        let err = parse_str::<RiskConfig>(&t).unwrap_err().to_string();
+        assert!(err.contains("exposure.correlation_window_days"), "{err}");
+        let t = edit("hard_limits", "min_correlation_window_days", Some("60"));
+        assert!(parse_str::<RiskConfig>(&t).is_ok());
     }
 
     #[test]
@@ -1454,6 +1488,7 @@ mod tests {
             ("data", "max_snapshot_age_secs", "300"),
             ("hard_limits", "min_oos_trades", "1"),
             ("gate.evidence", "min_oos_trades", "1"),
+            ("exposure", "correlation_window_days", "20"),
             ("hard_limits", "min_confirm_delay_secs", "300"),
             ("override", "confirm_delay_secs", "300"),
             ("hard_limits", "max_ban_list_age_hours", "48"),
