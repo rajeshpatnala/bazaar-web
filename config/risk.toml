@@ -49,6 +49,7 @@ max_orders_per_day = 12                 # G16; unverified, owner to confirm
 max_notional_per_order_inr = "25000"    # G16, rupees; unverified, owner to confirm
 max_override_per_day = 1                # unverified, owner to confirm
 max_override_per_week = 3               # unverified, owner to confirm
+min_correlation_window_days = 20       # G05 floor (RISK-52-7); unverified, owner to confirm
 # Added in F6 slice 1b; all at their defaults, unverified, owner to confirm (RISK-46-3, RISK-46-4).
 max_ban_list_age_hours = 24             # G06
 max_quote_age_secs = 5                  # G15
