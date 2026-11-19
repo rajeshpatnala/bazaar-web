@@ -11,7 +11,7 @@ G01-G16 table in `bz-trading-discipline`; this spec only picks scope and default
 | G02 per-trade risk + sizing, G03 daily loss, G04a/b open positions + total open risk | The core capital protection; backtest (F9) and execution (F10) both need them. |
 | G08 cool-off, G09 no stop widening, G10 entry zone only, G11 no averaging down | Behaviour guards: cheap to code, they target the beginner's most expensive habits. |
 | G13 naked short rejected, G14 position cap, G16 mode / kill switch / order rate, X02 lot+tick | Pure checks on the intent and snapshot. |
-| G05 sector + correlation | Pure function on a supplied sector map and return series; no data fetch in F6. |
+| G05 sector + correlation | Pure function on a supplied sector map and return series; no data fetch in F6. The gate also requires every return series to end within 5 calendar days of the snapshot date (constant `MAX_RETURN_LAG_DAYS` in `gate.rs`, not config) and not after it; otherwise G05 rejects as a missing input. |
 | G01 evidence bar, G06 ban list, G07 events, G15 freshness, X01 market open, X03 margin | Build the rule against an input struct; **missing input = Reject** (fail closed). Real data wiring lands with F3/F9/F10. Until then they reject, which is the safe default. |
 | Override engine (typed reason, 30-char note, caps, size_factor) | Caps must live in `risk`. Audit write goes through an `AuditSink` trait; if it fails, the override fails. F10 supplies the real sink. |
 
