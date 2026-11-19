@@ -9,10 +9,36 @@ execution_mode = "paper"
 [limits]
 max_risk_per_trade_pct = "0.5"
 max_daily_loss_pct = "2"
+on_daily_loss = "lockout_entries"
+max_open_positions = 2
+max_total_open_risk_pct = "2"
+max_weekly_loss_pct = "5"
+max_position_value_pct = "20"
 
 [hard_limits]
 max_risk_per_trade_pct = "1.5"
 max_daily_loss_pct = "4"
+max_total_open_risk_pct = "4"
+max_weekly_loss_pct = "8"
+max_cooloff_after_losses = 3
+max_new_entries_per_day = 5
+min_reentry_lockout_minutes = 30
+max_entry_zone_tolerance_bps = 10
 
 [execution]
 paper_starting_cash_inr = "250000"
+
+[exposure]
+max_sector_pct = "25"
+max_correlated_positions = 3
+correlation_threshold = "0.8"
+correlation_window_days = 90
+
+[behaviour]
+cooloff_after_losses = 3
+cooloff_until = "end_of_session"
+allow_stop_widening = false
+allow_averaging_down = false
+entry_zone_tolerance_bps = 5
+reentry_lockout_minutes = 45
+max_new_entries_per_day = 4
