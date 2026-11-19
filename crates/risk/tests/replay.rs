@@ -234,8 +234,8 @@ fn two_losses_pause_entries_until_the_session_ends_but_exits_pass() {
             "an exit is never paused: {exit:?}"
         );
     }
-    // To the session end: still paused later the same session, released next session once the
-    // snapshot's loss counter is reset for the new day.
+    // These cases only pin that the gate holds no day state: it reads the snapshot's counter and
+    // not the time. The real session-end reset (the journal zeroing the counter) is an F10 test.
     s.consecutive_losses = Tri::Known(2);
     let later = thursday() + Duration::hours(4);
     let mut same = s.clone();
@@ -254,8 +254,9 @@ fn two_losses_pause_entries_until_the_session_ends_but_exits_pass() {
 #[test]
 fn a_gap_down_through_the_stop_stops_new_entries_but_never_the_exit() {
     // 100 shares, stop Rs 90 (planned loss Rs 1,000). The open gaps to Rs 50: Rs 5,000 lost, not
-    // the Rs 1,000 the stop promised. The day figure is the real one; equity is the lower of start + realised and the mark-to-market
-    // value, capped at starting cash (Rs 95,000 here), so the day cap is 3% of that = Rs 2,850.
+    // the Rs 1,000 the stop promised. The day figure is the real one; equity is the lower of
+    // start + realised and the mark-to-market value, capped at starting cash (Rs 95,000 here), so
+    // the day cap is 3% of that = Rs 2,850.
     let mut s = snap(thursday(), (2026, 11, 16));
     s.positions = Tri::Known(vec![held_long(100)]);
     s.marks = Tri::Known(vec![Mark {
@@ -265,8 +266,6 @@ fn a_gap_down_through_the_stop_stops_new_entries_but_never_the_exit() {
     s.day_pnl = Tri::Known(d("-5000"));
     s.week_pnl = Tri::Known(d("-5000"));
     s.equity_mtm = Tri::Known(d("95000"));
-    // Note: buying more ABC at Rs 100 against a Rs 50 mark is also an averaging-down add, so G11
-    // fires too; this test asserts only on G03 and G19.
     let entry = failed(&eval(&intent(Side::Buy, 10, 1), &s, thursday()));
     assert!(entry.contains(&RuleId::G03), "{entry:?}");
     assert!(
@@ -306,7 +305,8 @@ fn a_restart_in_the_middle_of_a_lockout_keeps_the_lockout() {
     }]);
     let i = intent(Side::Buy, 10, 1);
     // Determinism check: two fresh gates over the same snapshot agree. The lockout comes only from
-    // the snapshot (`Store` returns an empty baseline), so nothing here proves absence of hidden state.
+    // the snapshot (`Store` returns an empty baseline), so nothing here proves absence of hidden
+    // state.
     let (a, b) = (eval(&i, &s, thursday()), eval(&i, &s, thursday()));
     assert_eq!(failed(&a), vec![RuleId::G17]);
     assert_eq!(a.verdict(), b.verdict());
