@@ -83,11 +83,13 @@ Owner rules, work mode, skills and CLAUDE.md reach every agent already: never re
 **Reuse over cold start.** Every fresh agent re-pays its whole start (Claude Code's prompt, CLAUDE.md, preloaded skills,
 memory) - often more than the work. Continue the existing agent (SendMessage to its id) for fix rounds, the next step
 in the same area, triage questions and command-only steps (rebase). Never launch or continue an agent to run `just ship`. The tech lead who planned or merged is
-the one you continue. **One warm team per feature:** one tech lead and one reviewer of each kind; the next PR of the
-same feature goes to the same reviewer by message ("review PR <n>: `just review-pack <n>`, write to <path>").
-A hook blocks the first fresh launch of a `reuse_roles` agent that already ran on this task this session (unless its
-context passed `reuse_max_context`).
+the one you continue. Continue only while an agent is small: `just warm` says continue or start fresh
+(`reuse_max_context`). **Reviewers are fresh per PR** (a reused reviewer carries every earlier review pack: measured
+~150k per review against ~80k fresh) and are continued only for re-reviews of the same PR. A hook blocks the first
+fresh launch of a `reuse_roles` agent (tech lead, architect) that already ran on this feature.
 Fresh launches are for parallel work or a different area. `just budget-report <id>` shows start vs work per run.
+
+**Records and reviews:** the manager's own records (board, decisions, reports) reach the integration branch through `just records-pr` (no reviewer). Reviewers in worktrees end with `just save-review <path>` so findings survive the worktree. `just run-report <agent>` explains one run's cost.
 
 **Hand-backs:** read once; pass on the verdict and the path, never restate or relay the text; don't re-read files you
 just wrote. **Checkpoints:** developers commit on their branch whenever T0 passes, so undo = `git revert`.

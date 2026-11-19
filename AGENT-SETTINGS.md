@@ -130,6 +130,9 @@ If one of these seems to have no effect, it may need to be set in your shell bef
 | `small_max_files` | 3 | Work touching at most this many files in one area is size S: no plan, one developer, gate only |
 | `checkpoint_commits` | `yes` | Developers commit on their feature branch each time the gate passes, so "undo that step" is a `git revert`, not another agent run |
 | `reuse_roles` | `tech-lead, architect` (+ the kit's consulting agents) | agent names, comma-separated | Agents the manager continues instead of relaunching; a hook blocks the first fresh launch within `reuse_window_minutes` (90) and names the warm agent |
+| `reuse_window_minutes` | 90 | How long after a run an agent still counts as warm for the reuse hook |
+| `reuse_max_context` | 120,000 | Past this size a warm agent is restarted with a short handoff instead of continued (`just warm`) |
+| `efficiency_review` | `yes` | After a feature's last merge the manager runs `just efficiency` and adds a few observations (no agent) |
 | `preview_first` | `yes` | Look-and-feel work gets a cheap preview you pick from before anything is built (frontend kits: clickable demo pages) |
 
 ### Review policy
@@ -143,7 +146,10 @@ If one of these seems to have no effect, it may need to be set in your shell bef
 | `review_pack_max_diff_lines` | 1,200 | number | How much diff reviewers see in one go |
 | `require_feature_record` | `yes` | `yes`, `no` | Feature PRs need `docs/features/F<n>-*.md` before they merge |
 | `require_bug_record` | `yes` | `yes`, `no` | `fix/B<n>` PRs need `docs/bugs/B<n>-*.md` with a regression test |
-| `envelope_reviews` | `yes` | `yes`, `no` | Small PRs (`envelope_max_lines`, default 150) are reviewed by one tool-free Claude call covering every required review, instead of reviewer agents: ~5-15k tokens instead of ~30k+ per reviewer. Big or always-full files (migrations, CI, auth, secrets, lock files, agent files) still get reviewer agents |
+| `envelope_reviews` | `yes` | `yes`, `no` | Small PRs (`envelope_max_lines`, default 400 counted lines, tests at half) are reviewed by one tool-free Claude call covering every required review, instead of reviewer agents: ~5-15k tokens instead of ~30k+ per reviewer. Big or always-full files (migrations, CI, auth, secrets, lock files, agent files) still get reviewer agents |
+| `envelope_max_lines` | 400 | number | Largest PR (counted lines, tests at half) the one-call review takes |
+| `envelope_command` | `claude` | path or name | The `claude` program for one-call reviews (found automatically inside a session) |
+| `require_merge_approval` | `yes` | `yes`, `no` | Feature PRs merge only once approved: by `just triage` when nothing needs judgment, else by the tech lead (`just approve`) |
 | `light_review_docs` | `yes` | `yes`, `no` | Docs-only PRs (never agent, CI or settings files) need no reviewer launch; the tech lead reads the diff |
 
 Check what a PR will get: `just review-plan <pr>`.
@@ -155,6 +161,7 @@ Check what a PR will get: `just review-plan <pr>`.
 | `per_day_tokens` | 15,000,000 | Budget for one day |
 | `warn_percent` | 80 | When the manager warns you a budget is nearly used |
 | `usd_per_million_tokens` | `-` | Your blended price, to show dollar estimates |
+| `manager_clear_at` | 150,000 | Manager conversation size at which you are told to run `just milestone` and `/clear` |
 
 See usage any time: `just budget` (today) or `just budget <task>`; `just budget-report <task>` breaks it down per agent.
 Every run also shows its **cold start** (what the agent loaded before doing any work) separately from its work; `just budget-starts` lists the typical start per agent type. A large start is the reason to continue agents rather than relaunch them, and to keep preloaded skills small.
@@ -167,6 +174,7 @@ current task (`just budget-task F12`), and the manager's own session is measured
 | `integration_branch` | `develop` | Branch feature PRs merge into |
 | `release_branch` | `main` | Branch that only moves with your approval (`just promote`) |
 | `require_ci_checks` | `yes` | Whether GitHub CI must pass before a merge |
+| `delete_merged_branches` | `no` | `yes` deletes a work branch after `just ship` merges it; the integration and release branches never |
 
 ### Approvals
 Says what the manager asks you before. Rows marked `always` can't be turned off.

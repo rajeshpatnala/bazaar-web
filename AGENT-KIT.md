@@ -78,6 +78,8 @@ You ──▶ manager (main session: plans, launches, tracks board + budget, rep
 - **Measured automatically.** A hook reads each agent's transcript when it finishes and books its real usage against the current task (`just budget-task F12`); another measures the manager's own session. Nothing is estimated unless marked `--estimate`. Before each batch the manager checks the projection (`just budget-check F12 dev-data:2 code-reviewer:2`) from those measurements.
 - `just budget-report F12` breaks a task down per agent; large tasks end with a 5-line retrospective (tokens by phase, rework, what you corrected).
 - WARN → it tells you and continues; OVER LIMIT → it stops and asks (raise limit, fewer agents, lower effort, or smaller scope). Every report ends with budget used.
+- **Your real plan allowance.** The kit's status line (bottom of Claude Code) shows `kit: context N% | 5h N% | 7d N%` and saves your plan's 5-hour and weekly usage, so `just budget`, `just budget-check` and the manager warn at 70/85/95%. If you already have your own status line, it still runs; the kit adds one line under it.
+- **Manager size.** The manager's conversation compacts at its `context_window` (team.md); past `manager_clear_at` (150k) you get a one-line note to run `just milestone` and `/clear` - the board carries the state.
 - `just budget` shows today's usage any time. Two numbers per run: *tokens* (the agent's context at its last step, as Claude Code shows it; limits use this) and *processed* (everything sent and received over all its steps, cache reads included, which bill at ~10%). Claude Code's `/usage` stays the authority on cost.
 
 ## Branches, reviews and merging
@@ -148,6 +150,9 @@ Every tool call re-sends an agent's whole context, so cost is roughly *context s
 - **Reviews scale with risk:** code review always; security review only for large PRs or sensitive files (auth, config, SQL/migrations, dependency/lock files, CI, Dockerfile); tester only for behaviour changes. `just review-plan <pr>` shows which ones a PR needs, and `merge-check` enforces exactly those. Tune in `team.md` -> Review policy.
 - **Lean preloads:** reviewers preload only their process skill and the core skill (~4k tokens per turn instead of ~17k); the tech lead loads developer skills on demand. Set `preload_all_stack_skills: yes` in `team.md` -> Context to preload everything.
 - **Turn limits:** reviewers 15, tester 40, tech lead 40 (`team.md`).
+- **Continue, don't relaunch:** `just warm` lists this session's agents and says continue (SendMessage) or start fresh. Reviewers are fresh per PR; developers and the tech lead continue while small.
+- **Where did one run's tokens go?** `just run-report <agent>` (or `--match "PR 31"`) lists each step, the biggest calls and what to change.
+- **Small PRs, one call:** PRs up to `envelope_max_lines` (400 counted lines; tests count half) get every review in one tool-free call (`just envelope`). Larger PRs are flagged for smaller slices next time - never a question to you.
 - Short `CLAUDE.md`, path-scoped rules, store references loaded only when used, the code map instead of repo searches, build-runner absorbing build logs, fixed short formats, and fixes reusing the same developer.
 - Reported token counts include cached context, which is billed at a fraction of the normal rate; `/usage` shows actual cost.
 
@@ -157,7 +162,7 @@ Every setting lives in `.agents/team.md`: per-agent model, effort, turn limit, t
 
 **See `AGENT-SETTINGS.md` for what each setting does, examples, ready-made recipes and troubleshooting.** `just agents-settings` lists them in the terminal.
 
-Change a value, run `just agents-sync`, restart Claude Code. Or ask the manager in chat.
+Change a value with `just set <setting> <value>` (checked against what the kit supports; `just set --list` shows every setting), then restart Claude Code if it was a per-agent value. Or ask the manager in chat - it uses the same command.
 
 `.agents/project.md` is the project profile (data stores, integrations, formats, deploy); stack commands live in `.agents/stack.json`.
 
@@ -197,9 +202,13 @@ Run the new kit's installer against your repo (once per repo that uses this kit)
 | `.agents/stack.json` | Merged: new kit keys (review routing, never-break rules, developer paths) are added; values you changed stay |
 | `project.md`, `decisions.md`, board, plans, reviews, bug drafts, agents you hired, your code | Never touched |
 | Your own `Dockerfile`, CI workflows and similar | Kept; the kit's version is saved beside them as `*.kit` to compare |
+| `.agents/owner-rules.md` | Never touched |
+| Setting descriptions in `team.md` | The kit's own description paragraphs are refreshed to the new wording; your values and your notes stay |
+
+**Safety checks before anything changes:** the installer stops if the repo uses a *different* kit (wrong folder) or a *newer* build than the one you are installing, and asks first (`--force` skips the question). After installing it warns in capitals if any kit recipe is missing from your `justfile`.
 
 **Sending the kit for feedback or an upgrade:** `just export-kit` zips only the kit (agents, skills, hooks, `.agents`
-notes and records, CI, kit docs) and prints its size and contents - never your code, `data/`, build output, worktrees,
+notes and records, CI, kit docs) into your Downloads folder (or the folder above the repo; `--out <path>` to choose) and prints its size and contents - never your code, `data/`, build output, worktrees,
 backups or `.env` files. `just export-kit --list` shows the file list without zipping.
 
 After upgrading:

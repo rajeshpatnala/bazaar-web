@@ -196,5 +196,13 @@
       }
     ]
   },
-  "includeGitInstructions": false
+  "includeGitInstructions": false,
+  "statusLine": {
+    "type": "command",
+    "command": "d=\"${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}\"; python3 \"$d/.claude/kit/statusline.py\""
+  },
+  "worktree": {
+    "baseRef": "head"
+  },
+  "autoCompactWindow": 160000
 }

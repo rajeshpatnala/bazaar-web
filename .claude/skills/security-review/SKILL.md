@@ -18,7 +18,7 @@ Stack-specific rules live in the stack's security skill (listed in the agent's s
 2. Run the stack's red-flag scan (security skill) on changed files.
 3. Threat-model new entry points briefly: who can call it, what it can reach, malicious input, high volume.
 4. Walk the baseline checklist (section 3) and the stack checklist.
-5. Write findings; return <= 10 lines: `security | <feature-id> | <branch> | BLOCK | PASS`, counts by severity, blocker ids, findings path.
+5. Write findings, then `just save-review <path>`; return <= 10 lines: `security | <feature-id> | <branch> | BLOCK | PASS`, counts by severity, blocker ids, findings path.
 6. On re-check, mark each finding `fixed`, `not fixed`, or `accepted risk (by tech lead)`.
 
 ## 3. Baseline checklist
