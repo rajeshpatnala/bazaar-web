@@ -185,14 +185,11 @@ impl<'a> BarBuilder<'a> {
             return None;
         };
         let date = start.with_timezone(&Kolkata).date_naive();
-        let w = match self.window_for(date) {
-            Ok(w) => w.filter(|w| w.open <= start && close <= w.end),
-            Err(_) => {
-                self.stats.calendar_errors += 1;
-                return None;
-            }
+        let Ok(w) = self.window_for(date) else {
+            self.stats.calendar_errors += 1;
+            return None;
         };
-        let Some(w) = w else {
+        let Some(w) = w.filter(|w| w.open <= start && close <= w.end) else {
             self.stats.out_of_session += 1;
             return None;
         };
