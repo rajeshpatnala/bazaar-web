@@ -19,7 +19,7 @@ use crate::rules::loss_limits::{g03, g19};
 use crate::rules::portfolio::{g02, g04a, g04b, g14};
 use crate::rules::structure::{ModeInputs, OptionKind, StructureInputs, g13, g16, x02};
 use crate::snapshot::PortfolioSnapshot;
-use crate::types::{OrderIntent, Tri};
+use crate::types::{OrderIntent, Side, Tri};
 use crate::verdict::{GateVerdict, RuleId, RuleResult, VerdictError};
 use bazaar_core::clock::Clock;
 use bazaar_core::instrument::Instrument;
@@ -111,6 +111,7 @@ pub struct Evaluation {
     ctx: RuleCtx,
     classification: Classification,
     ref_price: Decimal,
+    risk_ref: Decimal,
     limits_digest: ConfigHash,
     clock: EvaluationClock,
 }
@@ -129,12 +130,20 @@ impl Evaluation {
     pub const fn classification(&self) -> &Classification {
         &self.classification
     }
-    /// The one reference price: `max(intent.price, live price)`.
+    /// Notional reference price: `max(intent.price, live price)` (G14, G16, G05, G10).
     #[must_use]
     pub const fn ref_price(&self) -> Decimal {
         self.ref_price
     }
+    /// Risk reference price, side-aware: `max` for a Buy, `min` for a Sell (a lower short fill
+    /// widens the stop distance). Used by G02, G04b and, in 11b, sizing.
+    #[must_use]
+    pub const fn risk_ref(&self) -> Decimal {
+        self.risk_ref
+    }
     /// Digest of the `EffectiveLimits` the rules ran under (file combined with the baseline).
+    /// Computed from the derived `Debug` text: stable within one build and pinned by a golden
+    /// test, so any change to `EffectiveLimits` shows up in review. Not a cross-build format.
     #[must_use]
     pub const fn limits_digest(&self) -> &ConfigHash {
         &self.limits_digest
@@ -147,11 +156,18 @@ impl Evaluation {
 }
 
 /// The gate. Holds no state of its own: config, baseline and clock are injected.
-#[allow(missing_debug_implementations)] // holds trait objects that need not be Debug
 pub struct Gate<'a> {
     config: &'a GateConfig,
     baseline: &'a dyn LimitsBaseline,
     clock: &'a dyn Clock,
+}
+
+impl fmt::Debug for Gate<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Gate")
+            .field("config_hash", self.config.hash())
+            .finish_non_exhaustive()
+    }
 }
 
 fn canonical(symbol: &str) -> bool {
@@ -179,7 +195,9 @@ fn stale_returns(inputs: &ExposureInputs, as_of: Tri<DateTime<Tz>>) -> Option<Ru
         return Some(fail("the snapshot time is unknown".into()));
     };
     let today = at.with_timezone(&Kolkata).date_naive();
-    let oldest_ok = today.checked_sub_signed(Duration::days(MAX_RETURN_LAG_DAYS))?;
+    let Some(oldest_ok) = today.checked_sub_signed(Duration::days(MAX_RETURN_LAG_DAYS)) else {
+        return Some(fail("the snapshot date is out of range".into()));
+    };
     for (sym, series) in &inputs.returns {
         let Some(end) = series.iter().map(|p| p.0).max() else {
             continue; // an empty series is rejected by the rule itself
@@ -223,11 +241,7 @@ impl<'a> Gate<'a> {
         let symbols_ok = canonical(&intent.symbol)
             && inputs
                 .instrument
-                .is_none_or(|i| i.tradingsymbol == intent.symbol)
-            && snapshot
-                .positions
-                .known()
-                .is_none_or(|v| v.iter().all(|p| canonical(&p.symbol)));
+                .is_none_or(|i| i.tradingsymbol == intent.symbol);
         if !symbols_ok {
             return Err(GateReject::Symbol(intent.symbol.clone()));
         }
@@ -235,11 +249,21 @@ impl<'a> Gate<'a> {
         let now = self.clock.now_ist();
         let ctx = rule_ctx(self.config, self.baseline, now).map_err(GateReject::Baseline)?;
         let cls = classify(intent, snapshot).map_err(GateReject::Classify)?;
-        // One reference price for everything that values or sizes an entry.
-        let ref_price = inputs
-            .live_price
+        // A non-canonical held row must not trap exits or stop moves: it rejects entries only.
+        let bad_held = snapshot
+            .positions
             .known()
-            .map_or(intent.price, |live| intent.price.max(*live));
+            .is_some_and(|v| v.iter().any(|p| !canonical(&p.symbol)));
+        if bad_held && cls.entry_qty > 0 {
+            return Err(GateReject::Symbol(intent.symbol.clone()));
+        }
+        // Two reference prices, each computed once: notional (worst = higher) and risk (side-aware).
+        let live = inputs.live_price.known().copied();
+        let ref_price = live.map_or(intent.price, |l| intent.price.max(l));
+        let risk_ref = live.map_or(intent.price, |l| match intent.side {
+            Side::Buy => intent.price.max(l),
+            Side::Sell => intent.price.min(l),
+        });
         let option = inputs.instrument.map_or(Tri::Unknown, |i| {
             OptionKind::from_instrument(i, inputs.defined_max_loss)
         });
@@ -288,10 +312,10 @@ impl<'a> Gate<'a> {
                 RuleId::G09 => g09_stop_widening(intent, snapshot),
                 RuleId::G10 => g10_entry_zone(&ctx, &cls, inputs.entry_zone, inputs.live_price),
                 RuleId::G11 => g11_averaging_down(intent, &cls, snapshot, inputs.live_price),
-                RuleId::G02 => g02(&ctx, intent, &cls, snapshot, ref_price),
+                RuleId::G02 => g02(&ctx, intent, &cls, snapshot, risk_ref),
                 RuleId::G14 => g14(&ctx, intent, &cls, snapshot, ref_price),
                 RuleId::G04a => g04a(&ctx, intent, &cls, snapshot),
-                RuleId::G04b => g04b(&ctx, intent, &cls, snapshot, ref_price),
+                RuleId::G04b => g04b(&ctx, intent, &cls, snapshot, risk_ref),
                 RuleId::G01 => g01(&ctx, &cls, d),
                 RuleId::G05 => g05.clone(),
             });
@@ -304,6 +328,7 @@ impl<'a> Gate<'a> {
             verdict,
             classification: cls,
             ref_price,
+            risk_ref,
             limits_digest,
             clock: EvaluationClock(now),
             ctx,

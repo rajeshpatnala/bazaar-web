@@ -184,6 +184,8 @@ struct Rig {
     mode: ModeEvidence,
     exposure: ExposureInputs,
     live: Tri<Decimal>,
+    drop_inst: bool,
+    drop_exposure: bool,
 }
 
 impl Rig {
@@ -195,6 +197,8 @@ impl Rig {
             mode: mode_evidence(None),
             exposure: exposure(now().date_naive()),
             live: Tri::Known(d("500")),
+            drop_inst: false,
+            drop_exposure: false,
         }
     }
 
@@ -207,7 +211,7 @@ impl Rig {
     ) -> Result<Evaluation, GateReject> {
         let inputs = GateInputs {
             data: &self.data,
-            instrument: Some(&self.inst),
+            instrument: (!self.drop_inst).then_some(&self.inst),
             defined_max_loss: None,
             mode: &self.mode,
             entry_zone: Tri::Known(EntryZone {
@@ -215,7 +219,7 @@ impl Rig {
                 high: d("501"),
             }),
             live_price: self.live,
-            exposure: Some(&self.exposure),
+            exposure: (!self.drop_exposure).then_some(&self.exposure),
         };
         Gate::new(&self.cfg, store, clock).evaluate(i, s, &inputs)
     }
@@ -505,21 +509,32 @@ fn live_needs_the_build_feature_which_the_caller_cannot_claim() {
     assert!(failed(&paper.eval(&i, &snap())).contains(&RuleId::G16));
 }
 
-fn override_for(
-    e: &Evaluation,
+/// Opens a challenge on `open_on`, then asks `run_on` to accept it.
+fn try_override(
+    open_on: &Evaluation,
     i: &OrderIntent,
+    run_on: &Evaluation,
     s: &PortfolioSnapshot,
 ) -> Result<(), OverrideError> {
-    let wait = i64::from(e.ctx().limits.override_confirm_delay_secs);
-    let ch = OverrideChallenge::open(&At(now() - Duration::seconds(wait)), i, e.verdict()).unwrap();
+    let wait = i64::from(open_on.ctx().limits.override_confirm_delay_secs);
+    let at = At(now() - Duration::seconds(wait));
+    let ch = OverrideChallenge::open(&at, i, open_on.verdict())?;
     let req = OverrideRequest {
         challenge: ch,
         reason: ReasonType::NewInformation,
         note: "Fresh results changed my view of the evidence here.".into(),
     };
-    let a = evaluate(req, i, e.verdict(), s, e.ctx(), e.clock())?;
-    assert_eq!(a.accepted_at(), e.ctx().now);
+    let a = evaluate(req, i, run_on.verdict(), s, run_on.ctx(), run_on.clock())?;
+    assert_eq!(a.accepted_at(), run_on.ctx().now);
     Ok(())
+}
+
+fn override_for(
+    e: &Evaluation,
+    i: &OrderIntent,
+    s: &PortfolioSnapshot,
+) -> Result<(), OverrideError> {
+    try_override(e, i, e, s)
 }
 
 #[test]
@@ -540,5 +555,225 @@ fn g01_override_is_accepted_in_paper_only() {
     assert_eq!(
         override_for(&e, &i, &s),
         Err(OverrideError::PaperOnly(RuleId::G01))
+    );
+}
+
+fn short(qty: u32) -> OrderIntent {
+    let mut i = intent(Side::Sell, qty);
+    i.stop = Some(d("510"));
+    i
+}
+
+#[test]
+fn sell_entry_risk_uses_the_lower_price_and_notional_the_higher() {
+    let mut rig = Rig::new(TEXT);
+    let s = snap();
+    // Budget 0.5% of 2,50,000 = Rs 1,250. Live 498: 12 per share + Rs 20 charges.
+    rig.live = Tri::Known(d("498"));
+    assert!(!failed(&rig.eval(&short(102), &s)).contains(&RuleId::G02));
+    let over = rig.eval(&short(103), &s);
+    assert!(failed(&over).contains(&RuleId::G02), "Rs 1,256 is over");
+    assert_eq!((over.ref_price(), over.risk_ref()), (d("500"), d("498")));
+    // At the intent price alone 103 would pass: the lower live price is what bites.
+    rig.live = Tri::Known(d("500"));
+    assert!(!failed(&rig.eval(&short(103), &s)).contains(&RuleId::G02));
+    // Live above intent: notional takes the higher, risk the intent price for a Sell.
+    rig.live = Tri::Known(d("505"));
+    let up = rig.eval(&short(10), &s);
+    assert_eq!((up.ref_price(), up.risk_ref()), (d("505"), d("500")));
+    // Buy: both use the higher price.
+    let buy = rig.eval(&intent(Side::Buy, 10), &s);
+    assert_eq!((buy.ref_price(), buy.risk_ref()), (d("505"), d("505")));
+}
+
+fn text_for(mode: &str) -> String {
+    TEXT.replace(
+        "execution_mode = \"paper\"",
+        &format!("execution_mode = \"{mode}\""),
+    )
+}
+
+fn auto_rig(which: usize, bad: Tri<bool>) -> Rig {
+    let mut r = Rig::new(&text_for("auto"));
+    r.mode.compliance_fresh = Tri::Known(true);
+    r.mode.readiness_report = Tri::Known(true);
+    r.mode.owner_opt_in = Tri::Known(true);
+    match which {
+        0 => r.mode.compliance_fresh = bad,
+        1 => r.mode.readiness_report = bad,
+        2 => r.mode.owner_opt_in = bad,
+        _ => {}
+    }
+    r
+}
+
+#[test]
+fn auto_needs_every_unlock_input() {
+    let (i, s) = (intent(Side::Buy, 10), snap());
+    let ok = auto_rig(9, Tri::Unknown).eval(&i, &s);
+    assert!(!failed(&ok).contains(&RuleId::G16), "all present");
+    for which in 0..3 {
+        for bad in [Tri::Known(false), Tri::Unknown] {
+            let e = auto_rig(which, bad).eval(&i, &s);
+            assert!(failed(&e).contains(&RuleId::G16), "{which}");
+        }
+    }
+}
+
+#[cfg(feature = "live-trading")]
+#[test]
+fn live_passes_g16_when_compiled_in_and_approved() {
+    let i = intent(Side::Buy, 10);
+    let mut rig = Rig::new(&semi_auto_text());
+    rig.mode = mode_evidence(Some(IntentDigest::of(&i)));
+    rig.mode.live = Tri::Known(true);
+    assert!(!failed(&rig.eval(&i, &snap())).contains(&RuleId::G16));
+}
+
+#[test]
+fn each_missing_input_rejects_its_rule() {
+    type Tweak = fn(&mut Rig);
+    let cases: [(RuleId, Tweak); 8] = [
+        (RuleId::G01, |r| r.data.evidence.oos_trades = Tri::Unknown),
+        (RuleId::G06, |r| r.data.stock_fno_underlying = Tri::Unknown),
+        (RuleId::G07, |r| r.data.events.results_window = Tri::Unknown),
+        (RuleId::G15, |r| r.data.inputs_as_of = Tri::Unknown),
+        (RuleId::X01, |r| r.data.session_open = Tri::Unknown),
+        (RuleId::X03, |r| r.data.margin.required = Tri::Unknown),
+        (RuleId::G13, |r| r.drop_inst = true),
+        (RuleId::G05, |r| r.drop_exposure = true),
+    ];
+    for (rule, tweak) in cases {
+        let mut rig = Rig::new(TEXT);
+        tweak(&mut rig);
+        let e = rig.eval(&intent(Side::Buy, 10), &snap());
+        assert!(failed(&e).contains(&rule), "{rule:?} must fail closed");
+    }
+}
+
+#[test]
+fn override_is_refused_when_a_hard_rule_fails_or_it_is_bound_wrongly() {
+    let i = intent(Side::Buy, 10);
+    let mut rig = Rig::new(TEXT);
+    rig.data = data(5);
+    let mut s = snap();
+    s.kill_switch = Tri::Known(true);
+    let e = rig.eval(&i, &s);
+    assert!(failed(&e).contains(&RuleId::G01));
+    assert!(matches!(
+        override_for(&e, &i, &s),
+        Err(OverrideError::NotOverridable(_))
+    ));
+    // A challenge opened for another order is refused.
+    let ok = rig.eval(&i, &snap());
+    let other = rig.eval(&intent(Side::Buy, 9), &snap());
+    assert_eq!(
+        try_override(&other, &i, &ok, &snap()),
+        Err(OverrideError::IntentMismatch)
+    );
+    // A challenge from a run under another config text is refused on this run.
+    let mut edited = Rig::new(&format!("{TEXT}\n# edited\n"));
+    edited.data = data(5);
+    let from_edited = edited.eval(&i, &snap());
+    assert_eq!(
+        try_override(&from_edited, &i, &ok, &snap()),
+        Err(OverrideError::ConfigMismatch)
+    );
+    // Once the day's count is used up, the next request is refused.
+    let mut used = snap();
+    used.overrides_today = Tri::Known(ok.ctx().limits.override_max_per_day);
+    assert!(matches!(
+        override_for(&ok, &i, &used),
+        Err(OverrideError::DayCapReached { .. })
+    ));
+}
+
+#[test]
+fn day_loss_turns_from_pass_to_block_once_near_the_limit() {
+    // Fixture limit 2% of Rs 2,50,000 = Rs 5,000 (sized on post-loss equity, so slightly earlier).
+    let rig = Rig::new(TEXT);
+    let blocked = |loss: i64| {
+        let mut s = snap();
+        s.day_pnl = Tri::Known(Decimal::new(-loss, 0));
+        failed(&rig.eval(&intent(Side::Buy, 10), &s)).contains(&RuleId::G03)
+    };
+    let flips: Vec<i64> = (0..=60)
+        .map(|k| k * 100)
+        .filter(|&l| blocked(l) && !blocked((l - 100).max(0)))
+        .collect();
+    assert_eq!(flips.len(), 1, "one clean boundary: {flips:?}");
+    assert!((4800..=5000).contains(&flips[0]), "{flips:?}");
+    assert!(!blocked(4000) && blocked(5100));
+}
+
+#[test]
+fn g05_freshness_edge_cases() {
+    let (i, s) = (intent(Side::Buy, 10), snap());
+    let mut rig = Rig::new(TEXT);
+    // An empty series has no end date: freshness skips it (the rule itself judges the data).
+    rig.exposure.returns.insert("ABC".into(), vec![]);
+    let _ = rig.eval(&i, &s);
+    // One of two series stale: rejects.
+    rig.exposure = exposure(now().date_naive());
+    rig.exposure.sectors.insert("XYZ".into(), "IT".into());
+    rig.exposure
+        .returns
+        .insert("XYZ".into(), series(now().date_naive() - Duration::days(9)));
+    assert!(failed(&rig.eval(&i, &s)).contains(&RuleId::G05));
+    // Unknown snapshot time: reject. A date at the edge of the calendar: reject, no overflow.
+    rig.exposure = exposure(now().date_naive());
+    let mut unknown = snap();
+    unknown.as_of = Tri::Unknown;
+    assert!(failed(&rig.eval(&i, &unknown)).contains(&RuleId::G05));
+    let mut edge = snap();
+    edge.as_of = Tri::Known(chrono::DateTime::<chrono::Utc>::MIN_UTC.with_timezone(&Kolkata));
+    assert!(failed(&rig.eval(&i, &edge)).contains(&RuleId::G05));
+    // An exit does not run the freshness check.
+    let mut held = snap();
+    held.positions = Tri::Known(vec![held_long(10)]);
+    rig.exposure = exposure(now().date_naive() - Duration::days(30));
+    assert!(!failed(&rig.eval(&intent(Side::Sell, 10), &held)).contains(&RuleId::G05));
+}
+
+#[test]
+fn symbol_check_precedes_the_baseline_and_the_clock() {
+    let rig = Rig::new(TEXT);
+    let clock = CountingClock(AtomicU32::new(0));
+    let mut i = intent(Side::Buy, 10);
+    i.symbol = "bad".into();
+    let store = Store(Err(BaselineError("disk".into())));
+    assert!(matches!(
+        rig.run(&store, &clock, &i, &snap()),
+        Err(GateReject::Symbol(_))
+    ));
+    assert_eq!(clock.0.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_bad_held_symbol_blocks_entries_but_never_exits_or_stop_moves() {
+    let rig = Rig::new(TEXT);
+    let mut s = snap();
+    let mut bad = held_long(10);
+    bad.symbol = "bad row".into();
+    s.positions = Tri::Known(vec![held_long(10), bad]);
+    let go = |i: &OrderIntent| rig.run(&Store(Ok(Baseline::none())), &At(now()), i, &s);
+    assert!(matches!(
+        go(&intent(Side::Buy, 5)),
+        Err(GateReject::Symbol(_))
+    ));
+    let mut mv = intent(Side::Sell, 0);
+    mv.stop = None;
+    mv.new_stop = Some(d("495"));
+    assert!(go(&mv).is_ok());
+    assert!(go(&intent(Side::Sell, 5)).is_ok());
+}
+
+#[test]
+fn limits_digest_is_pinned() {
+    // Debug output feeds the digest; this golden value flags any change to EffectiveLimits.
+    let e = Rig::new(TEXT).eval(&intent(Side::Buy, 10), &snap());
+    assert_eq!(
+        e.limits_digest().as_str(),
+        "94b528797cb980ce8c9053c5b72d8f6bf2316cc1cabf874b2070860da0339add"
     );
 }
