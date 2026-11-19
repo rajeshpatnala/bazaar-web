@@ -444,6 +444,7 @@ mod tests {
                     qty: *q,
                     stop: Tri::Unknown,
                     risk_price: Tri::Unknown,
+                    avg_cost: Tri::Unknown,
                 })
                 .collect(),
         );
