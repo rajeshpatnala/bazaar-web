@@ -320,6 +320,14 @@ version = "0.1.0"
 [[package]]
 name = "bazaar-risk"
 version = "0.1.0"
+dependencies = [
+ "bazaar-core",
+ "chrono",
+ "chrono-tz",
+ "proptest",
+ "rust_decimal",
+ "sha2",
+]
 
 [[package]]
 name = "bazaar-scanner"
