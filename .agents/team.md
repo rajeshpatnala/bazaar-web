@@ -169,7 +169,7 @@ Set `usd_per_million_tokens` to your blended rate to see dollar estimates.
 
 | setting | value |
 |---|---|
-| per_task_tokens | 4,000,000 |
+| per_task_tokens | 5500000 |
 | per_day_tokens | 15,000,000 |
 | warn_percent | 80 |
 | usd_per_million_tokens | - |

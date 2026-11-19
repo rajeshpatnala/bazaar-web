@@ -1,2 +1,3 @@
 - [New branch per feature](feedback_new_branch_per_feature.md) — always a fresh branch per feature; no branch protection available (free plan)
-- [Keep merged branches](feedback_keep_merged_branches.md) — owner: never delete branches after merge; kit.py ship hardcodes --delete-branch
+- [Keep merged branches](feedback_keep_merged_branches.md) — owner: never delete branches after merge; kit ship now honours delete_merged_branches: no (fixed, verified 2026-11-20)
+- [Paper and live both supported](project_paper_and_live_both.md) — owner wants both modes always, switched in UI; paper default, live chosen server-side
