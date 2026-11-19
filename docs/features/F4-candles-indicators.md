@@ -17,6 +17,7 @@ Owner area: `crates/indicators`, `core/src/candle.rs`, `crates/data/src/bars.rs`
 
 ## What was built
 - Slice 0: `core::candle` (`Candle` with validating `new` and validating `Deserialize`, `Interval`), `DomainError::InvalidCandle`; `bazaar-indicators` with `Indicator` trait, `batch`, `Ohlcv` + fallible `TryFrom<&Candle>`, stub modules; `fixtures/indicators/synthetic_60.csv`.
+- Slice 4: `session.rs` (`SessionVwap`, `GapPct`, `classic_pivots`, `camarilla_pivots`; caller supplies an opaque session id from `MarketCalendar`, so no open time is hardcoded), `swing.rs` (`Swing`, strict fractal pivots reported only n bars later); micro fixtures `session_micro.csv`, `swing_micro.csv`; `lookahead_*` tests.
 
 ## Decisions
 - F3 is reserved for Kite; offline work starts at F4. One streaming implementation, batch is a fold. Expected values come from hand cases and independent naive implementations (no TA-Lib offline).
@@ -47,3 +48,4 @@ Owner area: `crates/indicators`, `core/src/candle.rs`, `crates/data/src/bars.rs`
 
 ## History
 - Slice 0: candle type, indicator trait scaffold, this record.
+- Slice 4: session VWAP, gap %, pivots, swing high/low.
