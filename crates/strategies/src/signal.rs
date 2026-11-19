@@ -19,6 +19,8 @@ pub struct ExitPlan {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Signal {
     pub strategy_id: &'static str,
+    /// The instrument this signal is for (display symbol comes from the instrument master).
+    pub instrument_token: u64,
     /// Strategy version, for provenance.
     pub strategy_version: u32,
     /// Hash of the `[strategy.<id>.params]` table the strategy was built from.
@@ -32,7 +34,7 @@ pub struct Signal {
     pub targets: Vec<Decimal>,
     /// `entry_high - stop`. Informational: the gate re-derives it and never trusts this.
     pub risk_per_share: Decimal,
-    /// Reward to the first target over risk.
+    /// `(targets[0] - entry_low) / risk_per_share`, computed, never a placeholder.
     pub reference_rr: Decimal,
     pub exit_plan: ExitPlan,
     pub facts: Vec<Fact>,
@@ -53,7 +55,20 @@ pub enum SignalError {
     NonPositiveRr,
     #[error("valid_until must be after the signal bar")]
     Expired,
+    #[error("a signal needs a first target")]
+    NoTarget,
+    #[error("the first target must be above entry_high")]
+    TargetNotAboveEntry,
+    #[error("reference_rr does not match (targets[0] - entry_low) / risk_per_share")]
+    RrMismatch,
+    #[error("time_stop_bars must be positive")]
+    NoTimeStop,
+    #[error("params_hash must not be empty")]
+    NoProvenance,
 }
+
+/// Allowed gap between the stated and the recomputed `reference_rr` (rounding to two places).
+const RR_TOLERANCE: Decimal = Decimal::from_parts(1, 0, 0, false, 2);
 
 /// Risk per share for a long: worst-case entry (top of the zone) minus the stop.
 #[must_use]
@@ -82,6 +97,21 @@ impl Signal {
         if self.valid_until <= self.signal_bar_time {
             return Err(SignalError::Expired);
         }
+        let first = *self.targets.first().ok_or(SignalError::NoTarget)?;
+        if first <= self.entry_high {
+            return Err(SignalError::TargetNotAboveEntry);
+        }
+        // `risk_per_share` is positive here: stop < entry_low <= entry_high.
+        let rr = (first - self.entry_low) / self.risk_per_share;
+        if (rr - self.reference_rr).abs() > RR_TOLERANCE {
+            return Err(SignalError::RrMismatch);
+        }
+        if self.exit_plan.time_stop_bars == 0 {
+            return Err(SignalError::NoTimeStop);
+        }
+        if self.params_hash.is_empty() {
+            return Err(SignalError::NoProvenance);
+        }
         Ok(())
     }
 }
@@ -90,6 +120,8 @@ impl Signal {
 pub(crate) mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    type Break = (fn(&mut Signal), SignalError);
 
     pub(crate) fn ist(d: u32) -> DateTime<Tz> {
         chrono_tz::Asia::Kolkata
@@ -102,6 +134,7 @@ pub(crate) mod tests {
             (Decimal::from(100), Decimal::from(102), Decimal::from(94));
         Signal {
             strategy_id: "t",
+            instrument_token: 7,
             strategy_version: 1,
             params_hash: "h".into(),
             signal_bar_time: ist(2),
@@ -144,5 +177,26 @@ pub(crate) mod tests {
         let mut s = good();
         s.valid_until = s.signal_bar_time;
         assert_eq!(s.validate(), Err(SignalError::Expired));
+        let broken: [Break; 5] = [
+            (|s| s.targets.clear(), SignalError::NoTarget),
+            (
+                |s| s.targets = vec![Decimal::from(102)],
+                SignalError::TargetNotAboveEntry,
+            ),
+            (
+                |s| s.reference_rr = Decimal::from(3),
+                SignalError::RrMismatch,
+            ),
+            (|s| s.exit_plan.time_stop_bars = 0, SignalError::NoTimeStop),
+            (|s| s.params_hash.clear(), SignalError::NoProvenance),
+        ];
+        for (f, want) in broken {
+            let mut s = good();
+            f(&mut s);
+            assert_eq!(s.validate(), Err(want));
+        }
+        let mut s = good();
+        s.reference_rr = Decimal::new(201, 2);
+        assert_eq!(s.validate(), Ok(()), "within two-place rounding");
     }
 }

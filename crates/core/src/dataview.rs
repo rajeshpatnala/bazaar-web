@@ -6,7 +6,9 @@
 
 use crate::candle::Candle;
 
-/// Closed bars, oldest first, ending at the decision bar.
+/// Closed bars, oldest first, ending at the decision bar. The engine that builds a view must pass
+/// bars of one `Interval` in strictly increasing `close_time` order (not checked here; the F8
+/// testkit asserts it): a mis-sorted slice would give wrong `lookback` windows.
 #[derive(Debug, Clone, Copy)]
 pub struct DataView<'a> {
     bars: &'a [Candle],

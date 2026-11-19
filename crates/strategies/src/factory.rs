@@ -53,7 +53,7 @@ pub fn build_enabled(
         }
         let input = BuildInput {
             params: &config.params,
-            params_hash: params_hash(&config.params),
+            params_hash: params_hash(f.id(), table)?,
             config: &config,
         };
         out.push(f.build(&input)?);

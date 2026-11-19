@@ -67,6 +67,18 @@ fn trend(id: &str, s: &str) -> Result<Trend, ParamError> {
     }
 }
 
+/// Long-only: the market gate is Up or Range, so `down` is a load error.
+fn market_trend(id: &str, s: &str) -> Result<Trend, ParamError> {
+    match trend(id, s)? {
+        Trend::Down => Err(invalid(
+            id,
+            "regime_fit",
+            "market_trends may not include down (long-only)",
+        )),
+        t => Ok(t),
+    }
+}
+
 fn cell(id: &str, s: &str) -> Result<(Trend, VolState), ParamError> {
     let (t, v) = s
         .split_once(':')
@@ -89,7 +101,8 @@ fn invalid(id: &str, key: &'static str, reason: &'static str) -> ParamError {
 }
 
 impl StrategyConfig {
-    /// Parse and validate one strategy table.
+    /// Parse and validate one strategy table. Its `params` keys and ranges are checked by each
+    /// strategy's `parse_params` (every strategy slice's shipped-config test covers disabled tables).
     ///
     /// # Errors
     /// Unknown key, wrong type, `penalty_weight` outside (0, 1), or a bad regime declaration.
@@ -120,7 +133,7 @@ impl StrategyConfig {
                 .regime_fit
                 .market_trends
                 .iter()
-                .map(|s| trend(id, s))
+                .map(|s| market_trend(id, s))
                 .collect::<Result<_, _>>()?,
             stock_cells: cells(&self.regime_fit.stock_cells)?,
             weak_cells: cells(&self.regime_fit.weak_cells)?,
@@ -149,16 +162,25 @@ pub fn parse_params<P: ParamSet>(id: &str, table: &toml::Table) -> Result<P, Par
     Ok(p)
 }
 
-/// Provenance hash of the params table: SHA-256 of its canonical TOML (keys sorted), hex.
-#[must_use]
-pub fn params_hash(table: &toml::Table) -> String {
-    let text = toml::to_string(table).unwrap_or_default();
-    Sha256::digest(text.as_bytes())
+/// Provenance hash of a whole `[strategy.<id>]` table except `enabled`: params, regime cells and
+/// penalty weight all change behaviour. SHA-256 of the canonical TOML (keys sorted, since
+/// `toml::Table` is a sorted map), hex.
+///
+/// # Errors
+/// `Parse` when the table cannot be serialised (never silently hashed as empty).
+pub fn params_hash(id: &str, table: &toml::Table) -> Result<String, ParamError> {
+    let mut t = table.clone();
+    t.remove("enabled");
+    let text = toml::to_string(&t).map_err(|e| ParamError::Parse {
+        id: id.to_owned(),
+        reason: e.to_string(),
+    })?;
+    Ok(Sha256::digest(text.as_bytes())
         .iter()
         .fold(String::new(), |mut acc, b| {
             let _ = write!(acc, "{b:02x}");
             acc
-        })
+        }))
 }
 
 #[cfg(test)]
@@ -240,6 +262,13 @@ weak_cells = ["up:high"]
             }
         ));
         assert!(matches!(
+            e(OK.replace("[\"up\", \"range\"]", "[\"up\", \"down\"]")),
+            ParamError::Invalid {
+                key: "regime_fit",
+                ..
+            }
+        ));
+        assert!(matches!(
             e(OK.replace("up:low", "uplow")),
             ParamError::Invalid {
                 key: "regime_fit",
@@ -267,11 +296,18 @@ weak_cells = ["up:high"]
     #[test]
     fn params_hash_is_stable_and_changes_with_values() {
         assert_eq!(
-            params_hash(&tbl("a = 1\nb = 2")),
-            params_hash(&tbl("b = 2\na = 1"))
+            params_hash("d", &tbl("a = 1\nb = 2")).unwrap(),
+            params_hash("d", &tbl("b = 2\na = 1")).unwrap()
         );
-        assert_ne!(params_hash(&tbl("a = 1")), params_hash(&tbl("a = 2")));
-        assert_eq!(params_hash(&tbl("a = 1")).len(), 64);
+        assert_ne!(
+            params_hash("d", &tbl("a = 1")).unwrap(),
+            params_hash("d", &tbl("a = 2")).unwrap()
+        );
+        // Regime cells and penalty are in the hash; `enabled` is not.
+        let h = |t: &str| params_hash("d", &tbl(t)).unwrap();
+        assert_ne!(h("penalty_weight = 0.5"), h("penalty_weight = 0.4"));
+        assert_eq!(h("enabled = true\nx = 1"), h("enabled = false\nx = 1"));
+        assert_eq!(h("a = 1").len(), 64);
     }
 
     #[test]

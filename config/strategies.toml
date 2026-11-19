@@ -3,7 +3,7 @@
 # Every value is a widely used convention, UNVERIFIED for this app. The owner accepted them on 2026-11-20.
 # They are classifier definitions, never tuned on strategy P&L. [strategy.<id>] tables are below (F8).
 schema_version = 1
-source = "owner decision 2026-11-20: UNVERIFIED conventions, see docs/strategy/F7-regime-definitions.md"
+source = "owner decision 2026-11-20: UNVERIFIED conventions and proposals, see docs/strategy/F7-regime-definitions.md ([regime]) and docs/strategy/F8-first-strategies.md sections 3-5 ([strategy.*])"
 verified_on = "2026-11-20"
 
 [regime]
@@ -37,9 +37,12 @@ market_trends = ["up", "range"]
 stock_cells = ["up:low", "up:normal", "up:high"]
 weak_cells = ["up:high"]
 [strategy.donchian_breakout.params]
+entry_zone_atr_frac = 0.25  # entry zone width above the signal close, in ATR (0.1-0.5; spec names the key, this value is a PROPOSAL)
+atr_period = 14             # ATR period (Wilder default, 5-30)
 entry_n = 20                # days in the breakout channel (range 15-30)
 exit_n = 10                 # days in the exit channel (7-14)
 stop_atr_mult = 2.5         # initial stop distance in ATR (2.0-3.0)
+volume_sma_period = 20     # days in the volume average (10-30)
 vol_ratio_min = 1.2         # volume vs its 20-day average (1.0-1.5)
 max_extension_atr = 1.0     # skip if already stretched (0.5-1.5)
 max_hold_bars = 60          # time stop (40-80)
@@ -53,6 +56,10 @@ market_trends = ["up", "range"]
 stock_cells = ["up:low", "up:normal"]
 weak_cells = []
 [strategy.trend_pullback.params]
+entry_zone_atr_frac = 0.25  # entry zone width above the signal close, in ATR (0.1-0.5; spec names the key, this value is a PROPOSAL)
+atr_period = 14             # ATR period (Wilder default, 5-30)
+ema_pullback = 20          # short trend average, the dip reference (10-30)
+ema_trend = 50             # longer trend average, the exit reference (30-100)
 pullback_lookback = 5       # window to look for the dip (3-8)
 stop_buffer_atr = 0.5       # room under the pullback low, in ATR (0.25-1.0)
 target_r = 2.0              # reward in R (1.5-3.0)
@@ -68,6 +75,8 @@ market_trends = ["up", "range"]
 stock_cells = ["range:low", "range:normal"]
 weak_cells = []
 [strategy.bollinger_reversion.params]
+entry_zone_atr_frac = 0.25  # entry zone width above the signal close, in ATR (0.1-0.5; spec names the key, this value is a PROPOSAL)
+atr_period = 14             # ATR period (Wilder default, 5-30)
 bb_n = 20                   # average length (15-30)
 bb_k = 2.0                  # band width in standard deviations (1.8-2.5)
 stop_buffer_atr = 0.25      # room under the lows, in ATR (0.1-0.5)

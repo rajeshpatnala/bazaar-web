@@ -22,3 +22,10 @@ Slice 0: `DataView`, `Signal` + `ExitPlan` + `validate`, `ExitAction`/`OpenPosit
 
 ## Deferred
 First evidence run (F9, owner-run F3 fetch); catalog rows and `bz-quant` skill-text amendments (manager); strategies, registry and cross-strategy tests (slices 1-5).
+
+## Review round 1 (PR 74)
+- `StrategyContext` now carries `calendar: &MarketCalendar`; `next_session_close` gives `valid_until` (no date arithmetic in strategies). `check_closed_bar` rejects a regime from a later or an earlier session.
+- Config tables gained `entry_zone_atr_frac` (0.25, a PROPOSAL: the spec names the key but gives no value; owner to confirm), `atr_period`, and the spec-fixed averages (`volume_sma_period`, `ema_pullback`, `ema_trend`). Strategy tests assert `Default == file`.
+- `params_hash(id, table)` hashes the whole strategy table except `enabled` and returns `Result`. `market_trends` may not include `down`. `Signal` has `instrument_token` and checks target, recomputed `reference_rr`, time stop and provenance.
+- Limit: `StrategyConfig::from_table` does not range-check `params` (types live in slices 2-4); each strategy's shipped-config test must cover its disabled table.
+- Deferred (QUAN-74-10): F9 slice 0 adds `OpenPosition` fields (initial stop, quantity, strategy id) when it re-reads the types.
