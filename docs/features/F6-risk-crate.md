@@ -1,6 +1,6 @@
 # F6: Risk crate
 
-Status: building (slices 0, 1, 1b, 2, 3 done; slice 6 behaviour guards and baseline in review). Plan: `.agents/plans/F6-risk-crate.md`. Owner area: `crates/risk`, `config/risk.toml`.
+Status: building (slices 0 to 10b done (10b in review); slice 11 next). Plan: `.agents/plans/F6-risk-crate.md`. Owner area: `crates/risk`, `config/risk.toml`.
 Summary: deterministic DecisionGate, sizing, portfolio and behaviour rules, override engine in `crates/risk`; keys in `risk.toml`.
 Decisions: owner 2026-11-19 (G08 = 2 losses, until end of session; max 3 positions; G17/G18/G19 approved; G14 cap 25%; No-rows loosenable only within `[hard_limits]` ceilings; sizing equity capped at starting cash); fail closed by type; gate classifies Entry/Exit/StopMove; one override-level table; `GatedIntent` mintable only in `gate.rs`; config hash = sha256 of file text. Skill G-table updated first (own commit) so reviewers check against it.
 Known limits: G12, readiness bar, real audit/baseline/journal deferred; in-memory baseline loosens on restart until F10; inputs for G01/G06/G07/G15/X01/X03 reject until F3/F9/F10; every key not owner-decided is `owner-to-confirm, unverified`; file-level `verified_on` (2026-11-18) not bumped.
@@ -93,3 +93,4 @@ Test fixture `fixtures/config/risk.toml` gained the same sections with synthetic
 - Owner to confirm (CR-56-3): G02 adds the new order's charges allowance to the held risk of a same-side add.
 - Symbols must reach the gate in canonical instrument-master form (RISK-56-5); gate test in slice 11.
 - Deferred: slice 11/11b pass the charges buffer for the FINAL qty into G02 with a cost-grows-with-qty test (RISK-56-3, QR-56-5; below-floor is raised to the floor, `size` rejects it); slice 12 replays boundaries against shipped `config/risk.toml` (RISK-56-4); F10 validates marks at snapshot build.
+- Deferred (slice 10b review): slice 11b gate must take `AuditReceipt` by value, compare its digest and config hash with the verdict, test that a failing sink mints no `GatedIntent`, and test a second write for the same `AcceptedOverride` is refused (RISK-58-2, CR-58-3, TS-58-1). `write_acknowledged` takes `&AcceptedOverride` because the gate still needs it to mint.

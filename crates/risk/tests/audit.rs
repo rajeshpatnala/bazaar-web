@@ -48,7 +48,7 @@ impl AuditSink for MemSink {
 struct FailingSink;
 impl AuditSink for FailingSink {
     fn write(&self, _: &AuditRecord) -> Result<(), AuditError> {
-        Err(AuditError("disk full".into()))
+        Err(AuditError::new("disk full"))
     }
 }
 
@@ -65,7 +65,7 @@ fn intent() -> OrderIntent {
     }
 }
 
-fn accepted() -> (AcceptedOverride, RuleCtx) {
+fn accepted() -> (AcceptedOverride, RuleCtx, Vec<RuleResult>) {
     let cfg = GateConfig::from_toml_str(TEXT).unwrap();
     let ctx = RuleCtx {
         limits: cfg.effective(&Baseline::none()),
@@ -97,29 +97,48 @@ fn accepted() -> (AcceptedOverride, RuleCtx) {
     s.overrides_today = Tri::Known(0);
     s.overrides_week = Tri::Known(0);
     let a = evaluate(req, &intent(), &v, &s, &ctx, &At(t0())).unwrap();
-    (a, ctx)
+    (a, ctx, results)
 }
 
 #[test]
 fn record_carries_every_field_with_time_from_the_clock() {
-    let (a, ctx) = accepted();
+    let (a, ctx, res) = accepted();
     let later = t0() + Duration::seconds(3);
-    let r = AuditRecord::new(&a, &At(later));
+    let r = AuditRecord::new(&a, ExecutionMode::Paper, &res, &At(later)).unwrap();
     assert_eq!(r.rule_ids(), &[RuleId::G14]);
     assert_eq!(r.reason(), ReasonType::PlanChanged);
     assert_eq!(r.note(), NOTE);
     assert_eq!(r.config_hash(), &ctx.config_hash);
     assert_eq!(r.intent_digest(), &IntentDigest::of(&intent()));
     assert_eq!(r.at(), later);
+    assert_eq!(r.mode(), ExecutionMode::Paper);
+    assert_eq!(r.rules().len(), 1);
+    assert_eq!(r.rules()[0].rule(), RuleId::G14);
+    assert_eq!(r.rules()[0].observed(), "o");
+    assert_eq!(r.rules()[0].limit(), "l");
+}
+
+#[test]
+fn record_without_a_result_for_an_overridden_rule_fails() {
+    let (a, _, res) = accepted();
+    let others: Vec<RuleResult> = res
+        .into_iter()
+        .filter(|r| r.rule() != RuleId::G14)
+        .collect();
+    let e = AuditRecord::new(&a, ExecutionMode::Paper, &others, &At(t0())).unwrap_err();
+    assert!(e.detail().contains("G14"));
 }
 
 #[test]
 fn acknowledged_write_stores_the_record_and_returns_a_receipt() {
-    let (a, ctx) = accepted();
+    let (a, ctx, res) = accepted();
     let sink = MemSink::default();
-    let rc = write_acknowledged(&sink, &a, &At(t0())).unwrap();
+    let rc = write_acknowledged(&sink, &a, ExecutionMode::Paper, &res, &At(t0())).unwrap();
     assert_eq!(sink.0.borrow().len(), 1);
-    assert_eq!(sink.0.borrow()[0], AuditRecord::new(&a, &At(t0())));
+    assert_eq!(
+        sink.0.borrow()[0],
+        AuditRecord::new(&a, ExecutionMode::Paper, &res, &At(t0())).unwrap()
+    );
     assert_eq!(rc.intent_digest(), &IntentDigest::of(&intent()));
     assert_eq!(rc.config_hash(), &ctx.config_hash);
     assert_eq!(rc.at(), t0());
@@ -127,9 +146,11 @@ fn acknowledged_write_stores_the_record_and_returns_a_receipt() {
 
 #[test]
 fn sink_error_is_returned_and_no_receipt_exists() {
-    let (a, _) = accepted();
-    let e = write_acknowledged(&FailingSink, &a, &At(t0())).unwrap_err();
-    assert_eq!(e, AuditError("disk full".into()));
-    assert!(e.to_string().contains("disk full"));
+    let (a, _, res) = accepted();
+    let e =
+        write_acknowledged(&FailingSink, &a, ExecutionMode::Paper, &res, &At(t0())).unwrap_err();
+    assert_eq!(e, AuditError::new("disk full"));
+    assert_eq!(e.detail(), "disk full");
+    assert!(!e.to_string().contains("disk full"));
     assert!(e.to_string().contains("refused"));
 }
