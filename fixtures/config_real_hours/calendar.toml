@@ -1,0 +1,15 @@
+# Fictional calendar with 09:15-15:30 normal hours (375 minutes, not a multiple of 10/30/60), used
+# only to test the short final bar of the bar builder. Not a circular.
+schema_version = 1
+verified_on = "2026-01-05"
+source = "synthetic fixture, not a circular"
+covered_years = [2026]
+
+[[session]]
+segment = "equity"
+applies_to = "cash_non_fno"
+phase = "normal"
+start = "09:15"
+end = "15:30"
+effective_from = "2020-01-01"
+source = "synthetic fixture"
