@@ -49,6 +49,14 @@ max_orders_per_day = 12                 # G16; unverified, owner to confirm
 max_notional_per_order_inr = "25000"    # G16, rupees; unverified, owner to confirm
 max_override_per_day = 1                # unverified, owner to confirm
 max_override_per_week = 3               # unverified, owner to confirm
+# Added in F6 slice 1b; all at their defaults, unverified, owner to confirm (RISK-46-3, RISK-46-4).
+max_ban_list_age_hours = 24             # G06
+max_quote_age_secs = 5                  # G15
+max_snapshot_age_secs = 10
+latest_expiry_day_no_new_after_ist = "13:30"   # G07
+min_confirm_delay_secs = 10             # override cooling delay may not go below this
+max_size_factor = "0.5"                 # an overridden trade may not be sized above this
+min_oos_trades = 30                     # G01 floor, equals the default; no loosening without the owner
 
 [execution]
 paper_starting_cash_inr = "100000"
