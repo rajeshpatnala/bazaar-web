@@ -15,6 +15,8 @@ pub struct Position {
     pub qty: u32,
     /// Stop stored in the journal; `Unknown` when none is recorded.
     pub stop: Tri<Decimal>,
+    /// Average entry cost from the journal; `Unknown` rejects adds to the position (G11).
+    pub avg_cost: Tri<Decimal>,
 }
 
 /// Last stop-out time for one symbol.
@@ -95,12 +97,14 @@ mod tests {
                 side: Side::Buy,
                 qty: 0,
                 stop: Tri::Unknown,
+                avg_cost: Tri::Unknown,
             },
             Position {
                 symbol: "XYZ".into(),
                 side: Side::Sell,
                 qty: 5,
                 stop: Tri::Unknown,
+                avg_cost: Tri::Unknown,
             },
         ]);
         assert!(s.position("ABC").is_none());

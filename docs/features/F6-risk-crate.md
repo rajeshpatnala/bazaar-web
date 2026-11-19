@@ -1,6 +1,6 @@
 # F6: Risk crate
 
-Status: building (slices 0 and 1 done: config). Plan: `.agents/plans/F6-risk-crate.md`. Owner area: `crates/risk`, `config/risk.toml`.
+Status: building (slices 0, 1, 1b, 2, 3 done; slice 6 behaviour guards and baseline in review). Plan: `.agents/plans/F6-risk-crate.md`. Owner area: `crates/risk`, `config/risk.toml`.
 Summary: deterministic DecisionGate, sizing, portfolio and behaviour rules, override engine in `crates/risk`; keys in `risk.toml`.
 Decisions: owner 2026-11-19 (G08 = 2 losses, until end of session; max 3 positions; G17/G18/G19 approved; G14 cap 25%; No-rows loosenable only within `[hard_limits]` ceilings; sizing equity capped at starting cash); fail closed by type; gate classifies Entry/Exit/StopMove; one override-level table; `GatedIntent` mintable only in `gate.rs`; config hash = sha256 of file text. Skill G-table updated first (own commit) so reviewers check against it.
 Known limits: G12, readiness bar, real audit/baseline/journal deferred; in-memory baseline loosens on restart until F10; inputs for G01/G06/G07/G15/X01/X03 reject until F3/F9/F10; every key not owner-decided is `owner-to-confirm, unverified`; file-level `verified_on` (2026-11-18) not bumped.
@@ -64,3 +64,10 @@ Test fixture `fixtures/config/risk.toml` gained the same sections with synthetic
 - X01 (market open), X02 (lot and tick) and X03 (margin) are not in the skill G-table. Their override level is **No** in `RuleId::override_level()`. Owner to confirm.
 - G12 (liquidity) has no `RuleId` (outside F6).
 - Keys without a baseline entry (quote and snapshot age, size factor, confirm delay, correlation, evidence, event flags) can be loosened within their ceilings or bounds mid-session until F10 persists a baseline for them.
+
+## Slice 6: behaviour guards and baseline
+- `rules/behaviour.rs`: G08, G09, G10, G11, G17, G18 as pure functions over `RuleCtx`, the classification and the snapshot. Entry-only rules pass for exits and stop moves; unknown state rejects entries; G09 rejects an unknown stored stop or unknown positions.
+- G10 contract for F10: the entry zone (`EntryZone`) comes from the stored recommendation and the live price is a separate input; both `Tri`. Price must sit inside the zone widened by `entry_zone_tolerance_bps` on both sides (below the zone also rejects: conservative choice, owner to confirm).
+- G11 needs `Position.avg_cost` (new `Tri` in the snapshot). More than one open row for a symbol, or an unknown average cost, rejects an add.
+- G17: a stop-out time later than now rejects (clock or journal fault).
+- `baseline.rs`: `LimitsBaseline` trait, `rule_ctx` (read error returns `Err`: the gate must Reject, never fall back to the file value), `FakeBaseline`, `MemoryBaseline` (tightens only; loosening next session with typed confirmation and persistence are F10). The `EffectiveLimits` digest in the verdict (RISK-48-4) stays with slice 11.
