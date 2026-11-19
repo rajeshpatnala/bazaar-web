@@ -1394,11 +1394,6 @@ mod tests {
             ("hard_limits", "max_size_factor", "\"0\""),
             ("hard_limits", "max_size_factor", "\"1.1\""),
             ("hard_limits", "min_oos_trades", "0"),
-            (
-                "hard_limits",
-                "latest_expiry_day_no_new_after_ist",
-                "\"25:00\"",
-            ),
             ("override", "max_per_day", "0"),
             ("override", "max_per_day", "2"),
             ("override", "max_per_week", "4"),
@@ -1444,6 +1439,12 @@ mod tests {
             let t = edit("events", "expiry_day_no_new_after_ist", Some(bad));
             assert!(parse_str::<RiskConfig>(&t).is_err(), "{bad}");
         }
+        let t = edit(
+            "hard_limits",
+            "latest_expiry_day_no_new_after_ist",
+            Some("\"25:00\""),
+        );
+        assert!(parse_str::<RiskConfig>(&t).is_err());
         // Money-like keys must be strings, not TOML floats.
         let t = edit("override", "size_factor", Some("0.5"));
         assert!(parse_str::<RiskConfig>(&t).is_err());
