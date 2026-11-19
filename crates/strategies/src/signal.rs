@@ -23,7 +23,8 @@ pub struct Signal {
     pub instrument_token: u64,
     /// Strategy version, for provenance.
     pub strategy_version: u32,
-    /// Hash of the `[strategy.<id>.params]` table the strategy was built from.
+    /// Hash of the strategy's whole `[strategy.<id>]` config table as parsed (params, regime cells
+    /// and `penalty_weight`; not `enabled`), so any behaviour-changing edit changes it.
     pub params_hash: String,
     /// `close_time` (IST) of the decision bar. The fill is the next open, never this close.
     pub signal_bar_time: DateTime<Tz>,
