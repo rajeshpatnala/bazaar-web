@@ -14,6 +14,11 @@ max_open_positions = 2
 max_total_open_risk_pct = "2"
 max_weekly_loss_pct = "5"
 max_position_value_pct = "20"
+max_orders_per_minute = 8
+max_orders_per_day = 10
+max_notional_per_order_inr = "20000"
+min_charges_slippage_buffer = "15"
+cap_equity_at_starting_cash = true
 
 [hard_limits]
 max_risk_per_trade_pct = "1.5"
@@ -24,6 +29,14 @@ max_cooloff_after_losses = 3
 max_new_entries_per_day = 5
 min_reentry_lockout_minutes = 30
 max_entry_zone_tolerance_bps = 10
+max_position_value_pct = "30"
+max_sector_pct = "35"
+max_open_positions = 4
+max_orders_per_minute = 12
+max_orders_per_day = 15
+max_notional_per_order_inr = "30000"
+max_override_per_day = 2
+max_override_per_week = 4
 
 [execution]
 paper_starting_cash_inr = "250000"
@@ -42,3 +55,30 @@ allow_averaging_down = false
 entry_zone_tolerance_bps = 5
 reentry_lockout_minutes = 45
 max_new_entries_per_day = 4
+
+[options]
+allow_naked_short = false
+
+[events]
+block_ban_list = true
+ban_list_max_age_hours = 12
+block_results_days = true
+block_policy_days = true
+expiry_day_no_new_after_ist = "14:00"
+events_file = "events.toml"
+
+[data]
+max_quote_age_secs = 7
+max_snapshot_age_secs = 15
+
+[gate.evidence]
+min_oos_trades = 40
+min_profit_factor = "1.5"
+min_expectancy_r = "0.2"
+require_walk_forward_pass = true
+
+[override]
+max_per_day = 2
+max_per_week = 4
+size_factor = "0.4"
+confirm_delay_secs = 8
