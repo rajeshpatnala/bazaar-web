@@ -123,4 +123,4 @@ Test fixture `fixtures/config/risk.toml` gained the same sections with synthetic
 ## Slice 11c (properties and source scan)
 
 - `crates/risk/tests/properties.rs`: proptests drive the real gate (snapshot knowns, side and stop side, ban list, held position, stop move, events, mode) for all-rules-run, plain messages ending with the rule id, Hard/No never overridable, determinism; an explicit catalogue table pins every override level (12 Hard/No, 5 open in G01-G16). `crates/risk/tests/source_scan.rs`: no Default on guarded types (multi-line derives handled), no bypass/skip_gate/force, no f64, no default live-trading, `GatedIntent` built only in gate.rs with private fields.
-- Gap found (ignored test `verdict_overridable_ignores_input_missing`): `GateVerdict::overridable()` ignores `input_missing`; `override_::evaluate` still refuses it, so only that helper needs a `verdict.rs` fix.
+- Fixed in 11c: `GateVerdict::overridable()` now returns false when any failure is `input_missing` (regression test `verdict_overridable_ignores_input_missing`; `override_::evaluate` already refused it).

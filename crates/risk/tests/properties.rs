@@ -552,8 +552,10 @@ fn input_missing_is_never_overridable_even_on_a_soft_rule() {
     let f = v.failures().next().unwrap();
     assert!(f.is_input_missing());
     check_message(f);
-    // `GateVerdict::overridable()` looks at levels only and says true here (reported as a gate
-    // gap, see `verdict_overridable_ignores_input_missing`); the enforcement is the engine.
+    assert!(
+        !v.overridable(),
+        "{soft} with a missing input must not be overridable"
+    );
     // The override engine refuses it too, with the dedicated error.
     let run = build(&clean());
     let e = eval(&run).unwrap();
@@ -569,11 +571,10 @@ fn input_missing_is_never_overridable_even_on_a_soft_rule() {
     assert_eq!(out, Err(OverrideError::InputMissing(soft)));
 }
 
-/// Known gap, reported to the tech lead: `GateVerdict::overridable()` ignores `input_missing`, so a
+/// Regression: `GateVerdict::overridable()` once ignored `input_missing`, so a
 /// lone input-missing failure on a Soft rule reports true although `override_::evaluate` refuses
-/// it. Un-ignore once `verdict.rs` is fixed.
+/// it. Fixed in verdict.rs.
 #[test]
-#[ignore = "gate gap: GateVerdict::overridable() ignores input_missing (needs a verdict.rs fix)"]
 fn verdict_overridable_ignores_input_missing() {
     let cfg = GateConfig::from_toml_str(TEXT).unwrap();
     let results: Vec<RuleResult> = RuleId::EVALUATION_ORDER
