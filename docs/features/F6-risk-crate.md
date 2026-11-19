@@ -108,3 +108,12 @@ Test fixture `fixtures/config/risk.toml` gained the same sections with synthetic
 - Mode: from the file only; `live_trading_compiled()` is `cfg!(feature = "live-trading")`, a non-default `bazaar-risk` feature; approval is an intent digest.
 - F10 handoff (RISK-60-2, RISK-60-6; owner decision 2026-11-20, deferred to F10/UI): Paper and live are both always supported and the UI switches between them. The paper/live choice is made server-side by the executor (session-bound, explicit confirmation) and is never a field the browser can send to the gate; derive `ModeEvidence.live` from the executor type. No F10 or UI PR is approved without it. Also forward `live-trading` from the server/cli crate to `bazaar-risk/live-trading`, and run CI with `cargo test -p bazaar-risk --features live-trading` so the compiled-in branch is tested. Kill-switch reduce-only behaviour remains owner-to-confirm.
 - Deferred: CR-60-4 (decision pending); CR-60-7 (slice size, noted); slice 12 replays the -2.99/-3.00/-3.01% boundary against shipped `config/risk.toml`.
+
+## Slice 11b (gate mint)
+
+- `Gate::decide` sizes with `size_with_cost` (side-aware `risk_ref`), runs the override engine, writes the audit record, compares the receipt (digest, config hash) with the verdict, then mints `GatedIntent` (private fields, compile_fail doctests; a source scan proves only gate.rs builds it).
+- New `CostModel` trait (F9 implements it) and `GateInputs.cost`; G02 and sizing use the cost of the FINAL quantity. Unknown cost rejects the entry.
+- `Gate.used` (mutex set) enforces one override per intent digest; checked before the audit write, inserted after the receipt matches, so a failed sink or sizing does not burn it.
+- Overridden orders mint `min(intent, reduced size + exit qty)`. Options are not sized (`NotSizable`).
+- A live price off the tick grid makes sizing reject (fail closed).
+- Deferred: canonical `limits_digest` (still pinned by a golden test only).

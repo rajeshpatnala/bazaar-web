@@ -1,14 +1,18 @@
 //! The `DecisionGate` core: classify, then run every rule in `RuleId::EVALUATION_ORDER` and
 //! return one explainable verdict. Pure: time comes from the injected `Clock` (read once), limits
-//! from the baseline, state from the snapshot. Sizing and the `GatedIntent` mint are slice 11b.
+//! from the baseline, state from the snapshot. [`Gate::decide`] adds sizing, the override with its
+//! acknowledged audit write, and the only mint of a [`GatedIntent`] (single use per intent digest).
 //!
 //! Fail closed: an unreadable baseline, an unclassifiable order, a non-canonical symbol or an
 //! incomplete verdict is a [`GateReject`] and no verdict exists to override.
 
+use crate::audit::{AuditError, AuditSink, write_acknowledged};
 use crate::baseline::{BaselineError, LimitsBaseline, rule_ctx};
 use crate::classify::{Action, Classification, ClassifyError, classify};
 use crate::config::{ConfigHash, GateConfig, RuleCtx};
-use crate::override_::IntentDigest;
+use crate::override_::{
+    IntentDigest, OverrideError, OverrideRequest, evaluate as evaluate_override,
+};
 use crate::rules::behaviour::{
     EntryZone, g08_cooloff, g09_stop_widening, g10_entry_zone, g11_averaging_down,
     g17_reentry_lockout, g18_entries_per_day,
@@ -17,7 +21,8 @@ use crate::rules::exposure::{self, ExposureInputs};
 use crate::rules::inputs::{DataInputs, g01, g06, g07, g15, x01, x03};
 use crate::rules::loss_limits::{g03, g19};
 use crate::rules::portfolio::{g02, g04a, g04b, g14};
-use crate::rules::structure::{ModeInputs, OptionKind, StructureInputs, g13, g16, x02};
+use crate::rules::structure::{ModeInputs, OptionKind, StructureInputs, g13, g16, is_sizable, x02};
+use crate::sizing::{SizingError, SizingInput, size_with_cost, sizing_equity};
 use crate::snapshot::PortfolioSnapshot;
 use crate::types::{OrderIntent, Side, Tri};
 use crate::verdict::{GateVerdict, RuleId, RuleResult, VerdictError};
@@ -27,7 +32,9 @@ use bazaar_core::mode::ExecutionMode;
 use chrono::{DateTime, Duration};
 use chrono_tz::{Asia::Kolkata, Tz};
 use rust_decimal::Decimal;
+use std::collections::BTreeSet;
 use std::fmt;
+use std::sync::Mutex;
 
 /// A G05 return series whose last date is further than this many calendar days before the
 /// snapshot's IST date (or after it) is stale (RISK-52-6). Five covers a long weekend.
@@ -52,9 +59,17 @@ pub struct ModeEvidence {
     pub live: Tri<bool>,
 }
 
+/// Charges plus slippage for an order (F9 supplies the real model). The gate calls it for the
+/// FINAL quantity (G02, sizing, the minted rupee risk); `Unknown` rejects. `price` is the
+/// notional reference price.
+pub trait CostModel: fmt::Debug {
+    fn cost(&self, side: Side, qty: u32, price: Decimal) -> Tri<Decimal>;
+}
+
 /// Everything the rules read besides the intent and the snapshot.
 #[derive(Debug, Clone, Copy)]
 pub struct GateInputs<'a> {
+    pub cost: &'a dyn CostModel,
     pub data: &'a DataInputs,
     /// Instrument-master row; `OptionKind` is built from it only. `None` = unknown (G13 rejects).
     pub instrument: Option<&'a Instrument>,
@@ -160,6 +175,8 @@ pub struct Gate<'a> {
     config: &'a GateConfig,
     baseline: &'a dyn LimitsBaseline,
     clock: &'a dyn Clock,
+    /// Digests whose override was used through this gate: one override per intent (CR-55-3).
+    used: Mutex<BTreeSet<String>>,
 }
 
 impl fmt::Debug for Gate<'_> {
@@ -222,6 +239,7 @@ impl<'a> Gate<'a> {
             config,
             baseline,
             clock,
+            used: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -292,6 +310,11 @@ impl<'a> Gate<'a> {
         .unwrap_or_else(|| {
             exposure::evaluate(&ctx, intent, &cls, snapshot, inputs.exposure, ref_price)
         });
+        // G02 sees the charges for the FINAL entry quantity, not a caller-supplied figure.
+        let mut g02_snap = snapshot.clone();
+        if entry {
+            g02_snap.charges_buffer = inputs.cost.cost(intent.side, cls.entry_qty, ref_price);
+        }
         let mut results = Vec::with_capacity(RuleId::EVALUATION_ORDER.len());
         for rule in RuleId::EVALUATION_ORDER {
             results.push(match rule {
@@ -312,7 +335,7 @@ impl<'a> Gate<'a> {
                 RuleId::G09 => g09_stop_widening(intent, snapshot),
                 RuleId::G10 => g10_entry_zone(&ctx, &cls, inputs.entry_zone, inputs.live_price),
                 RuleId::G11 => g11_averaging_down(intent, &cls, snapshot, inputs.live_price),
-                RuleId::G02 => g02(&ctx, intent, &cls, snapshot, risk_ref),
+                RuleId::G02 => g02(&ctx, intent, &cls, &g02_snap, risk_ref),
                 RuleId::G14 => g14(&ctx, intent, &cls, snapshot, ref_price),
                 RuleId::G04a => g04a(&ctx, intent, &cls, snapshot),
                 RuleId::G04b => g04b(&ctx, intent, &cls, snapshot, risk_ref),
@@ -333,5 +356,254 @@ impl<'a> Gate<'a> {
             clock: EvaluationClock(now),
             ctx,
         })
+    }
+
+    /// Evaluate, apply an override if one is requested, size, and mint. A failing verdict with no
+    /// override returns `Decision::Refused`. With an override the order is sized with the reduced
+    /// size factor, its audit record is acknowledged by `sink`, and only then is the
+    /// [`GatedIntent`] minted; a sink error, a mismatched receipt or a second override for the same
+    /// intent digest through this gate mints nothing. `overridden` is true only for an accepted
+    /// override from this very verdict. Entries are sized by `size_with_cost` at the final
+    /// quantity (never a caller-built size); option entries are refused.
+    pub fn decide(
+        &self,
+        intent: &OrderIntent,
+        snapshot: &PortfolioSnapshot,
+        inputs: &GateInputs<'_>,
+        request: Option<OverrideRequest>,
+        sink: &dyn AuditSink,
+    ) -> Result<Decision, MintError> {
+        let eval = self
+            .evaluate(intent, snapshot, inputs)
+            .map_err(MintError::Gate)?;
+        let accepted = match request {
+            Some(req) => Some(
+                evaluate_override(req, intent, &eval.verdict, snapshot, &eval.ctx, &eval.clock)
+                    .map_err(MintError::Override)?,
+            ),
+            None if eval.verdict.passed() => None,
+            None => return Ok(Decision::Refused(Box::new(eval))),
+        };
+        let overridden = accepted.is_some();
+        let (qty, risk_rupees) = size_order(intent, snapshot, inputs, &eval, overridden)?;
+        if let Some(acc) = &accepted {
+            let mut used = self.used.lock().map_err(|_| MintError::Poisoned)?;
+            let key = acc.intent_digest().as_str().to_owned();
+            if used.contains(&key) {
+                return Err(MintError::OverrideUsed);
+            }
+            let receipt = write_acknowledged(
+                sink,
+                acc,
+                eval.ctx.mode,
+                eval.verdict.results(),
+                &eval.clock,
+            )
+            .map_err(MintError::Audit)?;
+            if eval.verdict.intent_digest() != Some(receipt.intent_digest())
+                || eval.verdict.config_hash() != receipt.config_hash()
+            {
+                return Err(MintError::ReceiptMismatch);
+            }
+            used.insert(key);
+        }
+        Ok(Decision::Minted(GatedIntent {
+            symbol: intent.symbol.clone(),
+            side: intent.side,
+            qty,
+            price: intent.price,
+            stop: intent.stop,
+            risk_rupees,
+            config_hash: eval.verdict.config_hash().clone(),
+            evaluated_at: eval.ctx.now,
+            intent_digest: IntentDigest::of(intent),
+            overridden,
+        }))
+    }
+}
+
+/// Final quantity and rupee risk. Exits and stop moves add no risk and are not sized.
+fn size_order(
+    intent: &OrderIntent,
+    snapshot: &PortfolioSnapshot,
+    inputs: &GateInputs<'_>,
+    eval: &Evaluation,
+    overridden: bool,
+) -> Result<(u32, Decimal), MintError> {
+    let cls = &eval.classification;
+    if cls.action != Action::Entry || cls.entry_qty == 0 {
+        return Ok((intent.qty.0, Decimal::ZERO));
+    }
+    let inst = inputs.instrument.ok_or(MintError::NotSizable)?;
+    if !is_sizable(&OptionKind::from_instrument(inst, inputs.defined_max_loss)) {
+        return Err(MintError::NotSizable);
+    }
+    let stop = intent.stop.ok_or(MintError::NoStop)?;
+    let side = intent.side;
+    let input = SizingInput {
+        equity: sizing_equity(snapshot, &eval.ctx.limits).map_err(MintError::Sizing)?,
+        side,
+        entry: eval.risk_ref,
+        stop,
+        lot_size: intent.lot_size,
+        tick_size: intent.tick_size,
+        buffer: Tri::Unknown, // ignored by size_with_cost
+        overridden,
+    };
+    let sized = size_with_cost(&eval.ctx.limits, &input, &|q| {
+        inputs.cost.cost(side, q, eval.ref_price)
+    })
+    .map_err(MintError::Sizing)?;
+    let allowed = sized.qty.saturating_add(cls.exit_qty);
+    let qty = if overridden {
+        intent.qty.0.min(allowed)
+    } else if intent.qty.0 > allowed {
+        return Err(MintError::OverSized { allowed });
+    } else {
+        intent.qty.0
+    };
+    let entry_part = qty.saturating_sub(cls.exit_qty);
+    let cost = *inputs
+        .cost
+        .cost(side, entry_part, eval.ref_price)
+        .known()
+        .ok_or(MintError::Arithmetic)?;
+    let risk = eval
+        .risk_ref
+        .checked_sub(stop)
+        .map(|d| d.abs())
+        .and_then(|per| Decimal::from(entry_part).checked_mul(per))
+        .and_then(|r| r.checked_add(cost))
+        .ok_or(MintError::Arithmetic)?;
+    Ok((qty, risk))
+}
+
+/// Outcome of [`Gate::decide`] when no error stopped it.
+#[derive(Debug)]
+pub enum Decision {
+    Minted(GatedIntent),
+    /// At least one rule failed and no override was requested; the verdict explains why.
+    Refused(Box<Evaluation>),
+}
+
+/// Why nothing was minted. Every variant is a Reject.
+#[derive(Debug)]
+pub enum MintError {
+    Gate(GateReject),
+    Override(OverrideError),
+    /// An override for this intent digest was already used through this gate.
+    OverrideUsed,
+    Audit(AuditError),
+    /// The audit receipt does not match the verdict being minted.
+    ReceiptMismatch,
+    /// Option entries (and an unknown instrument) are not sized until options sizing exists.
+    NotSizable,
+    NoStop,
+    Sizing(SizingError),
+    /// The order is bigger than the gate-sized quantity.
+    OverSized {
+        allowed: u32,
+    },
+    Arithmetic,
+    Poisoned,
+}
+
+impl fmt::Display for MintError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Gate(e) => write!(f, "{e}"),
+            Self::Override(e) => write!(f, "The override was refused: {e:?}."),
+            Self::OverrideUsed => f.write_str("This override was already used for this order."),
+            Self::Audit(e) => write!(f, "{e}"),
+            Self::ReceiptMismatch => f.write_str("The audit receipt does not match this order."),
+            Self::NotSizable => {
+                f.write_str("This instrument cannot be sized yet, so the order is refused.")
+            }
+            Self::NoStop => f.write_str("An entry needs a stop, so the order is refused."),
+            Self::Sizing(e) => write!(f, "{e}"),
+            Self::OverSized { allowed } => write!(
+                f,
+                "The order is larger than the size your risk limit allows ({allowed}), so it is refused."
+            ),
+            Self::Arithmetic => {
+                f.write_str("The risk could not be worked out, so the order is refused.")
+            }
+            Self::Poisoned => f.write_str("The gate state is unusable, so the order is refused."),
+        }
+    }
+}
+
+impl std::error::Error for MintError {}
+
+/// An order the gate passed. Only [`Gate::decide`] builds one: private fields, no `Default`,
+/// `Clone` or `Serialize`, so nothing can copy or forge one.
+///
+/// ```compile_fail
+/// use bazaar_risk::gate::GatedIntent;
+/// let _ = GatedIntent { qty: 1 };
+/// ```
+///
+/// ```compile_fail
+/// fn needs_clone<T: Clone>() {}
+/// needs_clone::<bazaar_risk::gate::GatedIntent>();
+/// ```
+#[derive(Debug, PartialEq, Eq)]
+pub struct GatedIntent {
+    symbol: String,
+    side: Side,
+    qty: u32,
+    price: Decimal,
+    stop: Option<Decimal>,
+    risk_rupees: Decimal,
+    config_hash: ConfigHash,
+    evaluated_at: DateTime<Tz>,
+    intent_digest: IntentDigest,
+    overridden: bool,
+}
+
+impl GatedIntent {
+    #[must_use]
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+    #[must_use]
+    pub const fn side(&self) -> Side {
+        self.side
+    }
+    /// Gate-derived quantity (never above the size the gate computed).
+    #[must_use]
+    pub const fn qty(&self) -> u32 {
+        self.qty
+    }
+    #[must_use]
+    pub const fn price(&self) -> Decimal {
+        self.price
+    }
+    #[must_use]
+    pub const fn stop(&self) -> Option<Decimal> {
+        self.stop
+    }
+    /// Rupees at risk at the stop plus charges and slippage for the final quantity (0 for exits).
+    #[must_use]
+    pub const fn risk_rupees(&self) -> Decimal {
+        self.risk_rupees
+    }
+    #[must_use]
+    pub const fn config_hash(&self) -> &ConfigHash {
+        &self.config_hash
+    }
+    /// The instant the gate evaluated (`ctx.now`).
+    #[must_use]
+    pub const fn evaluated_at(&self) -> DateTime<Tz> {
+        self.evaluated_at
+    }
+    #[must_use]
+    pub const fn intent_digest(&self) -> &IntentDigest {
+        &self.intent_digest
+    }
+    /// True only when an accepted override from the same verdict reduced or allowed this order.
+    #[must_use]
+    pub const fn overridden(&self) -> bool {
+        self.overridden
     }
 }
