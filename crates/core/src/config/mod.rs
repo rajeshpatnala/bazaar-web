@@ -403,17 +403,13 @@ mod tests {
         };
         let w = cfg.stale_warnings(d(2026, 11, 20), &policy);
         let files: Vec<_> = w.iter().map(|x| x.file).collect();
-        for f in [
-            "strategies.toml",
-            "data.toml",
-            "compliance.toml",
-            "events.toml",
-        ] {
+        for f in ["data.toml", "compliance.toml", "events.toml"] {
             assert!(files.contains(&f), "{f}");
         }
         assert!(!files.contains(&"risk.toml") && !files.contains(&"watchlists.toml"));
-        // calendar.toml and charges.toml are real (verified 2026-11-20).
+        // calendar.toml, charges.toml and strategies.toml are real (verified 2026-11-20).
         assert!(!files.contains(&"calendar.toml") && !files.contains(&"charges.toml"));
+        assert!(!files.contains(&"strategies.toml"));
         assert!(!cfg.charges.placeholder && cfg.charges.verified_on.is_some());
     }
 

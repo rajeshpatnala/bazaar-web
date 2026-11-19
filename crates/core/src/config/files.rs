@@ -3,6 +3,8 @@
 //! `strategies`, `data` and `compliance` are header-only; a later feature replaces
 //! each struct with its real tables (and `deny_unknown_fields` makes a premature table fail).
 
+use std::collections::BTreeMap;
+
 use chrono::NaiveDate;
 use serde::Deserialize;
 
@@ -44,11 +46,34 @@ macro_rules! header_only {
     };
 }
 
-header_only!(
-    /// `strategies.toml`: enabled strategies and params (owner: `bz-quant`).
-    StrategiesConfig,
-    "strategies.toml"
-);
+/// `strategies.toml`: header plus raw `[regime]` and `[strategy.<id>]` tables (owner: `bz-quant`).
+///
+/// Tables stay raw so core never depends on the crates that own their schema
+/// (`bazaar-regime` parses `[regime]`; F8 parses `[strategy.<id>]`). Any other table is an error.
+/// `validate` is a no-op here: F8 must bound and validate the `[strategy.<id>]` tables
+/// (count and size; only the whole-file size cap applies today).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StrategiesConfig {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub placeholder: bool,
+    #[serde(default)]
+    pub verified_on: Option<NaiveDate>,
+    pub source: String,
+    #[serde(default)]
+    pub regime: Option<toml::Table>,
+    #[serde(default)]
+    pub strategy: BTreeMap<String, toml::Table>,
+}
+
+impl ConfigFile for StrategiesConfig {
+    const FILE: &'static str = "strategies.toml";
+    impl_header!();
+    fn validate(&self) -> Result<(), ConfigError> {
+        Ok(())
+    }
+}
 header_only!(
     /// `data.toml`: rate limits and refresh windows (owner: `bz-market-data`).
     DataConfig,
@@ -210,9 +235,20 @@ mod tests {
     #[test]
     fn header_only_files_reject_tables() {
         let text = format!("{HEAD}[rates]\nstt = \"1\"\n");
-        assert!(parse_str::<StrategiesConfig>(&text).is_err());
         assert!(parse_str::<DataConfig>(&text).is_err());
         assert!(parse_str::<ComplianceConfig>(&text).is_err());
+    }
+
+    #[test]
+    fn strategies_keeps_raw_tables_and_rejects_others() {
+        let ok = format!("{HEAD}[regime]\nconfirm_bars = 3\n[strategy.a]\nx = 1\n");
+        let c = parse_str::<StrategiesConfig>(&ok).unwrap();
+        assert!(c.regime.unwrap().contains_key("confirm_bars"));
+        assert!(c.strategy.contains_key("a"));
+        let none = parse_str::<StrategiesConfig>(HEAD).unwrap();
+        assert!(none.regime.is_none() && none.strategy.is_empty());
+        let bad = format!("{HEAD}[rates]\nstt = \"1\"\n");
+        assert!(parse_str::<StrategiesConfig>(&bad).is_err());
     }
 
     #[test]

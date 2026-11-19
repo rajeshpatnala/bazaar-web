@@ -1,5 +1,24 @@
-# strategies.toml: placeholder. It holds no data and is never reported as fresh (no verified_on on purpose).
-# Replace it with real, dated, sourced content and remove `placeholder`.
+# strategies.toml: strategy-world config (owner: bz-quant). One file, one config hash in provenance.
+# [regime] holds the F7 classifier definitions (docs/strategy/F7-regime-definitions.md, section 4).
+# Every value is a widely used convention, UNVERIFIED for this app. The owner accepted them on 2026-11-20.
+# They are classifier definitions, never tuned on strategy P&L. [strategy.<id>] tables arrive with F8.
 schema_version = 1
-placeholder = true
-source = "placeholder: no data yet; to be filled by the first strategy feature (bz-quant)"
+source = "owner decision 2026-11-20: UNVERIFIED conventions, see docs/strategy/F7-regime-definitions.md"
+verified_on = "2026-11-20"
+
+[regime]
+ema_mid = 50                # trend average (convention, UNVERIFIED)
+ema_slow = 200              # trend average (convention, UNVERIFIED)
+adx_period = 14             # Wilder default (UNVERIFIED)
+atr_period = 14             # ATR period for the volatility percentile (convention, UNVERIFIED)
+adx_trend_enter = 25.0      # ADX needed to enter a trend label (UNVERIFIED)
+adx_trend_stay = 20.0       # ADX needed to keep a trend label (UNVERIFIED)
+adx_range_max = 20.0        # below this there is no trend strength (UNVERIFIED)
+slope_bars = 10             # lookback for the EMA-mid slope (UNVERIFIED)
+slope_flat_max_pct = 2.0    # |slope| at or below this counts as flat (UNVERIFIED)
+confirm_bars = 3            # consecutive closes needed to flip a label (UNVERIFIED)
+vol_lookback_bars = 250     # about one trading year for the percentile (UNVERIFIED)
+vol_low_pct = 25.0          # percentile at or below: Low (UNVERIFIED)
+vol_high_pct = 75.0         # percentile at or above: High (UNVERIFIED)
+breadth_breakdown_max_pct = 30.0  # breadth below this counts as collapsing (UNVERIFIED)
+market_vol_source = "vix_if_available"  # or "index_atr" (UNVERIFIED)
