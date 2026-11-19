@@ -32,7 +32,7 @@ use bazaar_core::mode::ExecutionMode;
 use chrono::{DateTime, Duration};
 use chrono_tz::{Asia::Kolkata, Tz};
 use rust_decimal::Decimal;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Mutex;
 
@@ -62,7 +62,7 @@ pub struct ModeEvidence {
 /// Charges plus slippage for an order (F9 supplies the real model). The gate calls it for the
 /// FINAL quantity (G02, sizing, the minted rupee risk); `Unknown` rejects. `price` is the
 /// notional reference price.
-pub trait CostModel: fmt::Debug {
+pub trait CostModel: fmt::Debug + Send + Sync {
     fn cost(&self, side: Side, qty: u32, price: Decimal) -> Tri<Decimal>;
 }
 
@@ -175,8 +175,9 @@ pub struct Gate<'a> {
     config: &'a GateConfig,
     baseline: &'a dyn LimitsBaseline,
     clock: &'a dyn Clock,
-    /// Digests whose override was used through this gate: one override per intent (CR-55-3).
-    used: Mutex<BTreeSet<String>>,
+    /// Digests whose override was used through this gate (one override per intent, CR-55-3) with the
+    /// time accepted; the gate counts these toward the day and week caps on top of the snapshot.
+    used: Mutex<BTreeMap<String, DateTime<Tz>>>,
 }
 
 impl fmt::Debug for Gate<'_> {
@@ -239,7 +240,7 @@ impl<'a> Gate<'a> {
             config,
             baseline,
             clock,
-            used: Mutex::new(BTreeSet::new()),
+            used: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -376,20 +377,35 @@ impl<'a> Gate<'a> {
         let eval = self
             .evaluate(intent, snapshot, inputs)
             .map_err(MintError::Gate)?;
+        // With a request the lock is held from the cap count to the insert, including the audit
+        // write: check, write and insert are one atomic step, so two overrides cannot both pass a
+        // cap or a digest check. A slow sink serialises overrides on purpose; the sink must not
+        // call back into this gate.
+        let mut guard = if request.is_some() {
+            Some(self.used.lock().map_err(|_| MintError::Poisoned)?)
+        } else {
+            None
+        };
         let accepted = match request {
-            Some(req) => Some(
-                evaluate_override(req, intent, &eval.verdict, snapshot, &eval.ctx, &eval.clock)
-                    .map_err(MintError::Override)?,
-            ),
+            Some(req) => {
+                // The snapshot's counts come from the journal as of `as_of`; add the overrides this
+                // gate accepted since, so a stale snapshot cannot let two orders pass one cap.
+                let own = guard.as_deref().map_or(0, |u| accepted_since(u, snapshot));
+                let counted = with_own_overrides(snapshot, own);
+                Some(
+                    evaluate_override(req, intent, &eval.verdict, &counted, &eval.ctx, &eval.clock)
+                        .map_err(MintError::Override)?,
+                )
+            }
             None if eval.verdict.passed() => None,
             None => return Ok(Decision::Refused(Box::new(eval))),
         };
         let overridden = accepted.is_some();
         let (qty, risk_rupees) = size_order(intent, snapshot, inputs, &eval, overridden)?;
         if let Some(acc) = &accepted {
-            let mut used = self.used.lock().map_err(|_| MintError::Poisoned)?;
+            let used = guard.as_mut().ok_or(MintError::Poisoned)?;
             let key = acc.intent_digest().as_str().to_owned();
-            if used.contains(&key) {
+            if used.contains_key(&key) {
                 return Err(MintError::OverrideUsed);
             }
             let receipt = write_acknowledged(
@@ -405,7 +421,7 @@ impl<'a> Gate<'a> {
             {
                 return Err(MintError::ReceiptMismatch);
             }
-            used.insert(key);
+            used.insert(key, eval.ctx.now);
         }
         Ok(Decision::Minted(GatedIntent {
             symbol: intent.symbol.clone(),
@@ -420,6 +436,29 @@ impl<'a> Gate<'a> {
             overridden,
         }))
     }
+}
+
+/// Overrides this gate accepted at or after the snapshot's `as_of` (all of them when `as_of` is
+/// unknown): over-counts rather than trusting a stale journal figure.
+fn accepted_since(used: &BTreeMap<String, DateTime<Tz>>, snapshot: &PortfolioSnapshot) -> u32 {
+    let since = snapshot.as_of.known().copied();
+    let n = used
+        .values()
+        .filter(|at| since.is_none_or(|s| **at >= s))
+        .count();
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+/// The snapshot with the gate's own accepted overrides added to the day and week counts.
+fn with_own_overrides(snapshot: &PortfolioSnapshot, own: u32) -> PortfolioSnapshot {
+    let mut s = snapshot.clone();
+    if let Tri::Known(n) = s.overrides_today {
+        s.overrides_today = Tri::Known(n.saturating_add(own));
+    }
+    if let Tri::Known(n) = s.overrides_week {
+        s.overrides_week = Tri::Known(n.saturating_add(own));
+    }
+    s
 }
 
 /// Final quantity and rupee risk. Exits and stop moves add no risk and are not sized.
@@ -437,6 +476,9 @@ fn size_order(
     let inst = inputs.instrument.ok_or(MintError::NotSizable)?;
     if !is_sizable(&OptionKind::from_instrument(inst, inputs.defined_max_loss)) {
         return Err(MintError::NotSizable);
+    }
+    if intent.lot_size != inst.lot_size || intent.tick_size != inst.tick_size {
+        return Err(MintError::InstrumentMismatch);
     }
     let stop = intent.stop.ok_or(MintError::NoStop)?;
     let side = intent.side;
@@ -475,6 +517,11 @@ fn size_order(
         .and_then(|per| Decimal::from(entry_part).checked_mul(per))
         .and_then(|r| r.checked_add(cost))
         .ok_or(MintError::Arithmetic)?;
+    // Defence in depth for the per-trade ceiling: a non-monotonic cost model must not let the
+    // final quantity cost more than the size that was proved to fit.
+    if risk > sized.budget {
+        return Err(MintError::OverBudget);
+    }
     Ok((qty, risk))
 }
 
@@ -499,6 +546,10 @@ pub enum MintError {
     /// Option entries (and an unknown instrument) are not sized until options sizing exists.
     NotSizable,
     NoStop,
+    /// The intent's lot or tick size differs from the instrument master.
+    InstrumentMismatch,
+    /// The minted risk would exceed the per-trade budget.
+    OverBudget,
     Sizing(SizingError),
     /// The order is bigger than the gate-sized quantity.
     OverSized {
@@ -512,7 +563,7 @@ impl fmt::Display for MintError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Gate(e) => write!(f, "{e}"),
-            Self::Override(e) => write!(f, "The override was refused: {e:?}."),
+            Self::Override(e) => write!(f, "The override was refused: {e}"),
             Self::OverrideUsed => f.write_str("This override was already used for this order."),
             Self::Audit(e) => write!(f, "{e}"),
             Self::ReceiptMismatch => f.write_str("The audit receipt does not match this order."),
@@ -520,6 +571,12 @@ impl fmt::Display for MintError {
                 f.write_str("This instrument cannot be sized yet, so the order is refused.")
             }
             Self::NoStop => f.write_str("An entry needs a stop, so the order is refused."),
+            Self::InstrumentMismatch => f.write_str(
+                "The lot or price step does not match the instrument list, so the order is refused.",
+            ),
+            Self::OverBudget => f.write_str(
+                "The risk at this size is above your per-trade limit, so the order is refused.",
+            ),
             Self::Sizing(e) => write!(f, "{e}"),
             Self::OverSized { allowed } => write!(
                 f,
