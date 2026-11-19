@@ -47,7 +47,7 @@ Every PR that touches the `indicators`, `options`, `regime`, `strategies`, `scan
      - Walk-forward and out-of-sample splits do not overlap.
    - **Recommendations.** Every field from hard rule 6 is present and computed, never placeholder values.
    - **Strategy docs.** Each strategy module has a doc comment covering idea, entry, exit, stop, best regime and weaknesses.
-3. Write your findings in one Write to the `quant.md` path `just review-pack` prints (`.agents/reviews/<feature>/<pr-N|branch>/quant.md`; template `.agents/templates/review-findings.md`, `Verdict: APPROVE | REQUEST CHANGES`; merge-check reads it). Each finding has `file:line`, a concrete wrong-number scenario and a fix. Blockers: look-ahead, missing costs, `f64` money, hardcoded market facts, untested formulas.
+3. Write your findings in one Write to the `quant.md` path `just review-pack` prints (`.agents/reviews/<feature>/<pr-N|branch>/quant.md`; template `.agents/templates/review-findings.md`, `Verdict: APPROVE | REQUEST CHANGES`; merge-check reads it). Then run `just save-review <that path>`. Each finding has `file:line`, a concrete wrong-number scenario and a fix. Blockers: look-ahead, missing costs, `f64` money, hardcoded market facts, untested formulas.
 
 ## Never
 

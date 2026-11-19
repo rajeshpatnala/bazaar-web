@@ -93,3 +93,6 @@ storybook-static/
 .env.local
 .env.*.local
 *-E
+
+# --- agent-kit ---
+.agents/.usage-limits.json

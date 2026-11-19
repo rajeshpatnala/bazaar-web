@@ -42,7 +42,7 @@ Every PR that touches any of the following:
    - **Paper money behaves like real money:** charges are debited, fills are realistic, and the same gate and limits apply.
    - **Rupee math uses `Decimal`.**
    - **The recommendation UI still shows** the stop, the rupee risk, the low-evidence label and the disclaimer.
-3. Write your findings in one Write to the `risk.md` path `just review-pack` prints (`.agents/reviews/<feature>/<pr-N|branch>/risk.md`; template `.agents/templates/review-findings.md`, `Verdict: APPROVE | REQUEST CHANGES`; merge-check reads it). Severity is **blocker** for any weakening of a rule or limit, even a "temporary" one. Suggest the safe alternative.
+3. Write your findings in one Write to the `risk.md` path `just review-pack` prints (`.agents/reviews/<feature>/<pr-N|branch>/risk.md`; template `.agents/templates/review-findings.md`, `Verdict: APPROVE | REQUEST CHANGES`; merge-check reads it). Then run `just save-review <that path>`. Severity is **blocker** for any weakening of a rule or limit, even a "temporary" one. Suggest the safe alternative.
 4. On re-review, verify each fix and update the statuses.
 
 ## Done means

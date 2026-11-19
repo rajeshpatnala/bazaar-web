@@ -40,12 +40,17 @@
   kit.py setup-branches       create the integration branch locally and on the remote if missing
   kit.py protect-branches [--apply] [--approvals N]   show/apply GitHub branch protection
   kit.py plan <id> [--slice n]   a feature plan, or one slice's brief; works from any worktree (reads the main checkout)
+  kit.py set <setting> <value> | --list   change one team setting, checked against what the kit supports
+  kit.py run-report [agent] [--match "PR 29"]   one run, step by step: what each call added to the conversation
+  kit.py warm                 agents of this session: continue (with id) or start fresh, by their size
   kit.py efficiency [F<n>|--session|--all]   efficiency review from the kit's records: evidence + rule-based flags (no agent)
   kit.py worktree-clean [--dry-run]   remove leftover agent worktrees with nothing unsaved (branches are kept)
+  kit.py records-pr [--no-push]   commit the manager's records (board, decisions, reports...) as a docs PR
   kit.py sync-base            fast-forward the local integration branch to origin (ship does it after every merge)
   kit.py approve <pr> | --branch <b> [--note t]   tech lead: decisions made, the PR may merge once merge-check passes
   kit.py envelope-check       test the envelope path once (find claude, version, one tiny call) and say what to fix
   kit.py milestone "<text>"   write the board's Resume note, archive finished rows, suggest a fresh session
+  kit.py save-review <file>   reviewers/testers: check a findings file (verdict, severities) and store it for merge-check
   kit.py collect-reviews      copy review files written inside agent worktrees into this checkout (merge-check does it too)
   kit.py export-kit [--out F] [--list]   zip only the kit files, notes, records and CI (no code, data or secrets)
 """
@@ -397,6 +402,10 @@ TEST_KINDS = ("feat", "fix", "refactor", "perf", "test")
 # docs-only changes get a light review (team.md -> Review policy -> light_review_docs). Files that steer agents,
 # CI or settings are never "light", even when they are markdown.
 LIGHT_GLOBS = ["docs/**", "**/*.md", "*.md", "**/*.rst", "**/*.txt", "LICENSE*", "**/*.png", "**/*.jpg", "**/*.svg"]
+# The manager's own notes: they change all the time and only describe the work, so they merge through a records PR
+# (`just records-pr`) without reviewers. Settings (team.md, stack.json), owner rules, templates and scripts are not here.
+RECORD_GLOBS = [".agents/board.md", ".agents/decisions.md", ".agents/recommendations*.md", ".agents/reports/**",
+                ".agents/project.md", ".agents/codemap.md", "docs/owner-input/**"]
 NEVER_LIGHT = [".claude/**", ".agents/**", ".github/**", "CLAUDE.md", "AGENTS.md", "**/CLAUDE.md", "**/AGENTS.md",
                "**/requirements*.txt", "**/constraints*.txt"]
 
@@ -432,14 +441,24 @@ def generated_globs() -> list:
     return GENERATED_DEFAULT + stack().get("generated_globs", [])
 
 
+TEST_GLOBS_DEFAULT = ["**/tests/**", "**/test/**", "**/__tests__/**", "**/*_test.*", "**/*.test.*", "**/*.spec.*",
+                      "**/test_*.py", "**/*_spec.rb", "**/testdata/**", "**/fixtures/**"]
+
+
+def test_globs_all() -> list:
+    return TEST_GLOBS_DEFAULT + (stack().get("test_check", {}) or {}).get("test_globs", [])
+
+
 def size_split(stats: list) -> tuple:
     """(counted lines, generated lines, generated paths, docs lines). Counted = what a reviewer actually reads:
-    everything except generated files and docs-only files."""
+    production lines in full, test lines at half; generated files and docs-only files not at all."""
     gen = generated_globs()
     g = [(a + d, p) for a, d, p in stats if matches(p, gen)]
     docs = [(a + d, p) for a, d, p in stats if not matches(p, gen) and matches(p, LIGHT_GLOBS) and not matches(p, NEVER_LIGHT)]
+    tests = sum(a + d for a, d, p in stats if not matches(p, gen) and matches(p, test_globs_all()))
     total = sum(a + d for a, d, _ in stats)
-    return total - sum(n for n, _ in g) - sum(n for n, _ in docs), sum(n for n, _ in g), [p for _, p in g], sum(n for n, _ in docs)
+    counted = total - sum(n for n, _ in g) - sum(n for n, _ in docs) - tests + tests // 2
+    return counted, sum(n for n, _ in g), [p for _, p in g], sum(n for n, _ in docs)
 
 
 def size_note(stats: list) -> str:
@@ -450,7 +469,7 @@ def size_note(stats: list) -> str:
         extra.append(f"{gl} in lock/generated files")
     if dl:
         extra.append(f"{dl} in docs")
-    return f"{counted} counted lines" + (f" of {total} ({'; '.join(extra)})" if extra else "")
+    return f"{counted} counted lines (tests at half)" + (f" of {total} ({'; '.join(extra)})" if extra else "")
 
 
 # Paths where a wrong change costs the most; a PR touching them gets a targeted tester run even when the full matrix
@@ -479,10 +498,15 @@ def required_reviews(kind: str, stats: list) -> tuple:
         if src_globs else sum(a + d for a, d, p in stats if not matches(p, test_globs) and not matches(p, gen)
                               and not matches(p, LIGHT_GLOBS))  # no source globs in stack.json: every non-test code line
     sens = [p for _, _, p in stats if matches(p, sensitive)]
+    if stats and all(matches(p, RECORD_GLOBS) for _, _, p in stats):
+        return ["light"], [f"manager records only ({len(stats)} files): no reviewer, no approval"]
     if team_setting("light_review_docs", "yes").lower() == "yes" and stats and not sens \
             and all(matches(p, LIGHT_GLOBS) and not matches(p, NEVER_LIGHT) for _, _, p in stats):
         return ["light"], [f"docs only ({len(stats)} files, {total} lines): no reviewer launch; tech lead reads the diff"]
     req, why = ["code"], [f"{size_note(stats)}, {src_lines} production"]
+    slice_cap = int(team_setting("max_slice_changed_lines", "400").replace(",", "") or 400)
+    if counted > slice_cap:
+        why.append(f"over the {slice_cap}-line slice cap: the plan should cut smaller slices next time (a flag, not a question)")
     if sec_policy == "always" or sens or counted >= large:
         req.append("security")
         why.append("security: " + ("always" if sec_policy == "always" else f"sensitive files {', '.join(sens[:4])}" if sens else f">= {large} lines"))
@@ -718,7 +742,7 @@ def envelope(argv: list) -> int:
     pr_no = argv[0] if argv and not argv[0].startswith("--") else ""
     ref = review_ref(pr=pr_no, branch=head)
     total = size_split(stats)[0]  # counted lines: lock/generated files and docs don't make a PR "big"
-    limit = int(team_setting("envelope_max_lines", "150"))
+    limit = int(team_setting("envelope_max_lines", "400").replace(",", ""))
     excl = ENVELOPE_EXCLUDE + stack().get("envelope_exclude_globs", [])
     blocked = [p for _, _, p in stats if matches(p, excl)]
     covered = [r for r in req if r != "tests" and r != "light"]
@@ -1172,6 +1196,117 @@ def claude_code_launches() -> dict:
     return out
 
 
+def _call_kind(name: str, inp: dict) -> tuple:
+    """(category, short target) for one tool call."""
+    path = str(inp.get("file_path") or inp.get("path") or "")
+    cmd = str(inp.get("command") or "")
+    if name in ("Read", "NotebookRead"):
+        if "/.claude/skills/" in path or path.startswith(".claude/skills/"):
+            return "handbook (whole file)", path.split(".claude/")[-1]
+        if re.search(r"\.agents/(codemap|project)\.md$", path):
+            return "codemap / profile", path.split("/")[-1]
+        if "/.agents/plans/" in path or path.startswith(".agents/plans/"):
+            return "plan", path.split("/")[-1]
+        return "source / file read", path.split("/")[-1] or path
+    if name in ("Grep", "Glob"):
+        return "search", str(inp.get("pattern", ""))[:40]
+    if name in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+        return "writes", path.split("/")[-1]
+    if name == "Bash":
+        c = cmd.strip()
+        if re.search(r"\bjust docs\b|kit\.py docs", c):
+            return "handbook section (just docs)", c[:50]
+        if re.search(r"review-pack|envelope|git diff|gh pr diff|git show", c):
+            return "review pack / diff", c[:50]
+        if re.search(r"\bjust plan\b", c):
+            return "plan", c[:50]
+        if re.search(r"\bjust (gate|test|check|verify)|cargo |pnpm |npm |pytest|vitest|playwright", c):
+            return "build / test output", c[:50]
+        if re.search(r"^(rg|grep|find|ls|git (log|status|grep))\b", c):
+            return "search", c[:50]
+        return "other commands", c[:50]
+    return "other tools", name
+
+
+def run_report(argv: list) -> int:
+    """Where one agent run's tokens went, step by step, from Claude Code's own transcript: what each tool call
+    added to the conversation (every later step re-sends it). No AI involved."""
+    base = pathlib.Path(os.environ.get("CLAUDE_CONFIG_DIR") or pathlib.Path.home() / ".claude") / "projects"
+    keys = {re.sub(r"[^A-Za-z0-9]", "-", str(r)) for r in (main_root(), ROOT)}
+    metas = sorted((m for d in (base.iterdir() if base.is_dir() else []) if d.name in keys
+                    for m in d.glob("*/subagents/agent-*.meta.json")), key=lambda x: x.stat().st_mtime)
+    want = argv[argv.index("--match") + 1].lower() if "--match" in argv else ""
+    agent = next((a for a in argv if not a.startswith("--") and a.lower() != want), "")
+    pick = None
+    for m in reversed(metas):
+        try:
+            meta = json.loads(m.read_text())
+        except (OSError, ValueError):
+            continue
+        if (not agent or meta.get("agentType") == agent) and (not want or want in (meta.get("description") or "").lower()):
+            pick = (m, meta)
+            break
+    if not pick:
+        print(f"run-report: no recorded run{' of ' + agent if agent else ''}{' matching ' + repr(want) if want else ''} "
+              "for this project (Claude Code keeps its own records of sub-agent runs on this machine)")
+        return 1
+    m, meta = pick
+    calls, sizes, usage, order = {}, {}, [], []
+    with m.with_name(m.name.replace(".meta.json", ".jsonl")).open(errors="replace") as fh:
+        for line in fh:
+            try:
+                o = json.loads(line)
+            except ValueError:
+                continue
+            msg = o.get("message") or {}
+            content = msg.get("content") if isinstance(msg.get("content"), list) else []
+            if o.get("type") == "assistant":
+                u = msg.get("usage") or {}
+                if u and (not usage or usage[-1][0] != msg.get("id")):
+                    usage.append((msg.get("id"), sum(int(u.get(k) or 0) for k in
+                                                     ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))))
+                for c in content:
+                    if c.get("type") == "tool_use":
+                        calls[c.get("id")] = (c.get("name", ""), c.get("input") or {})
+                        order.append(c.get("id"))
+            elif o.get("type") == "user":
+                for c in content:
+                    if c.get("type") == "tool_result":
+                        sizes[c.get("tool_use_id")] = len(json.dumps(c.get("content", ""))) // 4
+    start, final = (usage[0][1], usage[-1][1]) if usage else (0, 0)
+    rows = []
+    for cid in order:
+        name, inp = calls[cid]
+        kind, target = _call_kind(name, inp)
+        rows.append((sizes.get(cid, 0) + len(json.dumps(inp)) // 4, kind, name, target))
+    by = {}
+    for n, kind, _, _ in rows:
+        by[kind] = by.get(kind, 0) + n
+    added = sum(by.values()) or 1
+    print(f"run: {meta.get('agentType')} - {meta.get('description', '')[:60]}   ({len(usage)} steps, {len(rows)} tool calls)")
+    print(f"start {start:,} -> final context {final:,} tokens; tool calls added ~{added:,}, the agent's own replies "
+          f"and thinking ~{max(final - start - added, 0):,}")
+    print("\nby kind:")
+    for kind, n in sorted(by.items(), key=lambda x: -x[1]):
+        print(f"  {n:>7,}  {100 * n // added:>3}%  {kind}")
+    print("\nbiggest calls:")
+    for n, kind, name, target in sorted(rows, key=lambda x: -x[0])[:10]:
+        print(f"  {n:>7,}  {name:6} {target}")
+    tips = []
+    if by.get("handbook (whole file)"):
+        tips.append("handbooks read whole: use `just docs \"<topic>\"` for one section")
+    if by.get("review pack / diff", 0) > added * 0.4:
+        tips.append("the diff dominates: smaller slices, or the one-call review for small PRs")
+    if by.get("codemap / profile", 0) > 3000:
+        tips.append("codemap/profile read whole: grep the line you need")
+    if by.get("build / test output", 0) > added * 0.3:
+        tips.append("long build/test output: use the kit's compact recipes (`just gate`), not raw tool output")
+    if tips:
+        print("\nworth trying: " + "; ".join(tips))
+    print("(every later step re-sends what a call added, so early big calls cost the most)")
+    return 0
+
+
 def launch_notes(rec: dict) -> list:
     tools = rec.get("tools") or []
     notes = []
@@ -1385,9 +1520,24 @@ def update_integration_checkout() -> str:
         elif line == f"branch refs/heads/{integ}":
             holder = wt
     if holder:
-        if git_in(holder, "status", "--porcelain", "--untracked-files=no").strip():
-            return f"local {integ} not updated: {holder} has uncommitted changes there (commit or stash them, then `just sync-base`)"
+        # local edits that are exactly what is arriving (e.g. records merged through `just records-pr`) are dropped
+        # first, so they don't block the fast-forward; git refuses only if other local edits would be overwritten
+        for line in git_in(holder, "status", "--porcelain", "--untracked-files=no").splitlines():
+            f = line[3:].strip()
+            if not f or " -> " in f:
+                continue
+            incoming = subprocess.run(["git", "show", f"origin/{integ}:{f}"], cwd=holder, capture_output=True)
+            try:
+                same = incoming.returncode == 0 and (pathlib.Path(holder) / f).read_bytes() == incoming.stdout
+            except OSError:
+                same = False
+            if same:
+                subprocess.run(["git", "checkout", "-q", "--", f], cwd=holder, capture_output=True)
         r = subprocess.run(["git", "merge", "--ff-only", "-q", f"origin/{integ}"], cwd=holder, capture_output=True, text=True)
+        if r.returncode and "overwritten" in (r.stderr + r.stdout):
+            return (f"local {integ} not updated: uncommitted edits in {holder} touch files that changed on origin "
+                    f"({(r.stderr or r.stdout).strip().splitlines()[-1][:120]}) - commit them via `just records-pr` "
+                    "or a PR, then `just sync-base`")
     else:
         r = subprocess.run(["git", "fetch", "-q", "origin", f"{integ}:{integ}"], cwd=ROOT, capture_output=True, text=True)
     if r.returncode == 0:
@@ -1579,9 +1729,162 @@ def efficiency(argv: list) -> int:
     return 0
 
 
+REVIEWER_AGENTS = {"code-reviewer", "security-reviewer", "combined-reviewer", "tester"}
+
+
+def warm(argv: list) -> int:
+    """Agents that ran in this session and whether to continue them or start fresh: continuing re-sends the agent's
+    whole conversation on every step, so a big one costs more than a new start with a short handoff."""
+    import csv
+    led = ROOT / ".agents" / "budget.csv"
+    rows = list(csv.DictReader(led.open())) if led.exists() else []
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID") or next((r.get("session") for r in reversed(rows) if r.get("session")), "")
+    cap = int(team_setting("reuse_max_context", "120,000").replace(",", "").replace("_", "") or 120000)
+    reviewers = REVIEWER_AGENTS | {ea["name"] for ea in stack().get("extra_agents", []) if ea.get("kind") == "reviewer"}
+    latest = {}
+    for r in rows:
+        if r.get("session") != sid or r.get("source") != "auto":
+            continue
+        m = re.search(r"id (\S+)$", r.get("note", ""))
+        if m:
+            latest[m.group(1)] = r
+    if not latest:
+        print("warm: no agent runs recorded in this session yet (recorded when each run finishes)")
+        return 0
+    print(f"{'agent':20} {'task':10} {'context':>8} {'steps':>5}  advice  (cap {cap // 1000}k)")
+    for aid, r in sorted(latest.items(), key=lambda x: x[1].get("time", "")):
+        ctx = int(r.get("tokens") or 0)
+        steps = (re.search(r"(\d+) steps", r.get("note", "")) or [0, "?"])[1]
+        if r["agent"] in reviewers:
+            advice = "re-reviews of the same PR only; a new PR gets a fresh reviewer"
+        elif ctx > cap:
+            advice = "start fresh with a short handoff (too big to continue cheaply)"
+        else:
+            advice = f"continue: SendMessage to {aid}"
+        print(f"{r['agent']:20} {r.get('task', '-'):10} {ctx // 1000:>7}k {steps:>5}  {advice}")
+    return 0
+
+
+SETTING_CHOICES = {"work_mode": ["worktrees", "in-place"], "preload_mode": ["cards", "skills"]}
+FREE_TEXT = {"envelope_command", "reuse_roles", "integration_branch", "release_branch", "usd_per_million_tokens",
+             "subagent_model"}
+
+
+def setting_rules() -> dict:
+    """{setting: ('choice', [values]) | ('number', None) | ('text', None)} from AGENT-SETTINGS.md - the single
+    reference the kit ships - plus a few fixed rules."""
+    rules = {}
+    ref = ROOT / "AGENT-SETTINGS.md"
+    text = ref.read_text(errors="replace") if ref.exists() else ""
+    for line in text.splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 3 or not re.fullmatch(r"`[a-z_]+`", cells[0]):
+            continue
+        name, default = cells[0].strip("`"), cells[1]
+        values = re.findall(r"`([^`]+)`", cells[2]) if len(cells) >= 4 else []
+        if name in SETTING_CHOICES:
+            rules[name] = ("choice", SETTING_CHOICES[name])
+        elif name in FREE_TEXT:
+            rules[name] = ("text", None)
+        elif values and len(cells) >= 4 and "," in cells[2] or (values and cells[2].strip("` ") in ("yes, no",)):
+            rules[name] = ("choice", values)
+        elif re.fullmatch(r"[\d,_]+", default.strip("`")) or "number" in cells[2] or re.fullmatch(r"[\d,]+-[\d,]+", default):
+            rules[name] = ("number", None)
+        elif default.strip("`") in ("yes", "no"):
+            rules[name] = ("choice", ["yes", "no"])
+        else:
+            rules[name] = ("text", None)
+    return rules
+
+
+def set_setting(argv: list) -> int:
+    """Change one team setting safely: the value is checked against what the kit supports, then written to
+    .agents/team.md (agent-affecting settings are applied with agents-sync). Never edit values by hand."""
+    rules = setting_rules()
+    if not argv or argv[0] in ("--list", "-l"):
+        for name, (kind, vals) in sorted(rules.items()):
+            print(f"  {name:28} {', '.join(vals) if kind == 'choice' else kind}   (now: {team_setting(name, '-')})")
+        return 0
+    if len(argv) < 2:
+        sys.exit("usage: kit.py set <setting> <value>   (just set --list shows every setting and its allowed values)")
+    name, value = argv[0], " ".join(argv[1:]).strip()
+    if name not in rules:
+        close = [n for n in rules if name.split("_")[0] in n][:5]
+        sys.exit(f"kit: unknown setting {name!r}" + (f"; did you mean {', '.join(close)}?" if close else "")
+                 + " (just set --list)")
+    kind, vals = rules[name]
+    if kind == "choice" and value not in vals:
+        sys.exit(f"kit: {name} must be one of: {', '.join(vals)} (got {value!r})")
+    if kind == "number" and not re.fullmatch(r"[\d,_]+|-|unlimited", value):
+        sys.exit(f"kit: {name} must be a number (got {value!r})")
+    team = ROOT / ".agents" / "team.md"
+    t = team.read_text()
+    rx = re.compile(rf"^(\|\s*`?{re.escape(name)}`?\s*\|\s*)([^|]*?)(\s*\|)\s*$", re.M)
+    m = rx.search(t)
+    if not m:
+        sys.exit(f"kit: {name} has no row in .agents/team.md yet - rerun the kit installer, which adds new settings")
+    old = m.group(2)
+    if old == value:
+        print(f"{name} is already {value}")
+        return 0
+    team.write_text(t[:m.start(2)] + value + t[m.end(2):])
+    print(f"{name}: {old} -> {value}  (.agents/team.md; commit it with your next PR)")
+    session = re.search(r"^## Session.*?(?=^## |\Z)", t, re.S | re.M)
+    if session and m.start() > session.start() and m.start() < session.end():
+        subprocess.run([sys.executable, str(ROOT / ".claude" / "kit" / "agents_sync.py")], cwd=ROOT)
+    return 0
+
+
 def CURRENT_TASK_ID() -> str:
     f = ROOT / ".agents" / "current-task"
     return f.read_text().strip() if f.exists() else ""
+
+
+def records_pr(argv: list) -> int:
+    """Commit the manager's own records (board, decisions, reports, project profile, codemap, owner inputs) through a
+    small docs PR from a temporary worktree - the main checkout stays as it is. Records-only PRs need no reviewer
+    or approval; the manager ships them with `just ship <pr>`."""
+    integ, _ = branches()
+    subprocess.run(["git", "fetch", "-q", "origin"], cwd=ROOT, capture_output=True)
+    base = f"origin/{integ}" if ref_exists(f"origin/{integ}") else integ
+    changed = [l[3:].strip() for l in git("status", "--porcelain").splitlines() if l[3:].strip()]
+    files = [f for f in changed if matches(f, RECORD_GLOBS) and (ROOT / f).is_file()]
+    other = [f for f in changed if f not in files and not f.startswith(".claude/worktrees")]
+    if not files:
+        print("records-pr: no changed records (board, decisions, reports, project, codemap, owner inputs)")
+        return 0
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M")
+    branch, wt = f"docs/agents-records-{stamp}", main_root() / ".claude" / "worktrees" / f"records-{stamp}"
+    r = subprocess.run(["git", "worktree", "add", "-q", "-b", branch, str(wt), base], cwd=ROOT, capture_output=True, text=True)
+    if r.returncode:
+        sys.exit(f"records-pr: could not create a worktree: {r.stderr.strip()[:200]}")
+    try:
+        for f in files:
+            (wt / f).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / f, wt / f)
+        subprocess.run(["git", "add", "--", *files], cwd=wt, check=True, capture_output=True)
+        if not git_in(str(wt), "diff", "--cached", "--name-only").strip():
+            print("records-pr: the records already match the integration branch")
+            return 0
+        subprocess.run(["git", "commit", "-q", "-m", f"docs(agents): update records ({len(files)} files)"], cwd=wt, check=True,
+                       capture_output=True)
+        if "--no-push" in argv or not git("remote").strip():
+            print(f"records-pr: committed on {branch} (not pushed)")
+            return 0
+        subprocess.run(["git", "push", "-q", "-u", "origin", branch], cwd=wt, check=True, capture_output=True)
+        pr = subprocess.run(["gh", "pr", "create", "--base", integ, "--head", branch, "--title",
+                             f"docs(agents): update records {stamp}", "--body",
+                             "Manager records only (board, decisions, reports). No code; no reviewer needed.\n\n"
+                             + "\n".join(f"- {f}" for f in files)], cwd=wt, capture_output=True, text=True)
+        url = pr.stdout.strip() or pr.stderr.strip()[:200]
+        print(f"records-pr: {len(files)} file(s) -> {url}\nShip it with `just ship <pr>`; afterwards `just sync-base`.")
+    except subprocess.CalledProcessError as e:
+        sys.exit(f"records-pr: {e.cmd[:3]} failed: {(e.stderr or b'').decode(errors='replace')[:200]}")
+    finally:
+        subprocess.run(["git", "worktree", "remove", "--force", str(wt)], cwd=ROOT, capture_output=True)
+    if other:
+        print(f"not included (not records; they need a normal PR): {', '.join(other[:6])}")
+    return 0
 
 
 def sync_base(argv: list) -> int:
@@ -2154,6 +2457,30 @@ def findings(path: pathlib.Path) -> tuple:
     return findings_text(path.read_text(errors="replace"))
 
 
+# Reviewers (especially stack/domain reviewers) use their own words; one scale makes triage and merge-check work for all.
+SEVERITY_ALIASES = {
+    "veto": "blocker", "blocking": "blocker", "block": "blocker", "showstopper": "blocker", "p0": "blocker",
+    "must-fix": "major", "must fix": "major", "required": "major", "error": "major", "serious": "major",
+    "significant": "major", "p1": "major", "warning": "medium", "warn": "medium", "moderate": "medium",
+    "should-fix": "medium", "should fix": "medium", "concern": "medium", "p2": "medium", "advisory": "minor",
+    "recommendation": "minor", "improvement": "minor", "p3": "minor", "suggestion": "nit", "optional": "nit",
+    "nice-to-have": "nit", "nice to have": "nit", "style": "nit", "cosmetic": "nit", "trivial": "nit",
+    "observation": "info", "note": "info", "informational": "info", "fyi": "info", "praise": "info",
+}
+
+
+def normalize_severity(raw: str) -> str:
+    s = re.sub(r"[*_`!]|\(.*?\)", "", raw or "").strip().lower()
+    for key in (s, s.split(" ")[0] if s else "", s.split("/")[0].strip() if s else ""):
+        if key in AUTO_FIX | CHEAP | QUESTION:
+            return key
+        alias = {**SEVERITY_ALIASES, **{k.lower(): v for d in stack().get("domain_reviews", [])
+                                        for k, v in (d.get("severity_map") or {}).items()}}.get(key)
+        if alias:
+            return alias
+    return s
+
+
 def findings_text(text: str) -> tuple:
     m = re.search(r"^Verdict:\s*(.+)$", text, re.M)
     verdict = m.group(1).strip().upper() if m else ""
@@ -2169,7 +2496,10 @@ def findings_text(text: str) -> tuple:
             continue
         if set("".join(cells)) <= set("-: "):
             continue
-        rows.append(dict(zip(header, cells)))
+        row = dict(zip(header, cells))
+        if "severity" in row:
+            row["severity"] = normalize_severity(row["severity"])
+        rows.append(row)
     return verdict, rows
 
 
@@ -2240,6 +2570,24 @@ def plan_slices(text: str) -> list:
     return rows
 
 
+def feature_pitfalls(feature: str, limit: int = 8) -> list:
+    """Blocker/major findings from this feature's earlier reviews, as one-line patterns for the next slice's brief."""
+    out, seen = [], set()
+    base = main_root() / ".agents" / "reviews" / feature
+    for f in sorted(base.rglob("*.md")) if base.is_dir() else []:
+        if f.name == APPROVAL_FILE:
+            continue
+        _, rows = findings(f)
+        for r in rows:
+            if r.get("severity") in ("blocker", "critical", "major", "high"):
+                issue = re.sub(r"\s+", " ", r.get("issue", "")).strip()[:140]
+                key = issue.lower()[:60]
+                if issue and key not in seen:
+                    seen.add(key)
+                    out.append(f"{issue} ({r.get('id', '?')}, {r.get('file:line', '').split(':')[0] or '-'})")
+    return out[-limit:]
+
+
 def plan_cmd(argv: list) -> int:
     """Print a feature plan, or ONE slice's brief (goal, acceptance criteria, that slice's row). Works from any
     worktree: it reads the main checkout's plan, so nothing has to be committed or copied before dispatch."""
@@ -2266,6 +2614,9 @@ def plan_cmd(argv: list) -> int:
         sec = plan_section(text, name)
         if sec:
             out += ["", f"## {name}", sec]
+    pitfalls = feature_pitfalls(feature)
+    if pitfalls:
+        out += ["", "## Don't repeat (blockers and majors already found in this feature)"] + [f"- {x}" for x in pitfalls]
     others = [next(iter(r.values()), "") for r in rows if r is not row]
     out += ["", f"Other slices (not yours): {', '.join(others)}. Design notes and the rest: `just plan {feature}` - "
             "open it only if this brief leaves you unsure."]
@@ -2280,6 +2631,47 @@ def worktree_roots() -> list:
         if line.startswith("worktree "):
             out.append(pathlib.Path(line[9:]))
     return out
+
+
+VERDICT_WORDS = {"code-review.md": "APPROVE | REQUEST CHANGES", "security.md": "PASS | FAIL",
+                 "tests": "SIGN-OFF | CHANGES NEEDED"}
+
+
+def save_review(argv: list) -> int:
+    """Check a review file and put it where merge-check reads it. Agents in worktrees can't write into the main
+    checkout, and Claude Code deletes a worktree with no tracked changes when the agent ends (review files are
+    gitignored), so a file left only in the worktree is lost. This command copies it into the main checkout."""
+    if not argv:
+        sys.exit("usage: kit.py save-review <path of the findings file you wrote>")
+    src = pathlib.Path(argv[0]).expanduser()
+    if not src.is_absolute():
+        src = pathlib.Path(os.getcwd()) / src
+    if not src.exists():
+        sys.exit(f"kit: {argv[0]} not found - write the findings file first, then run this")
+    top = pathlib.Path(subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=src.parent, capture_output=True,
+                                      text=True).stdout.strip() or ROOT)
+    rel = src.resolve().relative_to(top.resolve())
+    if not str(rel).startswith(".agents/reviews/"):
+        sys.exit(f"kit: {rel} is not under .agents/reviews/ - use the exact path `just review-pack` printed")
+    text = src.read_text(errors="replace")
+    verdict, rows = findings_text(text)
+    want = next((v for k, v in VERDICT_WORDS.items() if src.name.startswith(k.split(".")[0])), "APPROVE | REQUEST CHANGES")
+    problems = []
+    if not verdict:
+        problems.append(f"no `Verdict:` line - add one line `Verdict: {want}` near the top")
+    bad = [r.get("id", "?") for r in rows if r.get("severity") and r["severity"] not in AUTO_FIX | CHEAP | QUESTION]
+    if bad:
+        problems.append(f"unknown severity on {', '.join(bad[:5])} - use blocker | major | minor | nit | question "
+                        "(security: critical | high | medium | low | info)")
+    if problems:
+        print("save-review: fix and run again:\n  - " + "\n  - ".join(problems))
+        return 1
+    dst = main_root() / rel
+    if dst.resolve() != src.resolve():
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(text if not dst.exists() else keep_decisions(dst.read_text(errors="replace"), text))
+    print(f"saved: {rel} (Verdict: {verdict}; {len(rows)} finding(s)) - merge-check will read it")
+    return 0
 
 
 def collect_reviews(argv: list = None, quiet: bool = False) -> int:
@@ -2526,7 +2918,39 @@ def merge_check(argv: list, quiet: bool = False) -> int:
         for name, good, detail in results:
             mark = "ok  " if good is True else "WAIT" if good == PENDING else "FAIL"
             print(f"  {mark} {name}" + (f" ({detail})" if detail and good is not True else ""))
+        if failed:
+            fixes = [fix_hint(name, argv, integ) for name, _, _ in failed]
+            fixes = sorted(dict.fromkeys(f for f in fixes if f), key=lambda f: int(f[0]))
+            print("How to fix (in this order):\n" + "\n".join(f"  {i}. {f[2:]}" for i, f in enumerate(fixes, 1)))
     return 1 if failed else 2 if pending else 0
+
+
+def fix_hint(name: str, argv: list, integ: str) -> str:
+    """One concrete fix per failing merge-check line; the leading digit orders them (earlier = do first)."""
+    pr = argv[0] if argv and not argv[0].startswith("--") else "<pr>"
+    n = name.lower()
+    if "targets" in n:
+        return f"1 retarget the PR: `gh pr edit {pr} --base {integ}`"
+    if "conventional" in n:
+        return f"1 rename it: `gh pr edit {pr} --title 'feat(scope): what it does'`"
+    if "draft" in n or "open" in n:
+        return f"1 mark it ready: `gh pr ready {pr}`"
+    if "feature id" in n:
+        return "1 name the feature: rerun with `--feature F<n>` or use a branch named type/F<n>-slug"
+    if "record" in n:
+        return ("2 add the record ON THIS PR (or merge its own PR first): docs/features/F<n>-*.md, or docs/bugs/B<n>-*.md "
+                "with `Regression test:` filled")
+    if "gate" in n:
+        return "3 run `just gate` on the branch head (the developer)"
+    if "review" in n or "verdict" in n or "blocker" in n or "finding" in n:
+        return ("4 reviews: run the missing reviewer (or `just envelope`); reviewers end with `just save-review <path>`; "
+                "open blockers go back to the same developer as a fix round")
+    if "approved" in n:
+        return (f"5 approval: `just triage <F> --ref pr-{pr}` approves when nothing needs judgment; otherwise the tech "
+                "lead decides and runs `just approve`")
+    if "ci" in n or "check" in n:
+        return f"6 CI: `just pr-wait {pr}` in the background; if it is red, the branch's developer fixes it"
+    return ""
 
 
 def delete_merged() -> bool:
@@ -2696,6 +3120,8 @@ def review_pack(argv: list) -> int:
         for r in req:
             if r in agents:
                 print(f"  {agents[r]}: {d_out / review_file(r)}   finding ids: {finding_prefix(r, feature, pr_no)}1, ...")
+        print("Then run `just save-review <that path>`: it checks the verdict and severities and stores the file where "
+              "merge-check reads it (a file left only in a worktree is lost when the worktree is removed).")
     plan = plan_path(feature) if feature else None
     acc = plan_section(plan.read_text(errors="replace"), "Acceptance criteria") if plan else ""
     if acc:
@@ -2759,7 +3185,11 @@ def export_kit(argv: list) -> int:
     """Zip only the kit: agents, skills, hooks, engine, settings, .agents notes and records, CI and the kit docs.
     Never code, data, build output, worktrees, backups or secrets."""
     import zipfile
-    out = pathlib.Path(argv[argv.index("--out") + 1]) if "--out" in argv else ROOT / f"{ROOT.name}-kit-files.zip"
+    # outside the repo by default: a zip inside it makes the checkout "dirty" and blocks `just new-branch`
+    downloads = pathlib.Path.home() / "Downloads"
+    default_dir = downloads if downloads.is_dir() else ROOT.parent
+    out = pathlib.Path(argv[argv.index("--out") + 1]).expanduser() if "--out" in argv \
+        else default_dir / f"{ROOT.name}-kit-files-{dt.datetime.now():%Y%m%d-%H%M}.zip"
     keep_example = lambda rel: rel.endswith(".env.example")
     files = []
     for d in EXPORT_DIRS:
@@ -2870,10 +3300,18 @@ def main(argv: list) -> int:
         return start_report(rest)
     if cmd == "envelope":
         return envelope(rest)
+    if cmd == "set":
+        return set_setting(rest)
+    if cmd == "run-report":
+        return run_report(rest)
+    if cmd == "warm":
+        return warm(rest)
     if cmd == "efficiency":
         return efficiency(rest)
     if cmd == "worktree-clean":
         return worktree_clean(rest)
+    if cmd == "records-pr":
+        return records_pr(rest)
     if cmd == "sync-base":
         return sync_base(rest)
     if cmd == "approve":
@@ -2908,6 +3346,8 @@ def main(argv: list) -> int:
         return plan_cmd(rest)
     if cmd == "milestone":
         return milestone(rest)
+    if cmd == "save-review":
+        return save_review(rest)
     if cmd == "collect-reviews":
         return collect_reviews(rest)
     if cmd == "export-kit":
