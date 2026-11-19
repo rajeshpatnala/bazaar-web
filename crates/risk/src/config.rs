@@ -151,7 +151,7 @@ impl GateConfig {
 
     /// The rule context for one gate run.
     #[must_use]
-    pub fn rule_ctx(&self, baseline: &Baseline, now: DateTime<Tz>) -> RuleCtx {
+    pub(crate) fn rule_ctx(&self, baseline: &Baseline, now: DateTime<Tz>) -> RuleCtx {
         RuleCtx {
             limits: self.effective(baseline),
             mode: self.mode(),

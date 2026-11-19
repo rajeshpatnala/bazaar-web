@@ -19,9 +19,10 @@ pub struct Position {
     pub avg_cost: Tri<Decimal>,
 }
 
-/// Last stop-out time for one symbol.
+/// Time of the last losing exit (net of charges) in one symbol, however it was closed: stop, target or manual.
+/// G17 locks re-entry after any losing exit, so a manual exit at a loss counts, not only a stop hit.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StopOut {
+pub struct LosingExit {
     pub symbol: String,
     pub at: DateTime<Tz>,
 }
@@ -43,7 +44,8 @@ pub struct PortfolioSnapshot {
     pub overrides_week: Tri<u32>,
     pub kill_switch: Tri<bool>,
     pub charges_buffer: Tri<Decimal>,
-    pub last_stop_outs: Tri<Vec<StopOut>>,
+    /// Last losing exit per symbol, net of charges (not only stop hits); the journal (F10) must supply it so.
+    pub last_losing_exits: Tri<Vec<LosingExit>>,
 }
 
 impl PortfolioSnapshot {
@@ -62,7 +64,7 @@ impl PortfolioSnapshot {
             overrides_week: Tri::Unknown,
             kill_switch: Tri::Unknown,
             charges_buffer: Tri::Unknown,
-            last_stop_outs: Tri::Unknown,
+            last_losing_exits: Tri::Unknown,
         }
     }
 

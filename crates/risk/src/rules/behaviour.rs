@@ -166,11 +166,15 @@ pub fn g10_entry_zone(
 }
 
 /// G11: no add to a position priced worse than its average cost (long: below, short: above).
+///
+/// The order is judged at the worse of the live price and `intent.price` for its side, so a
+/// marketable limit cannot hide a fill below cost. An unknown live price rejects an add.
 #[must_use]
 pub fn g11_averaging_down(
     intent: &OrderIntent,
     class: &Classification,
     snap: &PortfolioSnapshot,
+    live_price: Tri<Decimal>,
 ) -> RuleResult {
     let rule = RuleId::G11;
     if !is_entry(class) {
@@ -192,14 +196,18 @@ pub fn g11_averaging_down(
     let Tri::Known(avg) = pos.avg_cost else {
         return unknown(rule, "the average cost of the position");
     };
-    let worse = match intent.side {
-        Side::Buy => intent.price < avg,
-        Side::Sell => intent.price > avg,
+    let Tri::Known(live) = live_price else {
+        return unknown(rule, "the live price");
     };
-    let (obs, lim) = (
-        rupees(intent.price),
-        format!("average cost {}", rupees(avg)),
-    );
+    let price = match intent.side {
+        Side::Buy => intent.price.min(live),
+        Side::Sell => intent.price.max(live),
+    };
+    let worse = match intent.side {
+        Side::Buy => price < avg,
+        Side::Sell => price > avg,
+    };
+    let (obs, lim) = (rupees(price), format!("average cost {}", rupees(avg)));
     if worse {
         RuleResult::fail(
             rule,
@@ -207,7 +215,7 @@ pub fn g11_averaging_down(
             lim,
             &format!(
                 "Adding at {} is worse than your average cost of {}; adding to a losing position is blocked",
-                rupees(intent.price),
+                rupees(price),
                 rupees(avg)
             ),
         )
@@ -216,7 +224,7 @@ pub fn g11_averaging_down(
     }
 }
 
-/// G17: after a stop-out in an instrument, no new entry in it for N minutes.
+/// G17: after a losing exit in an instrument, no new entry in it for N minutes.
 #[must_use]
 pub fn g17_reentry_lockout(
     ctx: &RuleCtx,
@@ -228,8 +236,8 @@ pub fn g17_reentry_lockout(
     if !is_entry(class) {
         return not_an_entry(rule);
     }
-    let Tri::Known(outs) = &snap.last_stop_outs else {
-        return unknown(rule, "your recent stop-outs");
+    let Tri::Known(outs) = &snap.last_losing_exits else {
+        return unknown(rule, "your recent losing exits");
     };
     let minutes = ctx.limits.reentry_lockout_minutes;
     let lock = Duration::minutes(i64::from(minutes));
@@ -237,26 +245,30 @@ pub fn g17_reentry_lockout(
         .iter()
         .filter(|o| o.symbol == intent.symbol)
         .map(|o| ctx.now.signed_duration_since(o.at))
-        // A stop-out time in the future means a clock or journal fault: treat as locked.
+        // A losing-exit time in the future means a clock or journal fault: treat as locked.
         .find(|elapsed| *elapsed < lock);
     match blocked {
         Some(elapsed) if elapsed >= Duration::zero() => RuleResult::fail(
             rule,
-            format!("{} min since stop-out", elapsed.num_minutes()),
+            format!("{} min since losing exit", elapsed.num_minutes()),
             format!("{minutes} min"),
             &format!(
-                "{} was stopped out {} min ago; no new entry in it for {minutes} min",
+                "{} had a losing exit {} min ago; no new entry in it for {minutes} min",
                 intent.symbol,
                 elapsed.num_minutes()
             ),
         ),
         Some(_) => RuleResult::fail(
             rule,
-            "stop-out time in the future",
+            "losing-exit time in the future",
             format!("{minutes} min"),
-            "New entries are blocked because a recorded stop-out time is later than now",
+            "New entries are blocked because a recorded losing-exit time is later than now",
         ),
-        None => RuleResult::pass(rule, "no recent stop-out", format!("{minutes} min lockout")),
+        None => RuleResult::pass(
+            rule,
+            "no recent losing exit",
+            format!("{minutes} min lockout"),
+        ),
     }
 }
 
@@ -293,7 +305,7 @@ mod tests {
     use super::*;
     use crate::classify::classify;
     use crate::config::{Baseline, GateConfig};
-    use crate::snapshot::{Position, StopOut};
+    use crate::snapshot::{LosingExit, Position};
     use bazaar_core::money::Qty;
     use chrono::{DateTime, TimeZone};
     use chrono_tz::{Asia::Kolkata, Tz};
@@ -477,26 +489,96 @@ mod tests {
         let avg = Tri::Known(d("500"));
         let buy = |p| intent(Side::Buy, 5, p, None);
         let s = held(Side::Buy, avg);
-        assert!(g11_averaging_down(&buy("500"), &cls(&buy("500"), &s), &s).passed());
-        assert!(g11_averaging_down(&buy("501"), &cls(&buy("501"), &s), &s).passed());
-        let res = g11_averaging_down(&buy("499.95"), &cls(&buy("499.95"), &s), &s);
+        assert!(
+            g11_averaging_down(&buy("500"), &cls(&buy("500"), &s), &s, Tri::Known(d("500")))
+                .passed()
+        );
+        assert!(
+            g11_averaging_down(&buy("501"), &cls(&buy("501"), &s), &s, Tri::Known(d("501")))
+                .passed()
+        );
+        let res = g11_averaging_down(
+            &buy("499.95"),
+            &cls(&buy("499.95"), &s),
+            &s,
+            Tri::Known(d("499.95")),
+        );
         assert!(!res.passed() && res.message().ends_with("(G11)"));
         let s = held(Side::Sell, avg);
         let sell = |p| intent(Side::Sell, 5, p, None);
-        assert!(!g11_averaging_down(&sell("500.05"), &cls(&sell("500.05"), &s), &s).passed());
-        assert!(g11_averaging_down(&sell("499"), &cls(&sell("499"), &s), &s).passed());
+        assert!(
+            !g11_averaging_down(
+                &sell("500.05"),
+                &cls(&sell("500.05"), &s),
+                &s,
+                Tri::Known(d("500.05"))
+            )
+            .passed()
+        );
+        assert!(
+            g11_averaging_down(
+                &sell("499"),
+                &cls(&sell("499"), &s),
+                &s,
+                Tri::Known(d("499"))
+            )
+            .passed()
+        );
         // Unknown average cost or unknown positions reject an add.
         let s = held(Side::Buy, Tri::Unknown);
-        assert!(!g11_averaging_down(&buy("510"), &cls(&buy("510"), &s), &s).passed());
+        assert!(
+            !g11_averaging_down(&buy("510"), &cls(&buy("510"), &s), &s, Tri::Known(d("510")))
+                .passed()
+        );
         let u = PortfolioSnapshot::unknown();
-        assert!(!g11_averaging_down(&buy("510"), &cls(&buy("510"), &u), &u).passed());
+        assert!(
+            !g11_averaging_down(&buy("510"), &cls(&buy("510"), &u), &u, Tri::Known(d("510")))
+                .passed()
+        );
         // A flip's excess opens a new position: not an add.
         let s = held(Side::Sell, avg);
         let flip = intent(Side::Buy, 15, "400", None);
-        assert!(g11_averaging_down(&flip, &cls(&flip, &s), &s).passed());
+        assert!(g11_averaging_down(&flip, &cls(&flip, &s), &s, live("400")).passed());
         // A fresh position has nothing to average.
         let s = snap_with(vec![]);
-        assert!(g11_averaging_down(&buy("1"), &cls(&buy("1"), &s), &s).passed());
+        assert!(
+            g11_averaging_down(&buy("1"), &cls(&buy("1"), &s), &s, Tri::Known(d("1"))).passed()
+        );
+    }
+
+    fn live(p: &str) -> Tri<Decimal> {
+        Tri::Known(d(p))
+    }
+
+    #[test]
+    fn g11_uses_the_worse_of_live_and_intent_price() {
+        let s = snap_with(vec![pos(Side::Buy, 94, Tri::Unknown, Tri::Known(d("500")))]);
+        let buy = intent(Side::Buy, 5, "505", None);
+        let k = cls(&buy, &s);
+        // Marketable limit above cost, live price below cost: blocked (the dodge).
+        let res = g11_averaging_down(&buy, &k, &s, live("480"));
+        assert!(!res.passed() && res.message().contains("480") && res.message().ends_with("(G11)"));
+        // Both prices at or above cost: allowed.
+        assert!(g11_averaging_down(&buy, &k, &s, live("500")).passed());
+        // Live above cost but the limit below cost: blocked.
+        let low = intent(Side::Buy, 5, "495", None);
+        assert!(!g11_averaging_down(&low, &cls(&low, &s), &s, live("510")).passed());
+        // Unknown live price rejects an add.
+        assert!(!g11_averaging_down(&buy, &k, &s, Tri::Unknown).passed());
+        // Short side mirrors: worse is the higher price.
+        let s = snap_with(vec![pos(
+            Side::Sell,
+            10,
+            Tri::Unknown,
+            Tri::Known(d("500")),
+        )]);
+        let sell = intent(Side::Sell, 5, "495", None);
+        let k = cls(&sell, &s);
+        assert!(!g11_averaging_down(&sell, &k, &s, live("520")).passed());
+        assert!(g11_averaging_down(&sell, &k, &s, live("500")).passed());
+        // No position to add to: an unknown live price does not matter.
+        let s = snap_with(vec![]);
+        assert!(g11_averaging_down(&buy, &cls(&buy, &s), &s, Tri::Unknown).passed());
     }
 
     #[test]
@@ -507,14 +589,14 @@ mod tests {
         ];
         let s = snap_with(rows);
         let i = intent(Side::Buy, 5, "600", None);
-        assert!(!g11_averaging_down(&i, &cls(&i, &s), &s).passed());
+        assert!(!g11_averaging_down(&i, &cls(&i, &s), &s, live("600")).passed());
         let s = snap_with(vec![pos(Side::Buy, 10, Tri::Unknown, Tri::Known(d("500")))]);
         let exit = intent(Side::Sell, 10, "400", None);
-        assert!(g11_averaging_down(&exit, &cls(&exit, &s), &s).passed());
+        assert!(g11_averaging_down(&exit, &cls(&exit, &s), &s, live("400")).passed());
     }
 
-    fn stop_out(symbol: &str, mins_ago: i64) -> StopOut {
-        StopOut {
+    fn losing_exit(symbol: &str, mins_ago: i64) -> LosingExit {
+        LosingExit {
             symbol: symbol.into(),
             at: now() - Duration::minutes(mins_ago),
         }
@@ -527,29 +609,29 @@ mod tests {
         let i = intent(Side::Buy, 10, "500", None);
         let mut s = snap_with(vec![]);
         let kls = entry(&i, &s);
-        s.last_stop_outs = Tri::Known(vec![stop_out("ABC", lock - 1)]);
+        s.last_losing_exits = Tri::Known(vec![losing_exit("ABC", lock - 1)]);
         let res = g17_reentry_lockout(&c, &i, &kls, &s);
         assert!(!res.passed() && res.message().ends_with("(G17)"));
-        s.last_stop_outs = Tri::Known(vec![stop_out("ABC", lock)]);
+        s.last_losing_exits = Tri::Known(vec![losing_exit("ABC", lock)]);
         assert!(g17_reentry_lockout(&c, &i, &kls, &s).passed());
-        s.last_stop_outs = Tri::Known(vec![stop_out("XYZ", 1)]);
+        s.last_losing_exits = Tri::Known(vec![losing_exit("XYZ", 1)]);
         assert!(g17_reentry_lockout(&c, &i, &kls, &s).passed());
-        s.last_stop_outs = Tri::Known(vec![]);
+        s.last_losing_exits = Tri::Known(vec![]);
         assert!(g17_reentry_lockout(&c, &i, &kls, &s).passed());
-        s.last_stop_outs = Tri::Unknown;
+        s.last_losing_exits = Tri::Unknown;
         assert!(!g17_reentry_lockout(&c, &i, &kls, &s).passed());
     }
 
     #[test]
-    fn g17_future_stop_out_rejects_and_exit_passes() {
+    fn g17_future_exit_time_rejects_and_exit_passes() {
         let c = ctx();
         let i = intent(Side::Buy, 10, "500", None);
         let mut s = snap_with(vec![]);
         let kls = entry(&i, &s);
-        s.last_stop_outs = Tri::Known(vec![stop_out("ABC", -5)]);
+        s.last_losing_exits = Tri::Known(vec![losing_exit("ABC", -5)]);
         assert!(!g17_reentry_lockout(&c, &i, &kls, &s).passed());
         let mut s = snap_with(vec![pos(Side::Buy, 10, Tri::Unknown, Tri::Unknown)]);
-        s.last_stop_outs = Tri::Known(vec![stop_out("ABC", 1)]);
+        s.last_losing_exits = Tri::Known(vec![losing_exit("ABC", 1)]);
         let exit = intent(Side::Sell, 10, "500", None);
         assert!(g17_reentry_lockout(&c, &exit, &cls(&exit, &s), &s).passed());
     }
@@ -562,7 +644,7 @@ mod tests {
         let i = intent(Side::Buy, 10, "500", None);
         let mut s = snap_with(vec![]);
         let kls = entry(&i, &s);
-        s.last_stop_outs = Tri::Known(vec![stop_out("ABC", 100)]);
+        s.last_losing_exits = Tri::Known(vec![losing_exit("ABC", 100)]);
         assert!(!g17_reentry_lockout(&c, &i, &kls, &s).passed());
     }
 
