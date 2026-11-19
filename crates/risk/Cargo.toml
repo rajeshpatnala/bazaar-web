@@ -19,6 +19,8 @@ sha2.workspace = true
 
 [features]
 default = []
+# Never a default. The executing binary forwards its own `live-trading` to this feature.
+live-trading = []
 
 [dev-dependencies]
 proptest.workspace = true
