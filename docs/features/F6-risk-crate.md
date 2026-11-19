@@ -80,3 +80,6 @@ Test fixture `fixtures/config/risk.toml` gained the same sections with synthetic
 - Equity from `sizing_equity(snapshot, limits)` and marks from `snapshot.marks` (no caller figures); sector cap compared unrounded; entry valued at `ref_price` = `max(intent.price, live price)` computed once by the gate and passed to `evaluate`.
 - Correlation is side-aware: a held position counts when `s * cov > 0` (s = +1 same side, -1 opposite) and `cov^2 >= t^2 var_a var_b`. Positively correlated opposite-side pairs are hedges and are not counted. Owner to confirm: hedges are not counted.
 - Returns too small to compare (squares round to 0) reject; a window below 2 rejects with its own message.
+
+## Slice 5 (portfolio rules: G02, G04a, G04b, G14)
+- `rules/portfolio.rs`: pure fns taking the gate's one `ref_price`. G02 = new risk + max(charges buffer, floor) + held risk of a same-side holding (stored stop) vs `max_risk_per_trade_pct`; G04b = new risk + risk of surviving positions; G14 = new qty at ref plus same-side holding at its mark. Stops in profit count as 0 risk; a flip drops the closed position. Unknown stop, risk price, mark, equity or buffer rejects entries. Tests are inline (need `pub(crate)` rule_ctx), not `tests/portfolio.rs`.
