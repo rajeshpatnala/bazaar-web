@@ -15,8 +15,18 @@ pub struct Position {
     pub qty: u32,
     /// Stop stored in the journal; `Unknown` when none is recorded.
     pub stop: Tri<Decimal>,
+    /// Price the open risk to `stop` is measured from (G04b): the average entry price, or the
+    /// mark when that is higher risk. `Unknown` rejects entries under G04b.
+    pub risk_price: Tri<Decimal>,
     /// Average entry cost from the journal; `Unknown` rejects adds to the position (G11).
     pub avg_cost: Tri<Decimal>,
+}
+
+/// Latest mark for one symbol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mark {
+    pub symbol: String,
+    pub price: Decimal,
 }
 
 /// Time of the last losing exit (net of charges) in one symbol, however it was closed: stop, target or manual.
@@ -44,6 +54,14 @@ pub struct PortfolioSnapshot {
     pub overrides_week: Tri<u32>,
     pub kill_switch: Tri<bool>,
     pub charges_buffer: Tri<Decimal>,
+    /// Cash the account started with (paper: `paper_starting_cash_inr`).
+    pub starting_cash: Tri<Decimal>,
+    /// Cumulative realised P&L since the start, net of charges.
+    pub realised_pnl: Tri<Decimal>,
+    /// Mark-to-market equity now (cash plus open positions at their marks).
+    pub equity_mtm: Tri<Decimal>,
+    /// Latest mark per symbol with an open position (G03/G19 unrealised P&L).
+    pub marks: Tri<Vec<Mark>>,
     /// Last losing exit per symbol, net of charges (not only stop hits); the journal (F10) must supply it so.
     pub last_losing_exits: Tri<Vec<LosingExit>>,
 }
@@ -64,6 +82,10 @@ impl PortfolioSnapshot {
             overrides_week: Tri::Unknown,
             kill_switch: Tri::Unknown,
             charges_buffer: Tri::Unknown,
+            starting_cash: Tri::Unknown,
+            realised_pnl: Tri::Unknown,
+            equity_mtm: Tri::Unknown,
+            marks: Tri::Unknown,
             last_losing_exits: Tri::Unknown,
         }
     }
@@ -87,6 +109,8 @@ mod tests {
         let s = PortfolioSnapshot::unknown();
         assert!(s.as_of.is_unknown() && s.positions.is_unknown());
         assert!(s.day_pnl.is_unknown() && s.kill_switch.is_unknown());
+        assert!(s.starting_cash.is_unknown() && s.realised_pnl.is_unknown());
+        assert!(s.equity_mtm.is_unknown() && s.marks.is_unknown());
         assert!(s.position("ABC").is_none());
     }
 
@@ -99,6 +123,7 @@ mod tests {
                 side: Side::Buy,
                 qty: 0,
                 stop: Tri::Unknown,
+                risk_price: Tri::Unknown,
                 avg_cost: Tri::Unknown,
             },
             Position {
@@ -106,6 +131,7 @@ mod tests {
                 side: Side::Sell,
                 qty: 5,
                 stop: Tri::Unknown,
+                risk_price: Tri::Unknown,
                 avg_cost: Tri::Unknown,
             },
         ]);

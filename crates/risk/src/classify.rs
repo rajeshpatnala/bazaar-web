@@ -166,6 +166,7 @@ mod tests {
             symbol: "ABC".into(),
             side,
             qty,
+            risk_price: Tri::Unknown,
             stop,
             avg_cost: Tri::Unknown,
         }]);
@@ -286,6 +287,7 @@ mod tests {
             side,
             qty,
             stop: Tri::Unknown,
+            risk_price: Tri::Unknown,
             avg_cost: Tri::Unknown,
         };
         let mut s = PortfolioSnapshot::unknown();

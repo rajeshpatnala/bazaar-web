@@ -345,6 +345,7 @@ mod tests {
             side,
             qty,
             stop,
+            risk_price: Tri::Unknown,
             avg_cost: avg,
         }
     }
@@ -370,6 +371,7 @@ mod tests {
         let mut s = snap_with(vec![]);
         let kls = entry(&i, &s);
         let limit = c.limits.cooloff_after_losses;
+        assert_eq!(limit, 3, "fixture cooloff is 3");
         s.consecutive_losses = Tri::Known(limit - 1);
         assert!(g08_cooloff(&c, &kls, &s).passed());
         s.consecutive_losses = Tri::Known(limit);
@@ -473,6 +475,66 @@ mod tests {
         assert!(!g10_entry_zone(&c, &kls, bad, Tri::Known(d("505"))).passed());
         let res = g10_entry_zone(&c, &kls, zone(), Tri::Known(d("510")));
         assert!(res.message().contains("missed") && res.message().ends_with("(G10)"));
+    }
+
+    #[test]
+    fn g10_sell_entry_uses_the_same_zone() {
+        let c = ctx();
+        let i = intent(Side::Sell, 10, "500", None);
+        let kls = entry(&i, &snap_with(vec![]));
+        for (p, ok) in [
+            ("500", true),
+            ("502.25", true),
+            ("502.26", false),
+            ("497.75", false),
+        ] {
+            assert_eq!(
+                g10_entry_zone(&c, &kls, zone(), Tri::Known(d(p))).passed(),
+                ok,
+                "{p}"
+            );
+        }
+        assert!(!g10_entry_zone(&c, &kls, zone(), Tri::Unknown).passed());
+    }
+
+    #[test]
+    fn restart_mid_lockout_stays_locked() {
+        // The rules are pure functions of config + snapshot: a rebuilt context and snapshot from
+        // the same inputs give the same rejections.
+        let cfg = GateConfig::from_toml_str(TEXT).unwrap();
+        let build = || {
+            let c = crate::baseline::rule_ctx(&cfg, &crate::baseline::MemoryBaseline::new(), now())
+                .unwrap();
+            let mut s = snap_with(vec![]);
+            s.consecutive_losses = Tri::Known(c.limits.cooloff_after_losses);
+            s.entries_today = Tri::Known(c.limits.max_new_entries_per_day);
+            s.last_losing_exits = Tri::Known(vec![losing_exit("ABC", 1)]);
+            (c, s)
+        };
+        let i = intent(Side::Buy, 10, "500", None);
+        for _ in 0..2 {
+            let (c, s) = build();
+            let k = cls(&i, &s);
+            assert!(!g08_cooloff(&c, &k, &s).passed());
+            assert!(!g17_reentry_lockout(&c, &i, &k, &s).passed());
+            assert!(!g18_entries_per_day(&c, &k, &s).passed());
+        }
+    }
+
+    #[test]
+    fn restart_forgets_in_memory_baseline_until_f10() {
+        // Documented: the in-memory baseline is lost on restart, so a limit tightened this
+        // session returns to the file value. F10 persists it.
+        let cfg = GateConfig::from_toml_str(TEXT).unwrap();
+        let mut store = crate::baseline::MemoryBaseline::new();
+        let mut b = Baseline::none();
+        b.max_new_entries_per_day = Some(1);
+        store.tighten(&b);
+        let before = crate::baseline::rule_ctx(&cfg, &store, now()).unwrap();
+        assert_eq!(before.limits.max_new_entries_per_day, 1);
+        let restarted = crate::baseline::MemoryBaseline::new();
+        let after = crate::baseline::rule_ctx(&cfg, &restarted, now()).unwrap();
+        assert_eq!(after.limits.max_new_entries_per_day, 4);
     }
 
     #[test]
@@ -652,6 +714,7 @@ mod tests {
     fn g18_fourth_entry_blocked_exits_never() {
         let c = ctx();
         let max = c.limits.max_new_entries_per_day;
+        assert_eq!(max, 4, "fixture entries per day is 4");
         let i = intent(Side::Buy, 10, "500", None);
         let mut s = snap_with(vec![]);
         let kls = entry(&i, &s);

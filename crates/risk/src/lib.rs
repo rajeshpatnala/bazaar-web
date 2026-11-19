@@ -6,7 +6,8 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
 )]
 #![cfg_attr(
     test,
@@ -14,7 +15,8 @@
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,
-        clippy::indexing_slicing
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
     )
 )]
 

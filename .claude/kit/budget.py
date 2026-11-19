@@ -156,6 +156,67 @@ def transcript_detail(path: str) -> dict:
     return out
 
 
+def first_prompt(path: str) -> str:
+    """The task message an agent was launched with (first user message in its transcript)."""
+    try:
+        with open(pathlib.Path(path).expanduser(), errors="replace") as f:
+            for line in f:
+                if '"user"' not in line:
+                    continue
+                obj = json.loads(line)
+                if obj.get("type") != "user":
+                    continue
+                c = (obj.get("message") or {}).get("content")
+                if isinstance(c, list):
+                    c = " ".join(x.get("text", "") for x in c if isinstance(x, dict))
+                return c or ""
+    except (OSError, ValueError):
+        pass
+    return ""
+
+
+def prompt_task(path: str) -> str:
+    """The task id from the dispatch's own `Task: <id>` line, so parallel tasks book separately."""
+    m = re.search(r"(?mi)^\s*\**Task:?\**\s*:?\s*([A-Za-z]+\d+[\w.-]*)", first_prompt(path)[:2000])
+    return m.group(1) if m else ""
+
+
+def team_value(name: str, default: str = "") -> str:
+    text = TEAM.read_text() if TEAM.exists() else ""
+    m = re.search(rf"^\|\s*`?{re.escape(name)}`?\s*\|\s*([^|]*?)\s*\|", text, re.M)
+    return m.group(1) if m and m.group(1) not in ("", "-") else default
+
+
+USAGE_FILE = ROOT / ".agents" / ".usage-limits.json"
+
+
+def plan_usage() -> dict:
+    """The owner's real plan usage as Claude Code last reported it to the status line (5-hour and 7-day windows)."""
+    try:
+        return json.loads(USAGE_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def plan_usage_line() -> str:
+    u = plan_usage()
+    parts = []
+    for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
+        w = u.get(key) or {}
+        if "used_percentage" in w:
+            reset = ""
+            if w.get("resets_at"):
+                reset = " (resets " + dt.datetime.fromtimestamp(int(w["resets_at"])).strftime("%a %H:%M") + ")"
+            parts.append(f"{label} {float(w['used_percentage']):.0f}%{reset}")
+    if not parts:
+        return ""
+    age = ""
+    if u.get("at"):
+        mins = int((dt.datetime.now().timestamp() - u["at"]) // 60)
+        age = f", as of {mins} min ago" if mins > 2 else ""
+    return "plan usage: " + ", ".join(parts) + age
+
+
 def first_prompt_chars(path: str) -> int:
     """Size of the task message an agent was launched with (first user message in its transcript)."""
     try:
@@ -271,7 +332,7 @@ def main(argv: list) -> int:
         ctx, processed, steps, start = det["ctx"], det["processed"], det["steps"], det["start"]
         now = dt.datetime.now()
         agent, aid = data.get("agent_type") or "agent", data.get("agent_id", "?")
-        row = {"date": now.date().isoformat(), "time": now.strftime("%H:%M"), "task": current_task(),
+        row = {"date": now.date().isoformat(), "time": now.strftime("%H:%M"), "task": prompt_task(path) or current_task(),
                "agent": agent, "tokens": ctx, "processed": processed, "source": "auto",
                "note": f"{steps} steps, prompt {first_prompt_chars(path) // 4} tok, id {aid}",
                "start": start, "session": data.get("session_id", ""), "start_cached": det["start_cached"],
@@ -305,13 +366,34 @@ def main(argv: list) -> int:
         except ValueError:
             sessions = {}
         sid = data.get("session_id") or "session"
-        first = sessions.get(sid, {}).get("date", today)
-        sessions[sid] = {"date": first, "last": today, "context": ctx, "processed": processed, "steps": steps,
+        prev = sessions.get(sid, {})
+        first = prev.get("date", today)
+        sessions[sid] = {**{k: v for k, v in prev.items() if k.startswith("warned_")}, "date": first, "last": today, "context": ctx, "processed": processed, "steps": steps,
                          "cost_eq": det["cost_eq"]}
         cutoff = (dt.date.today() - dt.timedelta(days=30)).isoformat()
         sessions = {k: v for k, v in sessions.items() if v.get("last", "") >= cutoff}
+        # Tell the OWNER (not the manager) when the session gets expensive: a long manager conversation is re-sent on
+        # every step, and the plan allowance is the real limit. Shown once per level, as a Claude Code system message.
+        msgs, me = [], sessions[sid]
+        clear_at = int(team_value("manager_clear_at", "150,000").replace(",", "").replace("_", "") or 150000)
+        level = (ctx // 50_000) * 50_000
+        if ctx >= clear_at and level > int(me.get("warned_ctx", 0)):
+            me["warned_ctx"] = level
+            msgs.append(f"Manager context is {ctx // 1000}k (limit {clear_at // 1000}k): every step re-sends all of it. "
+                        "Good moment for: just milestone \"<where things stand>\" and then /clear.")
+        u = plan_usage()
+        for key, label in (("five_hour", "5-hour"), ("seven_day", "7-day")):
+            pct = float((u.get(key) or {}).get("used_percentage") or 0)
+            step = max((t for t in (70, 85, 95) if pct >= t), default=0)
+            if step and step > int(me.get(f"warned_{key}", 0)):
+                me[f"warned_{key}"] = step
+                msgs.append(f"Plan usage: {pct:.0f}% of your {label} allowance used. "
+                            + ("Finish the current step and pause new launches." if step >= 95 else
+                               "Prefer continuing warm agents and one-call reviews; postpone optional work."))
         SESSIONS.parent.mkdir(parents=True, exist_ok=True)
         SESSIONS.write_text(json.dumps(sessions, indent=1) + "\n")
+        if msgs:
+            print(json.dumps({"systemMessage": " ".join(msgs)}))
         return 0
 
     if cmd == "add":
@@ -347,6 +429,9 @@ def main(argv: list) -> int:
         mgr = manager_today(today)
         if mgr:
             parts.append(f"manager {fmt(mgr[0])} context, {fmt(mgr[1])} processed today")
+        pu = plan_usage_line()
+        if pu:
+            parts.append(pu)
         print(" | ".join(parts))
         return 0
 
@@ -414,7 +499,7 @@ def main(argv: list) -> int:
 
     if cmd == "check":
         if len(args) < 2:
-            sys.exit("usage: budget.py check <task> <agent>:<count> ...")
+            sys.exit("usage: budget.py check <task> <agent>:<count> ...   e.g. just budget-check F3 dev-core:2 code-reviewer:1")
         task, plan = args[0], args[1:]
         projected = 0
         for item in plan:
@@ -434,6 +519,12 @@ def main(argv: list) -> int:
                 worst = max(worst, 2)
             elif pct >= lim["warn_percent"]:
                 worst = max(worst, 1)
+        # the owner's real plan allowance outranks the kit's own day cap
+        for key, label in (("five_hour", "5-hour plan window"), ("seven_day", "7-day plan window")):
+            pct = float((plan_usage().get(key) or {}).get("used_percentage") or 0)
+            if pct:
+                notes.append(f"{label} {pct:.0f}% used")
+                worst = max(worst, 2 if pct >= 95 else 1 if pct >= 70 else 0)
         verdict = {0: "OK", 1: "WARN (tell the user)", 2: "OVER LIMIT (ask the user before launching)"}[worst]
         print(f"{verdict}: " + ("; ".join(notes) if notes else f"no limits set, projected ~{fmt(projected)}"))
         return worst
