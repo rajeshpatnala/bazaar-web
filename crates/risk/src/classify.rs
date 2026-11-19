@@ -166,6 +166,7 @@ mod tests {
             symbol: "ABC".into(),
             side,
             qty,
+            risk_price: Tri::Unknown,
             stop,
         }]);
         s
@@ -285,6 +286,7 @@ mod tests {
             side,
             qty,
             stop: Tri::Unknown,
+            risk_price: Tri::Unknown,
         };
         let mut s = PortfolioSnapshot::unknown();
         s.positions = Tri::Known(vec![row(Side::Buy, 10), row(Side::Sell, 20)]);
