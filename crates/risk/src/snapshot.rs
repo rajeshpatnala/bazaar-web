@@ -50,6 +50,8 @@ pub struct PortfolioSnapshot {
     pub week_pnl: Tri<Decimal>,
     pub entries_today: Tri<u32>,
     pub orders_last_minute: Tri<u32>,
+    /// Orders sent today (all orders, not only entries); G16.
+    pub orders_today: Tri<u32>,
     pub overrides_today: Tri<u32>,
     pub overrides_week: Tri<u32>,
     pub kill_switch: Tri<bool>,
@@ -78,6 +80,7 @@ impl PortfolioSnapshot {
             week_pnl: Tri::Unknown,
             entries_today: Tri::Unknown,
             orders_last_minute: Tri::Unknown,
+            orders_today: Tri::Unknown,
             overrides_today: Tri::Unknown,
             overrides_week: Tri::Unknown,
             kill_switch: Tri::Unknown,
@@ -109,6 +112,7 @@ mod tests {
         let s = PortfolioSnapshot::unknown();
         assert!(s.as_of.is_unknown() && s.positions.is_unknown());
         assert!(s.day_pnl.is_unknown() && s.kill_switch.is_unknown());
+        assert!(s.orders_today.is_unknown() && s.orders_last_minute.is_unknown());
         assert!(s.starting_cash.is_unknown() && s.realised_pnl.is_unknown());
         assert!(s.equity_mtm.is_unknown() && s.marks.is_unknown());
         assert!(s.position("ABC").is_none());
