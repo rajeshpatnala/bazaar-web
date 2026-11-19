@@ -52,7 +52,7 @@ Deferred: first-15-minute rule; broker order-rate figure and the new hard ceilin
 | `limits.min_charges_slippage_buffer` | 60 (rupees) | > 0; placeholder, derive from charges.toml with the F9 cost model |
 | `limits.cap_equity_at_starting_cash` | true | `false` refused (owner Q2) |
 
-Deferred to slice 1b: ceilings for `ban_list_max_age_hours`, `max_quote_age_secs`, `max_snapshot_age_secs`, latest expiry cutoff; floor for `confirm_delay_secs`, ceiling for `size_factor`. Symlink and canonical-path check for `events_file` belongs to the events loader (F3/F10).
+Slice 1b `[hard_limits]` (unverified, owner to confirm): `max_ban_list_age_hours` 24, `max_quote_age_secs` 5, `max_snapshot_age_secs` 10, `latest_expiry_day_no_new_after_ist` 13:30, `min_confirm_delay_secs` 10, `max_size_factor` 0.5, `min_oos_trades` floor 20 (chosen by dev, below the 30 default). Deferred: symlink and canonical-path check for `events_file` belongs to the events loader (F3/F10).
 
 Ceilings for G05 and G04a sit at their defaults; changing any `[hard_limits]` value needs an ADR and the owner.
 Test fixture `fixtures/config/risk.toml` gained the same sections with synthetic values.

@@ -37,6 +37,13 @@ max_orders_per_day = 15
 max_notional_per_order_inr = "30000"
 max_override_per_day = 2
 max_override_per_week = 4
+max_ban_list_age_hours = 24
+max_quote_age_secs = 10
+max_snapshot_age_secs = 20
+latest_expiry_day_no_new_after_ist = "14:30"
+min_confirm_delay_secs = 5
+max_size_factor = "0.6"
+min_oos_trades = 25
 
 [execution]
 paper_starting_cash_inr = "250000"

@@ -101,6 +101,22 @@ pub struct HardLimits {
     /// Ceiling for `limits.max_notional_per_order_inr` (G16), rupees.
     #[serde(deserialize_with = "super::decimal_str::deserialize")]
     pub max_notional_per_order_inr: Decimal,
+    /// Ceiling for `events.ban_list_max_age_hours` (G06).
+    pub max_ban_list_age_hours: u32,
+    /// Ceiling for `data.max_quote_age_secs` (G15).
+    pub max_quote_age_secs: u32,
+    /// Ceiling for `data.max_snapshot_age_secs`.
+    pub max_snapshot_age_secs: u32,
+    /// Latest allowed `events.expiry_day_no_new_after_ist` (G07), `HH:MM`.
+    #[serde(deserialize_with = "hhmm")]
+    pub latest_expiry_day_no_new_after_ist: NaiveTime,
+    /// Smallest allowed `override.confirm_delay_secs`.
+    pub min_confirm_delay_secs: u32,
+    /// Largest allowed `override.size_factor`.
+    #[serde(deserialize_with = "super::decimal_str::deserialize")]
+    pub max_size_factor: Decimal,
+    /// Smallest allowed `gate.evidence.min_oos_trades`.
+    pub min_oos_trades: u32,
     /// Ceiling for `override.max_per_day`.
     pub max_override_per_day: u32,
     /// Ceiling for `override.max_per_week`.
@@ -589,6 +605,81 @@ impl RiskConfig {
         Ok(())
     }
 
+    /// Ceilings and floors for the No-row freshness keys and the override and evidence knobs.
+    fn validate_no_row_ceilings(&self) -> Result<(), ConfigError> {
+        let (h, o, ev, d) = (&self.hard_limits, &self.override_, &self.events, &self.data);
+        for (key, v, r) in [
+            (
+                "hard_limits.max_ban_list_age_hours",
+                h.max_ban_list_age_hours,
+                BAN_LIST_HOURS,
+            ),
+            (
+                "hard_limits.max_quote_age_secs",
+                h.max_quote_age_secs,
+                QUOTE_AGE_SECS,
+            ),
+            (
+                "hard_limits.max_snapshot_age_secs",
+                h.max_snapshot_age_secs,
+                SNAPSHOT_AGE_SECS,
+            ),
+            (
+                "hard_limits.min_confirm_delay_secs",
+                h.min_confirm_delay_secs,
+                CONFIRM_DELAY_SECS,
+            ),
+            (
+                "hard_limits.min_oos_trades",
+                h.min_oos_trades,
+                MIN_OOS_TRADES,
+            ),
+        ] {
+            check_range(key, v, r)?;
+        }
+        check_ceiling_u32(
+            "events.ban_list_max_age_hours",
+            ev.ban_list_max_age_hours,
+            h.max_ban_list_age_hours,
+        )?;
+        check_ceiling_u32(
+            "data.max_quote_age_secs",
+            d.max_quote_age_secs,
+            h.max_quote_age_secs,
+        )?;
+        check_ceiling_u32(
+            "data.max_snapshot_age_secs",
+            d.max_snapshot_age_secs,
+            h.max_snapshot_age_secs,
+        )?;
+        check_floor_u32(
+            "override.confirm_delay_secs",
+            o.confirm_delay_secs,
+            h.min_confirm_delay_secs,
+        )?;
+        check_floor_u32(
+            "gate.evidence.min_oos_trades",
+            self.gate.evidence.min_oos_trades,
+            h.min_oos_trades,
+        )?;
+        if h.max_size_factor <= Decimal::ZERO || h.max_size_factor > Decimal::ONE {
+            return Err(ConfigError::invalid(
+                Self::FILE,
+                "hard_limits.max_size_factor",
+                "must be above 0 and at most 1",
+            ));
+        }
+        check_ceiling("override.size_factor", o.size_factor, h.max_size_factor)?;
+        if ev.expiry_day_no_new_after_ist > h.latest_expiry_day_no_new_after_ist {
+            return Err(ConfigError::invalid(
+                Self::FILE,
+                "events.expiry_day_no_new_after_ist",
+                "is later than its [hard_limits] ceiling",
+            ));
+        }
+        Ok(())
+    }
+
     /// G16 orders per day and notional per order, with their ceilings.
     fn validate_order_limits(&self) -> Result<(), ConfigError> {
         let (l, h) = (&self.limits, &self.hard_limits);
@@ -632,6 +723,7 @@ impl RiskConfig {
             h.max_open_positions,
         )?;
         self.validate_order_limits()?;
+        self.validate_no_row_ceilings()?;
         for (key, v, c, r) in [
             (
                 "hard_limits.max_orders_per_minute",
@@ -719,6 +811,9 @@ mod tests {
         max_position_value_pct = \"25\"\nmax_sector_pct = \"30\"\nmax_open_positions = 3\n\
         max_orders_per_minute = 10\nmax_orders_per_day = 12\n\
         max_notional_per_order_inr = \"25000\"\nmax_override_per_day = 1\nmax_override_per_week = 3\n\
+        max_ban_list_age_hours = 24\nmax_quote_age_secs = 5\nmax_snapshot_age_secs = 10\n\
+        latest_expiry_day_no_new_after_ist = \"13:30\"\nmin_confirm_delay_secs = 10\n\
+        max_size_factor = \"0.5\"\nmin_oos_trades = 20\n\
         [exposure]\nmax_sector_pct = \"30\"\nmax_correlated_positions = 2\n\
         correlation_threshold = \"0.7\"\ncorrelation_window_days = 60\n\
         [behaviour]\ncooloff_after_losses = 2\ncooloff_until = \"end_of_session\"\n\
@@ -913,6 +1008,13 @@ mod tests {
         ("override", "max_per_week"),
         ("override", "size_factor"),
         ("override", "confirm_delay_secs"),
+        ("hard_limits", "max_ban_list_age_hours"),
+        ("hard_limits", "max_quote_age_secs"),
+        ("hard_limits", "max_snapshot_age_secs"),
+        ("hard_limits", "latest_expiry_day_no_new_after_ist"),
+        ("hard_limits", "min_confirm_delay_secs"),
+        ("hard_limits", "max_size_factor"),
+        ("hard_limits", "min_oos_trades"),
     ];
 
     /// Each new key removed on its own must fail the load (no serde default to a loose value).
@@ -1276,6 +1378,27 @@ mod tests {
             ("gate.evidence", "min_oos_trades", "100001"),
             ("gate.evidence", "min_profit_factor", "\"0\""),
             ("gate.evidence", "min_expectancy_r", "\"-0.1\""),
+            ("events", "ban_list_max_age_hours", "25"),
+            ("data", "max_quote_age_secs", "6"),
+            ("data", "max_snapshot_age_secs", "11"),
+            ("gate.evidence", "min_oos_trades", "19"),
+            ("override", "confirm_delay_secs", "9"),
+            ("override", "size_factor", "\"0.51\""),
+            ("hard_limits", "max_ban_list_age_hours", "0"),
+            ("hard_limits", "max_ban_list_age_hours", "49"),
+            ("hard_limits", "max_quote_age_secs", "0"),
+            ("hard_limits", "max_quote_age_secs", "61"),
+            ("hard_limits", "max_snapshot_age_secs", "301"),
+            ("hard_limits", "min_confirm_delay_secs", "0"),
+            ("hard_limits", "min_confirm_delay_secs", "301"),
+            ("hard_limits", "max_size_factor", "\"0\""),
+            ("hard_limits", "max_size_factor", "\"1.1\""),
+            ("hard_limits", "min_oos_trades", "0"),
+            (
+                "hard_limits",
+                "latest_expiry_day_no_new_after_ist",
+                "\"25:00\"",
+            ),
             ("override", "max_per_day", "0"),
             ("override", "max_per_day", "2"),
             ("override", "max_per_week", "4"),
@@ -1307,6 +1430,15 @@ mod tests {
     }
 
     #[test]
+    fn slice1b_expiry_cutoff_ceiling() {
+        let ok = edit("events", "expiry_day_no_new_after_ist", Some("\"13:30\""));
+        assert!(parse_str::<RiskConfig>(&ok).is_ok());
+        let late = edit("events", "expiry_day_no_new_after_ist", Some("\"13:31\""));
+        let err = parse_str::<RiskConfig>(&late).unwrap_err().to_string();
+        assert!(err.contains("expiry_day_no_new_after_ist"), "{err}");
+    }
+
+    #[test]
     fn slice1_bad_time_and_wrong_types_are_refused() {
         for bad in ["\"1330\"", "\"25:00\"", "13"] {
             let t = edit("events", "expiry_day_no_new_after_ist", Some(bad));
@@ -1328,11 +1460,14 @@ mod tests {
         );
         assert!(cfg.limits.cap_equity_at_starting_cash);
         for (sec, key, ok) in [
-            ("override", "size_factor", "\"1\""),
-            ("override", "confirm_delay_secs", "300"),
-            ("data", "max_quote_age_secs", "60"),
-            ("data", "max_snapshot_age_secs", "300"),
-            ("gate.evidence", "min_oos_trades", "1"),
+            ("override", "size_factor", "\"0.5\""),
+            ("override", "confirm_delay_secs", "10"),
+            ("data", "max_quote_age_secs", "5"),
+            ("data", "max_snapshot_age_secs", "10"),
+            ("gate.evidence", "min_oos_trades", "20"),
+            ("hard_limits", "max_quote_age_secs", "60"),
+            ("hard_limits", "min_confirm_delay_secs", "1"),
+            ("hard_limits", "max_size_factor", "\"1\""),
             ("limits", "max_orders_per_minute", "1"),
             ("limits", "max_position_value_pct", "\"25\""),
         ] {
