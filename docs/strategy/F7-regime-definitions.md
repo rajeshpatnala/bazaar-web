@@ -39,7 +39,7 @@ confirmed state exists the answer is `Unknown`. This stops the badge flapping.
 (config switch `market_vol_source = "vix_if_available"`); otherwise index ATR%.
 **Breakdown (market series):** close < EMA200 and vol == High and (trend == Down or breadth < `breadth_breakdown_max_pct` when breadth is present).
 Without breadth it uses what exists and the reason says "breadth not available".
-**Warm-up:** the indicators warm up in parallel, so `min_history_bars = max(ema_slow, 2*adx_period, ema_mid + slope_bars, atr_period + vol_lookback_bars - 1) + confirm_bars - 1` (about 265 at defaults); fewer bars gives `Unknown`. F4/F7 fixtures need at least about 300 synthetic daily bars.
+**Warm-up:** the indicators warm up in parallel, so `min_history_bars = max(ema_slow, 2*adx_period, ema_mid + slope_bars, atr_period + vol_lookback_bars) + confirm_bars - 1` (266 at defaults: the first ATR needs atr_period + 1 bars); exactly that many bars classify, fewer gives `Unknown`. Percentile rank counts ties as half, so a flat series ranks 50 (Normal). A VIX percentile series goes through the same confirm_bars rule as ATR%; the classifier takes daily, adjusted, strictly ordered closed bars and refuses anything else. F4/F7 fixtures need at least about 300 synthetic daily bars.
 **Precedence:** `adx_range_max` must not exceed `adx_trend_stay` (config check), so Range and a held trend cannot overlap; Up/Down are tested first, then Range, then Mixed.
 
 ## 4. Parameters

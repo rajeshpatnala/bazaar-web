@@ -318,8 +318,11 @@ name = "bazaar-regime"
 version = "0.1.0"
 dependencies = [
  "bazaar-core",
+ "bazaar-indicators",
  "chrono",
  "chrono-tz",
+ "proptest",
+ "rust_decimal",
  "serde",
  "thiserror",
  "toml",
