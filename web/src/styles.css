@@ -1,11 +1,13 @@
+@import "./styles/tokens.css";
+
 * {
   box-sizing: border-box;
 }
 body {
   margin: 0;
-  font-family: system-ui, sans-serif;
-  color: #1a1a1a;
-  background: #fff;
+  background: var(--bg);
+  color: var(--ink);
+  font: 16px/1.6 var(--font-serif);
 }
 .shell {
   min-height: 100vh;
@@ -13,24 +15,50 @@ body {
   flex-direction: column;
 }
 .shell-header {
-  padding: 0.75rem 1.5rem;
-  border-bottom: 1px solid #ddd;
+  padding: 1.5rem 3rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.5rem;
+  justify-content: space-between;
+  align-items: center;
 }
 .shell-header h1 {
   margin: 0;
-  font-size: 1.25rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+}
+.shell-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+.lbl {
+  font: 0.8rem var(--font-ui);
+  color: var(--muted);
 }
 .shell-main {
   flex: 1;
-  padding: 1rem 1.5rem;
-  max-width: 100%;
-  overflow-x: auto;
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 0 1.5rem 110px; /* room for the fixed disclaimer */
+}
+.shell-main h2 {
+  font-weight: 400;
+  font-size: 1.9rem;
 }
 .disclaimer {
-  padding: 0.75rem 1.5rem;
-  border-top: 1px solid #ddd;
-  background: #f6f6f6;
-  font-size: 0.875rem;
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: var(--card);
+  text-align: center;
+  padding: 0.6rem 1rem;
+  font: 0.8rem var(--font-ui);
+  color: var(--amber);
+  border-top: 1px solid var(--hairline);
   overflow-wrap: anywhere;
 }
 @media (prefers-reduced-motion: reduce) {
@@ -41,19 +69,22 @@ body {
 }
 
 .mode-badge {
-  margin-left: 0.75rem;
-  padding: 0.1rem 0.5rem;
-  border-radius: 4px;
-  font-size: 0.8rem;
-  font-weight: 700;
-  border: 1px solid currentColor;
+  padding: 0.25rem 0.9rem;
+  border-radius: var(--radius-pill);
+  font: 600 0.75rem var(--font-ui);
 }
 .mode-paper {
-  color: #0a5c36;
-  background: #e3f4ea;
+  color: var(--green);
+  background: var(--green-bg);
 }
 .mode-semi_auto,
 .mode-auto {
-  color: #8a1c1c;
-  background: #fbe5e5;
+  color: var(--red);
+  background: var(--red-bg);
+}
+.session-ended {
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 1.5rem;
 }

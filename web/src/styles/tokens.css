@@ -1,0 +1,19 @@
+/* Design tokens from previews/B-light-premium.html. Plain CSS, system fonts only (no webfonts). */
+:root {
+  --bg: #f6f3ee;
+  --ink: #2b2a28;
+  --muted: #5f5a52; /* AA on --bg and --card */
+  --card: #fff;
+  --hairline: #e6dfd2;
+  --green: #2f6b45;
+  --green-bg: #e8f1ea;
+  --red: #a33a2f;
+  --red-bg: #f8e7e5;
+  --amber: #7a5c2e;
+  --amber-bg: #faf7f1;
+  --radius: 18px;
+  --radius-pill: 99px;
+  --shadow: 0 8px 30px #0001;
+  --font-serif: Georgia, "Times New Roman", serif;
+  --font-ui: system-ui, sans-serif;
+}
