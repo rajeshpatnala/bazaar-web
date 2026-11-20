@@ -1,6 +1,6 @@
 # Bazaar
 
-> For education and personal analysis. Not investment advice. Past performance does not guarantee future results.
+> For education and personal analysis. Not investment advice; not SEBI registered; markets carry risk. Past performance does not guarantee future results.
 
 Bazaar is a personal Rust web app for Indian markets research and paper trading. It binds to `127.0.0.1` only, runs in `paper` mode by default, and every order needs your explicit approval.
 
