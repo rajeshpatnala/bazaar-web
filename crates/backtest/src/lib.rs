@@ -6,6 +6,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod config;
+pub mod fill;
 pub mod types;
 
 pub use config::{BacktestConfig, BacktestConfigError};
