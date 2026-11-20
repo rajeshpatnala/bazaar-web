@@ -1,0 +1,149 @@
+use bazaar_regime::{Fact, RegimeState};
+use bazaar_risk::config::ConfigHash;
+use bazaar_risk::verdict::{GateVerdict, RuleId, RuleResult};
+use chrono::TimeZone;
+use chrono_tz::Asia::Kolkata;
+use rust_decimal::Decimal;
+
+use super::*;
+
+fn t(h: u32) -> DateTime<Tz> {
+    Kolkata.with_ymd_and_hms(2026, 11, 20, h, 0, 0).unwrap()
+}
+
+fn d(n: i64) -> Decimal {
+    Decimal::from(n)
+}
+
+fn verdict(failing: &[RuleId]) -> GateVerdict {
+    let rs: Vec<RuleResult> = RuleId::EVALUATION_ORDER
+        .iter()
+        .map(|r| {
+            if failing.contains(r) {
+                RuleResult::fail(*r, "x", "y", "no")
+            } else {
+                RuleResult::pass(*r, "x", "y")
+            }
+        })
+        .collect();
+    GateVerdict::new(ConfigHash::of_text("cfg"), &rs).unwrap()
+}
+
+fn parts() -> RecommendationParts {
+    RecommendationParts {
+        id: 7,
+        generated_at: t(18),
+        data_as_of: t(15),
+        instrument: InstrumentRef {
+            instrument_token: 1,
+            tradingsymbol: "ABC".into(),
+            name: "Abc Ltd".into(),
+        },
+        action: Action::Buy,
+        entry_zone: (d(100), d(102)),
+        stop_loss: d(96),
+        targets: vec![d(110)],
+        horizon: Horizon::Swing,
+        size: PositionSize { qty: 10, lots: 1 },
+        risk_rupees: d(60),
+        reward_risk: d(1),
+        agreeing_strategies: vec!["donchian_breakout".into()],
+        confidence: 80,
+        regime: RegimeState::unknown(t(15), Fact::new("a", "b", "c")),
+        backtest: None,
+        why: vec![WhyFactor::Risk {
+            risk_rupees: d(60),
+            limit_rupees: d(1000),
+            qty: 10,
+        }],
+        warnings: vec![],
+        gate: GateSummary::from_verdict(&verdict(&[]), t(18)),
+    }
+}
+
+#[test]
+fn no_evidence_is_low_evidence_and_caps_confidence() {
+    let r = Recommendation::new(parts(), 30, 55).unwrap();
+    assert!(r.low_evidence());
+    assert_eq!(r.confidence(), 55);
+    assert_eq!(r.backtest().trades, 0);
+    assert!(r.warnings().contains(&Warning::LowEvidence));
+}
+
+#[test]
+fn enough_trades_keeps_confidence() {
+    let mut p = parts();
+    p.backtest = Some(Evidence {
+        trades: 30,
+        ..Evidence::neutral_prior()
+    });
+    let r = Recommendation::new(p, 30, 55).unwrap();
+    assert!(!r.low_evidence());
+    assert_eq!(r.confidence(), 80);
+    assert_eq!(r.warnings(), &[] as &[Warning]);
+}
+
+#[test]
+fn low_evidence_below_cap_is_not_raised() {
+    let mut p = parts();
+    p.confidence = 40;
+    assert_eq!(Recommendation::new(p, 30, 55).unwrap().confidence(), 40);
+}
+
+#[test]
+fn each_missing_or_bad_field_is_an_error() {
+    let bad = |f: fn(&mut RecommendationParts)| {
+        let mut p = parts();
+        f(&mut p);
+        Recommendation::new(p, 30, 55).unwrap_err()
+    };
+    assert_eq!(
+        bad(|p| p.entry_zone = (d(103), d(102))),
+        RecError::BadEntryZone
+    );
+    assert_eq!(bad(|p| p.stop_loss = d(100)), RecError::BadStop);
+    assert_eq!(bad(|p| p.targets.clear()), RecError::NoTargets);
+    assert_eq!(bad(|p| p.targets = vec![d(101)]), RecError::BadTarget);
+    assert_eq!(bad(|p| p.risk_rupees = d(0)), RecError::NoRisk);
+    assert_eq!(bad(|p| p.reward_risk = d(0)), RecError::BadRewardRisk);
+    assert_eq!(bad(|p| p.size.qty = 0), RecError::NoQuantity);
+    assert_eq!(
+        bad(|p| p.agreeing_strategies.clear()),
+        RecError::NoStrategies
+    );
+    assert_eq!(bad(|p| p.confidence = 101), RecError::BadConfidence);
+    assert_eq!(bad(|p| p.why.clear()), RecError::NoWhy);
+    assert_eq!(bad(|p| p.data_as_of = t(19)), RecError::DataFromFuture);
+    assert_eq!(bad(|p| p.action = Action::NoTrade), RecError::NoAction);
+}
+
+#[test]
+fn sell_checks_sides_the_other_way() {
+    let mut p = parts();
+    p.action = Action::Sell;
+    assert_eq!(
+        Recommendation::new(p.clone(), 30, 55).unwrap_err(),
+        RecError::BadStop
+    );
+    p.stop_loss = d(106);
+    p.targets = vec![d(90)];
+    assert!(Recommendation::new(p, 30, 55).is_ok());
+}
+
+#[test]
+fn gate_summary_splits_hard_and_overridable() {
+    let s = GateSummary::from_verdict(&verdict(&[RuleId::G02, RuleId::G05]), t(18));
+    assert!(!s.passed);
+    assert_eq!(s.hard_failures, vec![RuleId::G02]);
+    assert_eq!(s.overridable_failures, vec![RuleId::G05]);
+    assert_eq!(s.config_hash, ConfigHash::of_text("cfg").as_str());
+    let ok = GateSummary::from_verdict(&verdict(&[]), t(18));
+    assert!(ok.passed);
+    assert_eq!(ok.hard_failures, Vec::<RuleId>::new());
+}
+
+#[test]
+fn neutral_prior_claims_no_edge() {
+    let n = Evidence::neutral_prior();
+    assert_eq!((n.trades, n.profit_factor, n.avg_r), (0, 1.0, 0.0));
+}

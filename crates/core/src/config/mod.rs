@@ -25,8 +25,8 @@ pub use charges::{
 pub use error::ConfigError;
 pub use files::{
     ComplianceConfig, DataConfig, Event, EventKind, EventsConfig, MAX_EVENTS,
-    MAX_SYMBOLS_PER_WATCHLIST, MAX_TEXT_CHARS, MAX_WATCHLISTS, StrategiesConfig, Watchlist,
-    WatchlistsConfig,
+    MAX_SYMBOLS_PER_WATCHLIST, MAX_TEXT_CHARS, MAX_WATCHLISTS, ScannerConfig, ScannerWeights,
+    StrategiesConfig, Watchlist, WatchlistsConfig,
 };
 pub use risk::{
     Behaviour, CooloffUntil, ExecutionSection, Exposure, HardLimits, Limits, ModeSection,

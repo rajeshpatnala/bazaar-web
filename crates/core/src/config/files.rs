@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 
 use chrono::NaiveDate;
+use rust_decimal::Decimal;
 use serde::Deserialize;
 
 use super::{ConfigError, ConfigFile, impl_header};
@@ -65,12 +66,130 @@ pub struct StrategiesConfig {
     pub regime: Option<toml::Table>,
     #[serde(default)]
     pub strategy: BTreeMap<String, toml::Table>,
+    /// Scanner scoring and filter settings (F11). Typed here: no strategy-world crate owns it.
+    #[serde(default)]
+    pub scanner: Option<ScannerConfig>,
 }
 
 impl ConfigFile for StrategiesConfig {
     const FILE: &'static str = "strategies.toml";
     impl_header!();
     fn validate(&self) -> Result<(), ConfigError> {
+        match &self.scanner {
+            Some(s) => s.validate(Self::FILE),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Score weights of the four additive components. Each is in 0..=1 and they sum to 1.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScannerWeights {
+    pub confluence: f64,
+    pub regime_fit: f64,
+    pub liquidity: f64,
+    pub evidence: f64,
+}
+
+/// `[scanner]` table of `strategies.toml`. Every value is an UNVERIFIED proposal.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScannerConfig {
+    pub weights: ScannerWeights,
+    /// Subtractive event penalty ceiling, in score points (0..=100).
+    pub event_penalty_max_points: f64,
+    /// Median 20-day traded value (rupees) below which a name is dropped. Written as a string.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub min_median_traded_value: Decimal,
+    /// Bars of daily history a name needs to be scanned.
+    pub min_history_bars: u32,
+    /// Fewer backtest trades than this means `low_evidence`.
+    pub min_trades_evidence: u32,
+    /// Pseudo-trades pulling thin evidence toward the strategy-wide stats: `n / (n + k)`.
+    pub shrink_k: u32,
+    /// Confidence ceiling (0..=100) for a `low_evidence` recommendation.
+    pub low_evidence_cap: u8,
+    /// Recommendations returned; blocked ones are listed apart and do not use these slots. 1..=20.
+    pub max_results: u32,
+    /// A ban list older than this (or undated) fails closed.
+    pub max_ban_list_age_hours: u32,
+    /// Liquidity scores 0 at the floor and 1 at this multiple of it, on a log scale (> 1).
+    pub liquidity_full_score_multiple: f64,
+}
+
+impl ScannerConfig {
+    fn validate(&self, file: &'static str) -> Result<(), ConfigError> {
+        let w = &self.weights;
+        let parts = [w.confluence, w.regime_fit, w.liquidity, w.evidence];
+        if parts
+            .iter()
+            .any(|x| !x.is_finite() || !(0.0..=1.0).contains(x))
+        {
+            return Err(ConfigError::invalid(
+                file,
+                "scanner.weights",
+                "each weight must be within 0 and 1",
+            ));
+        }
+        if (parts.iter().sum::<f64>() - 1.0).abs() > 1e-9 {
+            return Err(ConfigError::invalid(
+                file,
+                "scanner.weights",
+                "weights must sum to 1",
+            ));
+        }
+        let p = self.event_penalty_max_points;
+        if !p.is_finite() || !(0.0..=100.0).contains(&p) {
+            return Err(ConfigError::invalid(
+                file,
+                "scanner.event_penalty_max_points",
+                "must be within 0 and 100",
+            ));
+        }
+        if self.min_median_traded_value <= Decimal::ZERO {
+            return Err(ConfigError::invalid(
+                file,
+                "scanner.min_median_traded_value",
+                "must be above 0",
+            ));
+        }
+        if self.low_evidence_cap > 100 {
+            return Err(ConfigError::invalid(
+                file,
+                "scanner.low_evidence_cap",
+                "must be within 0 and 100",
+            ));
+        }
+        if !(1..=20).contains(&self.max_results) {
+            return Err(ConfigError::invalid(
+                file,
+                "scanner.max_results",
+                "must be within 1 and 20",
+            ));
+        }
+        let m = self.liquidity_full_score_multiple;
+        if !m.is_finite() || m <= 1.0 || m > 1000.0 {
+            return Err(ConfigError::invalid(
+                file,
+                "scanner.liquidity_full_score_multiple",
+                "must be above 1 and at most 1000",
+            ));
+        }
+        for (key, v) in [
+            ("min_history_bars", self.min_history_bars),
+            ("min_trades_evidence", self.min_trades_evidence),
+            ("shrink_k", self.shrink_k),
+            ("max_ban_list_age_hours", self.max_ban_list_age_hours),
+        ] {
+            if v == 0 || v > 100_000 {
+                return Err(ConfigError::invalid(
+                    file,
+                    format!("scanner.{key}"),
+                    "must be within 1 and 100000",
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -249,6 +368,43 @@ mod tests {
         assert!(none.regime.is_none() && none.strategy.is_empty());
         let bad = format!("{HEAD}[rates]\nstt = \"1\"\n");
         assert!(parse_str::<StrategiesConfig>(&bad).is_err());
+    }
+
+    const SCANNER: &str = "[scanner]\nevent_penalty_max_points = 15.0\nmin_median_traded_value = \"100000000\"\nmin_history_bars = 250\nmin_trades_evidence = 30\nshrink_k = 30\nlow_evidence_cap = 55\nmax_results = 5\nmax_ban_list_age_hours = 24\nliquidity_full_score_multiple = 10.0\n[scanner.weights]\nconfluence = 0.30\nregime_fit = 0.25\nliquidity = 0.15\nevidence = 0.30\n";
+
+    #[test]
+    fn scanner_table_parses_and_validates() {
+        let c = parse_str::<StrategiesConfig>(&format!("{HEAD}{SCANNER}")).unwrap();
+        let s = c.scanner.unwrap();
+        assert_eq!(s.low_evidence_cap, 55);
+        assert_eq!(s.min_median_traded_value, Decimal::from(100_000_000));
+    }
+
+    #[test]
+    fn scanner_rejects_bad_values() {
+        let bad = |from: &str, to: &str| {
+            parse_str::<StrategiesConfig>(&format!("{HEAD}{}", SCANNER.replace(from, to)))
+        };
+        assert!(
+            bad("confluence = 0.30", "confluence = 0.40").is_err(),
+            "sum 1.1"
+        );
+        assert!(
+            bad("confluence = 0.30", "confluence = 1.30").is_err(),
+            "weight above 1"
+        );
+        assert!(
+            bad("evidence = 0.30", "evidence = -0.05").is_err(),
+            "negative weight"
+        );
+        assert!(bad("= 15.0", "= 150.0").is_err());
+        assert!(bad("\"100000000\"", "\"0\"").is_err());
+        assert!(bad("= 55", "= 101").is_err());
+        assert!(bad("shrink_k = 30", "shrink_k = 0").is_err());
+        assert!(bad("max_results = 5", "max_results = 21").is_err());
+        assert!(bad("max_results = 5", "max_results = 5\nextra = 1").is_err());
+        assert!(bad("= 24", "= 0").is_err());
+        assert!(bad("= 10.0", "= 1.0").is_err());
     }
 
     #[test]
