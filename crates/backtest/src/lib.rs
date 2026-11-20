@@ -14,6 +14,7 @@ pub mod ledger;
 pub mod metrics;
 pub mod provenance;
 pub mod types;
+pub mod walkforward;
 
 pub use config::{BacktestConfig, BacktestConfigError};
 pub use cost::{CostModel, DpLedger};
