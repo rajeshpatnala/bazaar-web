@@ -21,7 +21,14 @@ fn tick() -> Decimal {
 }
 
 fn scaled(bars: &[Candle], num: i64, den: i64, t: Decimal) -> Vec<Candle> {
-    let f = |d: Decimal| (d * Decimal::from(num) / Decimal::from(den) / t).round() * t;
+    // x1/1 is the identity: the baseline is the hand-computed fixture, unrounded.
+    let f = |d: Decimal| {
+        if num == den {
+            d
+        } else {
+            (d * Decimal::from(num) / Decimal::from(den) / t).round() * t
+        }
+    };
     bars.iter()
         .map(|c| {
             let ohlc = [c.open(), c.high(), c.low(), c.close()].map(f);
@@ -42,7 +49,10 @@ fn rules_fire_on_the_same_bar_at_plus_and_minus_20_percent_prices() {
                 let got = on_bar(s.as_mut(), &bars, end, &w);
                 assert_eq!(got.is_some(), end == c.k, "{} x{num}/{den} bar {end}", c.id);
                 if let Some(sig) = got {
-                    for p in [sig.entry_low, sig.entry_high, sig.stop] {
+                    for p in [sig.entry_low, sig.entry_high, sig.stop]
+                        .into_iter()
+                        .chain(sig.targets.iter().copied())
+                    {
                         assert_eq!(p % t, Decimal::ZERO, "{} tick {p}", c.id);
                     }
                     assert!(sig.stop < sig.entry_low, "{} stop below entry", c.id);
