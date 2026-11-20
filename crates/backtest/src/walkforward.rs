@@ -34,6 +34,8 @@ use crate::config::BacktestConfig;
 use crate::cost::CostModel;
 use crate::engine::RunOutput;
 use crate::fill::trade_date;
+use crate::foldvote::{FoldVote, vote};
+use crate::gate_policy::{EventsFor, GateEnv};
 use crate::metrics::{Assessment, Metrics, RunFacts, assess};
 use crate::types::{BacktestError, Trade};
 
@@ -148,6 +150,9 @@ pub struct WalkForwardResult {
     pub pooled: PooledMetrics,
     /// Label and the partial bar (`folds` counts only folds with an OOS run).
     pub assessment: Assessment,
+    /// OOS/IS ratio, profitable-fold vote (skipped folds count as failures) and the
+    /// single-fold check.
+    pub vote: FoldVote,
     /// Declared prior trials plus the distinct sets of this run.
     pub trials: u32,
     /// The distinct parameter sets tried (the closure's candidate index points into this).
@@ -172,6 +177,52 @@ pub(crate) fn measurement_evidence(is: &Metrics) -> EvidenceInputs {
         expectancy_r: is.expectancy_r.map_or(Tri::Unknown, Tri::Known),
         walk_forward_pass: Tri::Known(true),
     }
+}
+
+/// The evidence an IS run is gated with: the G01 leg passes by construction (maximal figures, no
+/// threshold literal here), so IS runs measure the strategy under every OTHER gate rule. It is a
+/// selection-only policy: IS trades are never pooled and never reach a verdict. Never reuse it.
+/// Only G01 reads these four fields (a test runs the real gate on them); if another rule ever reads
+/// the evidence, these sentinels must be revisited.
+fn selection_evidence() -> EvidenceInputs {
+    EvidenceInputs {
+        oos_trades: Tri::Known(u32::MAX),
+        profit_factor: Tri::Known(Decimal::MAX),
+        expectancy_r: Tri::Known(Decimal::MAX),
+        walk_forward_pass: Tri::Known(true),
+    }
+}
+
+/// The gate environment for one window: the intended path for a walk-forward closure to get its
+/// evidence (the 7b runner must use it, so no caller picks a looser policy). IS gets the selection-only evidence (any `evidence` argument is
+/// ignored); OOS must be given the evidence the engine computed from the chosen set's IS window.
+///
+/// # Errors
+/// `Invalid` for an OOS window without evidence.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the slice 7b runner builds its envs here")
+)]
+pub(crate) fn window_env(
+    window: Window,
+    evidence: Option<EvidenceInputs>,
+    sector: String,
+    events: EventsFor<'_>,
+) -> Result<GateEnv<'_>, BacktestError> {
+    let evidence = match (window, evidence) {
+        (Window::InSample, _) => selection_evidence(),
+        (Window::OutOfSample, Some(e)) => e,
+        (Window::OutOfSample, None) => {
+            return Err(BacktestError::Invalid(
+                "OOS window needs gate evidence".into(),
+            ));
+        }
+    };
+    Ok(GateEnv {
+        evidence,
+        sector,
+        events,
+    })
 }
 
 fn first_at_or_after(bars: &[Candle], day: NaiveDate) -> usize {
@@ -326,7 +377,9 @@ pub fn walk_forward(
         costs_approximate: p.cost.costs_approximate(),
         trials_in_run: trials,
     };
+    let fold_vote = vote(cfg, &results)?;
     Ok(WalkForwardResult {
+        vote: fold_vote,
         folds: results,
         oos_trades: pooled,
         assessment: assess(cfg, &all_m, &facts)?,

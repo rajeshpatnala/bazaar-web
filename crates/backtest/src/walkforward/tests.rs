@@ -486,3 +486,47 @@ fn costs_approximate_comes_from_the_cost_model() {
     let approx = walk_forward(&c, &b, &p, &mut run).unwrap();
     assert!(!approx.assessment.meets_pooled_bar);
 }
+
+fn quiet(_: NaiveDate) -> bazaar_risk::rules::inputs::EventFlags {
+    bazaar_risk::rules::inputs::EventFlags {
+        results_window: Tri::Known(false),
+        policy_day: Tri::Known(false),
+        option_on_own_expiry: Tri::Known(false),
+    }
+}
+
+#[test]
+fn window_env_gives_oos_exactly_the_engine_evidence_and_is_the_selection_policy() {
+    let at = Kolkata.with_ymd_and_hms(2024, 1, 2, 15, 30, 0).unwrap();
+    let m = Metrics::from_trades(
+        &[trade(at, "50", "0.5"), trade(at, "-5", "-0.05")],
+        d("1000"),
+        &[],
+    )
+    .unwrap();
+    let ev = measurement_evidence(&m);
+    let oos = window_env(Window::OutOfSample, Some(ev), "IT".into(), &quiet).unwrap();
+    assert_eq!(oos.evidence, ev);
+    // OOS without evidence is refused: no silent permissive default.
+    assert!(matches!(
+        window_env(Window::OutOfSample, None, "IT".into(), &quiet),
+        Err(BacktestError::Invalid(_))
+    ));
+    // IS ignores a passed-in record and always gets the same selection-only one.
+    let a = window_env(Window::InSample, Some(ev), "IT".into(), &quiet).unwrap();
+    let b = window_env(Window::InSample, None, "IT".into(), &quiet).unwrap();
+    assert_eq!(a.evidence, b.evidence);
+    assert_ne!(a.evidence, ev);
+}
+
+#[test]
+fn the_result_vote_counts_skipped_folds_as_failures() {
+    let (b, ch, ps) = (bars("100"), charges(), sets(1));
+    let c = cfg();
+    let mut bad = |_: Window, _: usize, s: &[Candle], _: Option<EvidenceInputs>| {
+        Ok(wl(s, ("-10", "-0.1"), ("5", "0.05")))
+    };
+    let r = walk_forward(&c, &b, &params(&ch, &ps), &mut bad).unwrap();
+    assert_eq!((r.vote.voting_folds, r.vote.skipped_folds), (5, 5));
+    assert!(!r.vote.all_ok());
+}

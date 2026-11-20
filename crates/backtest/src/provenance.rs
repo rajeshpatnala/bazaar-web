@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::Trials;
 use crate::types::{BacktestError, HistoryPolicy, Provenance};
+use crate::walkforward::WalkForwardResult;
 
 /// Lower-case hex SHA-256 of `bytes`.
 #[must_use]
@@ -54,6 +55,26 @@ pub struct ProvenanceInputs<'a> {
     /// parameter run still counts as one trial.
     pub parameter_sets: &'a [(String, String)],
     pub trials: &'a Trials,
+    /// Plain or walk-forward; a walk-forward run cannot be built without its evidence text.
+    pub kind: RunKind<'a>,
+}
+
+/// What kind of run the provenance describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunKind<'a> {
+    /// A single run: no walk-forward evidence.
+    Plain,
+    /// A walk-forward run, carrying the `gate_evidence` text (`walk_forward_pass` was assumed true
+    /// in OOS windows). Build it with [`RunKind::of`] so the text comes from the result.
+    WalkForward(&'a str),
+}
+
+impl<'a> RunKind<'a> {
+    /// The walk-forward kind of `r`, with the text taken from the result itself.
+    #[must_use]
+    pub const fn of(r: &'a WalkForwardResult) -> Self {
+        Self::WalkForward(r.gate_evidence)
+    }
 }
 
 /// Build the provenance. The universe is sorted and de-duplicated, hashes are ordered by file
@@ -68,6 +89,13 @@ pub fn build(i: &ProvenanceInputs<'_>) -> Result<Provenance, BacktestError> {
     }
     let (from, to) = charges_file_verified_range(i.charges)
         .ok_or_else(|| BacktestError::Invalid("charges file has no verified_on date".into()))?;
+    let gate_evidence = match i.kind {
+        RunKind::Plain => None,
+        RunKind::WalkForward(g) => Some(g),
+    };
+    if gate_evidence.is_some_and(|g| g.trim().is_empty()) {
+        return Err(BacktestError::Invalid("gate evidence text is empty".into()));
+    }
     let mut seen = HashSet::new();
     let mut sets: Vec<String> = Vec::new();
     for (strategy, params) in i.parameter_sets {
@@ -97,6 +125,7 @@ pub fn build(i: &ProvenanceInputs<'_>) -> Result<Provenance, BacktestError> {
         parameter_sets: sets,
         trial_penalty_pf: i.trials.profit_factor_penalty(in_run),
         trials: i.trials.total_trials(in_run),
+        gate_evidence: gate_evidence.map(str::to_owned),
     })
 }
 

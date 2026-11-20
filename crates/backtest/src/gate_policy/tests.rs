@@ -277,6 +277,22 @@ fn weak_evidence_fails_the_evidence_bar() {
 }
 
 #[test]
+fn the_selection_only_sentinel_evidence_passes_g01_and_every_other_rule_still_applies() {
+    use crate::walkforward::{Window, window_env};
+    let r = rig(&[FLAT, FLAT, FLAT, FLAT, FLAT, FLAT]);
+    let spec = r.spec();
+    let sel = |events| window_env(Window::InSample, None, "IT".into(), events).unwrap();
+    // The sentinel maxima clear G01 in the real gate: the trade goes through.
+    let (out, p) = go(&r, &spec, &[1], sel(&quiet));
+    assert_eq!((p.approved(), out.trades.len()), (1, 1));
+    assert_eq!(p.rejections(), &[]);
+    // Another rule still bites under the same evidence (G07 on a results day).
+    let (out, p) = go(&r, &spec, &[1], sel(&results_day));
+    assert_eq!(out.trades.len(), 0);
+    assert_eq!(p.rejections()[0].rules, vec![RuleId::G07]);
+}
+
+#[test]
 fn an_event_day_blocks_the_entry() {
     let r = rig(&[FLAT, FLAT, FLAT, FLAT]);
     let spec = r.spec();

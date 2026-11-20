@@ -77,7 +77,42 @@ fn inputs<'a>(
         universe: uni,
         parameter_sets: sets,
         trials: t,
+        kind: RunKind::Plain,
     }
+}
+
+#[test]
+fn walk_forward_gate_evidence_comes_from_the_result_and_blank_text_is_refused() {
+    use crate::cost::CostModel;
+    use crate::walkforward::{ParamSet, WfParams, walk_forward};
+    let charges = charges();
+    let trials = trials();
+    let mut inp = inputs(&[], &charges, &[], &[], &trials);
+    assert_eq!(build(&inp).unwrap().gate_evidence, None);
+    // A real (empty-data) walk-forward result: the kind takes its text, so it cannot be None.
+    let cfg =
+        BacktestConfig::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config")).unwrap();
+    let sets = [ParamSet {
+        id: "s".into(),
+        params: "p".into(),
+    }];
+    let params = WfParams {
+        capital: Decimal::ONE_THOUSAND,
+        sets: &sets,
+        regimes: 1,
+        cost: CostModel::new(
+            &charges,
+            HistoryPolicy::Strict,
+            bazaar_core::config::ChargeExchange::Nse,
+        ),
+    };
+    let res = walk_forward(&cfg, &[], &params, &mut |_, _, _, _| unreachable!()).unwrap();
+    inp.kind = RunKind::of(&res);
+    let prov = build(&inp).unwrap();
+    assert_eq!(prov.gate_evidence.as_deref(), Some(res.gate_evidence));
+    assert_ne!(res.gate_evidence, "");
+    inp.kind = RunKind::WalkForward("  ");
+    assert!(matches!(build(&inp), Err(BacktestError::Invalid(_))));
 }
 
 #[test]
