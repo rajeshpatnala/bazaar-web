@@ -17,6 +17,15 @@
 //!   removes them); gap-ups fill above the zone; open profit is given back before the exit channel
 //!   fires; results-day gaps are blind spots; crowded breakouts reverse in market stress.
 //!
+//! - **Notes:** `reward:risk` is about 2 by construction (the reference target is 2 x risk), so
+//!   `min_rr` can only reject on tick rounding; it is not evidence about the setup. The stop width
+//!   is capped in ATR terms only; its width as a percentage of price (a results-day ATR blow-up) is
+//!   left to the gate and sizing. ATR is Wilder-recursive, so callers (scanner, backtest) must pass
+//!   views of one fixed lookback; a test bounds the difference between 60 and 130 bars. Stops are
+//!   resting orders that can trigger intraday; the backtest must model fills at `min(stop, open)`.
+//!   The why-text is per share; the scanner rebuilds it with whole-trade risk.
+//!   `manage` needs no regime: it checks only the view (adjusted candles) and the tick.
+//!
 //! A signal is not a recommendation and not advice.
 
 use bazaar_core::candle::Candle;
@@ -30,8 +39,8 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 
 use crate::common::{
-    Levels, Reject, RiskBasis, Why, check_rr, entry_guards, entry_zone, finish_levels,
-    floor_to_tick, need, to_decimal, why_text,
+    Levels, Reject, RiskBasis, WHY_TEXT_LABEL, Why, check_rr, entry_guards, entry_zone,
+    finish_levels, floor_to_tick, need, to_decimal, why_text,
 };
 use crate::context::StrategyContext;
 use crate::exit::{ExitAction, ExitError, OpenPosition};
@@ -44,6 +53,9 @@ use crate::strategy::{Strategy, StrategyMeta};
 pub const ID: &str = "donchian_breakout";
 /// Bump when the rules change (provenance).
 const VERSION: u32 = 1;
+/// Session kind for the next-session close: this strategy trades daily-bar NSE cash equity only,
+/// and the instrument master carries no F&O-membership flag to derive it from (spec section 2).
+const SESSION_KIND: InstrumentKind = InstrumentKind::CashNonFno;
 /// Reference target in multiples of risk (spec section 3: `entry_low + 2 x risk`). Shown for
 /// reward:risk only; no order is placed at it, so it is not a tunable threshold.
 const REFERENCE_TARGET_R: Decimal = Decimal::TWO;
@@ -291,12 +303,11 @@ impl DonchianBreakout {
             .checked_mul(to_decimal(p.stop_atr_mult)?)
             .ok_or(Reject::NotFinite)?;
         // Risk from the top of the zone to the stop is exactly the stop distance.
-        let raw_risk = stop_dist;
         let raw_stop = entry_high - stop_dist;
         let raw_target = entry_low
             .checked_add(
                 REFERENCE_TARGET_R
-                    .checked_mul(raw_risk)
+                    .checked_mul(stop_dist)
                     .ok_or(Reject::NotFinite)?,
             )
             .ok_or(Reject::NotFinite)?;
@@ -310,7 +321,7 @@ impl DonchianBreakout {
             },
         )?;
         let reference_rr = check_rr(&lv, p.min_rr)?;
-        let valid_until = ctx.next_session_close(view, InstrumentKind::CashNonFno)?;
+        let valid_until = ctx.next_session_close(view, SESSION_KIND)?;
         let risk = risk_per_share(lv.entry_high, lv.stop);
 
         let exit_rule = format!(
@@ -412,7 +423,12 @@ impl DonchianBreakout {
             ),
             fact("market_regime", market_label, "market trend label"),
             fit_fact,
-            fact("why", why, "plain-English summary"),
+            fact(
+                "target_basis",
+                "entry_low + 2 x risk",
+                "reference only, for reward:risk; no order is placed at it",
+            ),
+            fact(WHY_TEXT_LABEL, why, "plain-English summary"),
         ]
     }
 
@@ -422,7 +438,12 @@ impl DonchianBreakout {
         ctx: &StrategyContext<'_>,
         position: &OpenPosition,
     ) -> Result<ExitAction, Reject> {
-        ctx.check_closed_bar(view)?;
+        // No regime needed to manage an exit; only the view must be usable. Unadjusted candles
+        // could show a split as a crash and fire a false exit.
+        let last = view.last().ok_or(Reject::Indicator("bars"))?;
+        if !view.bars().iter().all(Candle::adjusted) {
+            return Err(Reject::Unadjusted);
+        }
         let p = &self.params;
         if position.bars_held >= p.max_hold_bars {
             return Ok(ExitAction::Exit(format!(
@@ -431,7 +452,6 @@ impl DonchianBreakout {
             )));
         }
         let bars = view.bars();
-        let last = view.last().ok_or(Reject::Indicator("bars"))?;
         let Some(window) = before_last(bars, p.exit_n) else {
             return Ok(ExitAction::Hold);
         };
@@ -475,12 +495,10 @@ impl Strategy for DonchianBreakout {
         ctx: &StrategyContext<'_>,
         position: &OpenPosition,
     ) -> Result<ExitAction, ExitError> {
-        let action = self
-            .decide_exit(view, ctx, position)
-            .unwrap_or_else(|reason| {
-                tracing::debug!(strategy = ID, %reason, "hold");
-                ExitAction::Hold
-            });
+        let action = self.decide_exit(view, ctx, position).map_err(|reason| {
+            tracing::warn!(strategy = ID, %reason, "cannot manage the open position");
+            ExitError::Context(reason.to_string())
+        })?;
         action.check(position)?;
         Ok(action)
     }
@@ -574,7 +592,12 @@ mod tests {
     fn why_text_names_risk_first_regime_and_stop_without_certainty_words() {
         let b = bars_dec(&csv("donchian_entry.csv"), true);
         let s = fire(strat().as_mut(), &world(30), &b, 30).unwrap();
-        let why = &s.facts.iter().find(|f| f.label == "why").unwrap().value;
+        let why = &s
+            .facts
+            .iter()
+            .find(|f| f.label == WHY_TEXT_LABEL)
+            .unwrap()
+            .value;
         assert!(why.starts_with("Risk first: you could lose about Rs 5.25 per share."));
         assert!(why.contains("ABC closed above its 20-day high on 1.5x normal volume."));
         assert!(why.contains("Market today:"));
@@ -590,9 +613,51 @@ mod tests {
             "atr",
             "stock_regime",
             "market_regime",
+            "target_basis",
         ] {
             assert!(s.facts.iter().any(|f| f.label == l), "{l}");
         }
+    }
+
+    #[test]
+    fn risk_is_within_the_atr_stop_width_plus_two_ticks() {
+        // stop_atr_mult 2.5 x ATR(30) = 2.5 x 29/14 = 5.1786; rounding adds at most 2 ticks
+        // (entry zone top up, stop down). Width as a % of price is left to the gate.
+        let b = bars_dec(&csv("donchian_entry.csv"), true);
+        for tick in ["0.05", "0.5"] {
+            let mut w = world(30);
+            w.instrument.tick_size = d(tick);
+            let s = fire(strat().as_mut(), &w, &b, 30).unwrap();
+            let cap = d("5.1786") + d(tick) * Decimal::TWO;
+            assert!(s.risk_per_share <= cap, "{tick}: {}", s.risk_per_share);
+            assert!(s.risk_per_share >= d("5.1785"), "{tick}");
+        }
+    }
+
+    #[test]
+    fn atr_depends_only_weakly_on_the_view_length() {
+        // Callers must pass one fixed lookback; this bounds the damage when they do not.
+        let rows: Vec<Ohlcv> = (0..130_u32)
+            .map(|i| {
+                let w = f64::from(i % 7);
+                Ohlcv {
+                    ts_ms: 0,
+                    o: 100.0 + w,
+                    h: 103.0 + w,
+                    l: 99.0 + w,
+                    c: 101.0 + w,
+                    v: 1000.0,
+                }
+            })
+            .collect();
+        let atr = |r: &[Ohlcv]| {
+            batch(Atr::new(30).unwrap(), r.iter().copied())
+                .pop()
+                .flatten()
+                .unwrap()
+        };
+        let (long, short) = (atr(&rows), atr(&rows[70..]));
+        assert!((long - short).abs() < 0.05, "{long} vs {short}");
     }
 
     #[test]
@@ -703,17 +768,17 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "look-ahead")]
-    fn a_regime_from_after_the_decision_bar_is_an_assertion_failure() {
+    fn a_regime_from_after_the_decision_bar_is_refused_with_the_lookahead_error() {
         let b = bars_dec(&csv("donchian_entry.csv"), true);
         let mut w = world(30);
+        assert!(fire(strat().as_mut(), &w, &b, 30).is_some());
         w.market.as_of = session_time(31);
         let view = DataView::ending_at(&b, 30).unwrap();
-        // The closed-bar guard refuses it; a caller that builds such a context fails its assertion.
-        if let Err(e) = w.ctx().check_closed_bar(&view) {
-            assert!(fire(strat().as_mut(), &w, &b, 30).is_none());
-            panic!("{e}");
-        }
+        assert!(matches!(
+            w.ctx().check_closed_bar(&view),
+            Err(crate::context::ContextError::RegimeFromTheFuture(_))
+        ));
+        assert!(fire(strat().as_mut(), &w, &b, 30).is_none());
     }
 
     fn pos(stop: &str, held: u32) -> OpenPosition {
@@ -754,10 +819,70 @@ mod tests {
         assert_eq!(e, ExitAction::Exit("closed below its 10-day low".into()));
         let t = manage("donchian_trail.csv", 41, &pos("97.80", 60)).unwrap();
         assert!(matches!(t, ExitAction::Exit(r) if r.contains("time stop")));
+        // Short history (bar 5): too few bars for the channel, so Hold, but the time stop
+        // still wins over the short-history path.
         assert_eq!(
             manage("donchian_trail.csv", 5, &pos("97.80", 1)),
             Ok(ExitAction::Hold)
         );
+        let t = manage("donchian_trail.csv", 5, &pos("97.80", 60)).unwrap();
+        assert!(matches!(t, ExitAction::Exit(r) if r.contains("time stop")));
+        assert_eq!(
+            manage("donchian_trail.csv", 5, &pos("97.80", 59)),
+            Ok(ExitAction::Hold)
+        );
+    }
+
+    #[test]
+    fn manage_needs_no_regime_but_surfaces_bad_context_and_unadjusted_bars() {
+        let rows = csv("donchian_trail.csv");
+        let b = bars_dec(&rows, true);
+        let view = DataView::ending_at(&b, 41).unwrap();
+        // A regime dated for another bar does not matter to an exit.
+        let stale = world(30);
+        assert_eq!(
+            strat().manage(&view, &stale.ctx(), &pos("97.80", 11)),
+            Ok(ExitAction::TightenStop(d("102.00")))
+        );
+        // A zero tick is a data fault, not "hold".
+        let mut bad = world(41);
+        bad.instrument.tick_size = Decimal::ZERO;
+        assert!(matches!(
+            strat().manage(&view, &bad.ctx(), &pos("97.80", 11)),
+            Err(ExitError::Context(_))
+        ));
+        // Unadjusted candles could fake a crash: refuse rather than exit.
+        let raw = bars_dec(&csv("donchian_exit.csv"), false);
+        let view = DataView::ending_at(&raw, 41).unwrap();
+        assert!(matches!(
+            strat().manage(&view, &world(41).ctx(), &pos("97.80", 11)),
+            Err(ExitError::Context(_))
+        ));
+    }
+
+    #[test]
+    fn manage_lookahead_and_the_trailed_stop_never_decreases() {
+        let rows = csv("donchian_trail.csv");
+        let b = bars_dec(&rows, true);
+        let run = |bars: &[Candle], k: usize, stop: Decimal| {
+            let p = OpenPosition {
+                stop,
+                ..pos("97.80", 11)
+            };
+            strat().manage(&DataView::ending_at(bars, k).unwrap(), &world(k).ctx(), &p)
+        };
+        let mut stop = d("97.80");
+        for k in 31..b.len() {
+            let full = run(&b, k, stop);
+            for cut in [k + 1, b.len()] {
+                assert_eq!(run(&b[..cut], k, stop), full, "k {k} cut {cut}");
+            }
+            if let Ok(ExitAction::TightenStop(s)) = full {
+                assert!(s > stop, "k {k}");
+                stop = s;
+            }
+        }
+        assert!(stop > d("97.80"));
     }
 
     #[test]

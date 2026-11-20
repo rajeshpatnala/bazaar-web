@@ -49,6 +49,11 @@ pub enum Reject {
     ForbiddenWord(&'static str),
 }
 
+/// Label of the `Signal` fact that carries the why-text. Strategies, the scanner and tests use this
+/// name, never the literal. The scanner rebuilds the text with whole-trade risk
+/// ([`RiskBasis::WholeTrade`], charges buffer included); the strategy's own text is per share.
+pub const WHY_TEXT_LABEL: &str = "why";
+
 /// Whole words a why-text must never carry (we never imply certainty or give a tip).
 const FORBIDDEN_WORDS: [&str; 9] = [
     "sure",
