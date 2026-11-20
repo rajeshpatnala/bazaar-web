@@ -236,6 +236,7 @@ dependencies = [
  "bazaar-core",
  "chrono",
  "chrono-tz",
+ "proptest",
  "rust_decimal",
  "serde",
  "serde_json",

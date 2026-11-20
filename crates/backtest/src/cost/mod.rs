@@ -35,6 +35,11 @@ impl DpLedger {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Undo a DP slot booked by `charges_with_dp` when the caller's later step failed.
+    pub(crate) fn release(&mut self, token: u32, date: NaiveDate) {
+        self.paid.remove(&(token, date));
+    }
 }
 
 /// Computes per-leg charges from a borrowed `ChargesConfig`.
