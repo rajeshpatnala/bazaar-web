@@ -29,10 +29,11 @@ pub struct StressedRun {
 }
 
 impl StressedRun {
-    /// Net P&L of the stress run minus the base run (not above zero: stress only costs more).
+    /// Net P&L of the stress run minus the base run (not above zero: stress only costs more, because config validation requires
+    /// `fills.stress_slippage_multiplier` above 1).
     ///
     /// # Errors
-    /// `Overflow` on the sum.
+    /// `Overflow` on the sums or the difference.
     pub fn stress_pnl_change(&self) -> Result<Decimal, BacktestError> {
         let sum = |o: &RunOutput| {
             o.trades.iter().try_fold(Decimal::ZERO, |a, t| {
@@ -46,15 +47,21 @@ impl StressedRun {
     }
 }
 
-/// Run `make()`'s parts at multiplier 1, then again at the stress multiplier. The spec's own
-/// `slippage_multiplier` is ignored: this runner owns both.
+/// Run `make()`'s parts at multiplier 1, then again at the stress multiplier. This runner owns
+/// both multipliers, so the spec's own `slippage_multiplier` must be 1 (anything else is refused,
+/// never silently discarded).
 ///
 /// # Errors
-/// As [`run`].
+/// `Invalid` if `spec.slippage_multiplier` is not 1; otherwise as [`run`].
 pub fn run_with_stress<'a>(
     spec: &RunSpec<'a>,
     make: &mut dyn FnMut() -> RunParts<'a>,
 ) -> Result<StressedRun, BacktestError> {
+    if spec.slippage_multiplier != Decimal::ONE {
+        return Err(super::invalid(
+            "run_with_stress owns the slippage multipliers: pass 1",
+        ));
+    }
     let at = |m: Decimal| RunSpec {
         slippage_multiplier: m,
         ..*spec
