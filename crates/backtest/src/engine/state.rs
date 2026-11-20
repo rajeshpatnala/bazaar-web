@@ -33,10 +33,18 @@ pub(super) struct Open {
     opened_at: chrono::DateTime<chrono_tz::Tz>,
 }
 
+/// The stored tags of a settled market trend (explicit, so renaming a `Trend` variant cannot
+/// change them; a test pins the strings).
+pub(crate) const TAG_UP: &str = "up";
+pub(crate) const TAG_DOWN: &str = "down";
+pub(crate) const TAG_RANGE: &str = "range";
+
 /// The tag of a settled market trend; `Mixed` and `Unknown` are no regime.
 fn regime_tag(c: &StrategyContext<'_>) -> Option<String> {
     match c.market_regime.trend {
-        t @ (Trend::Up | Trend::Down | Trend::Range) => Some(format!("{t:?}")),
+        Trend::Up => Some(TAG_UP.to_owned()),
+        Trend::Down => Some(TAG_DOWN.to_owned()),
+        Trend::Range => Some(TAG_RANGE.to_owned()),
         Trend::Mixed | Trend::Unknown => None,
     }
 }
@@ -132,7 +140,7 @@ impl Engine<'_, '_> {
         );
         let stop = snap(self.tick(), p.signal.stop)?;
         book(&mut self.ledger, self.sid, sim, &leg, bar, Some(stop))?;
-        self.ledger.tag_open(self.token, p.regime);
+        self.ledger.tag_open(self.token, p.regime)?;
         self.open = Some(Open {
             entry: sim.price,
             stop: p.signal.stop,

@@ -542,13 +542,17 @@ fn the_gated_runner_gives_in_sample_runs_selection_only_evidence() {
     // 2024 bars predate the shipped rate sets, so the cost model uses latest-for-all.
     let mut params = params(&ch, &ps);
     params.cost = CostModel::new(&ch, HistoryPolicy::LatestForAll, ChargeExchange::Nse);
+    let cost = params.cost;
     let mut seen = Vec::new();
     let mut run = |win: Window, _: usize, slice: &WindowBars<'_>, env: GateEnv<'_>| {
         seen.push((win, env.evidence.oos_trades));
-        Ok(match win {
-            Window::InSample => wl(slice, ("10", "0.1"), ("-5", "-0.05")),
-            Window::OutOfSample => out(vec![]),
-        })
+        Ok(costed(
+            &cost,
+            match win {
+                Window::InSample => wl(slice, ("10", "0.1"), ("-5", "-0.05")),
+                Window::OutOfSample => out(vec![]),
+            },
+        ))
     };
     let (res, _) = walk_forward_gated(&cfg(), &bs, &params, "IT", &quiet, &mut run).unwrap();
     assert_eq!(res.folds.len(), 5);
@@ -655,10 +659,20 @@ fn regimes_covered_counts_distinct_settled_tags_only() {
         let base = trade(at, "10", "0.1");
         tag.map_or(base.clone(), |g| tagged(base, g))
     };
-    assert_eq!(regimes_covered(&[]), 0);
-    assert_eq!(regimes_covered(&[t(None), t(None)]), 0);
-    assert_eq!(regimes_covered(&[t(Some("Up")), t(Some("Up")), t(None)]), 1);
-    assert_eq!(regimes_covered(&[t(Some("Up")), t(Some("Down"))]), 2);
+    let many = |tag: &str, n: usize| vec![tagged(trade(at, "10", "0.1"), tag); n];
+    assert_eq!(regimes_covered(&[], 10), 0);
+    assert_eq!(regimes_covered(&[t(None), t(None)], 1), 0);
+    assert_eq!(
+        regimes_covered(&[t(Some("up")), t(Some("up")), t(None)], 1),
+        1
+    );
+    assert_eq!(regimes_covered(&[t(Some("up")), t(Some("down"))], 1), 2);
+    // QUAN-99-2: one trade does not make a regime.
+    let mut skewed = many("up", 99);
+    skewed.extend(many("down", 1));
+    assert_eq!(regimes_covered(&skewed, 10), 1);
+    skewed.extend(many("down", 9));
+    assert_eq!(regimes_covered(&skewed, 10), 2);
 }
 
 /// 5 folds x 20 OOS trades (18 winners, 2 losers): 100 R trades, tagged by the closure.
@@ -688,8 +702,8 @@ fn label_with_tags(tags: [&str; 2]) -> EvidenceLabel {
 #[test]
 fn the_label_uses_regimes_from_trade_tags_not_caller_input() {
     // Two tags across the OOS trades reach Trusted; one tag cannot, whatever the caller thinks.
-    assert_eq!(label_with_tags(["Up", "Down"]), EvidenceLabel::Trusted);
-    assert_eq!(label_with_tags(["Up", "Up"]), EvidenceLabel::Provisional);
+    assert_eq!(label_with_tags(["up", "down"]), EvidenceLabel::Trusted);
+    assert_eq!(label_with_tags(["up", "up"]), EvidenceLabel::Provisional);
 }
 
 #[test]
@@ -726,10 +740,11 @@ fn the_oos_gate_env_evidence_is_the_evidence_given_to_the_closure() {
     let (bs, ch, ps) = (bars("100"), charges(), sets(1));
     let mut params = params(&ch, &ps);
     params.cost = CostModel::new(&ch, HistoryPolicy::LatestForAll, ChargeExchange::Nse);
+    let cost = params.cost;
     let seen: RefCell<Vec<(Window, EvidenceInputs)>> = RefCell::new(Vec::new());
     let mut run = |win: Window, _: usize, s: &WindowBars<'_>, env: GateEnv<'_>| {
         seen.borrow_mut().push((win, env.evidence));
-        Ok(winner_loser(s, "50"))
+        Ok(costed(&cost, winner_loser(s, "50")))
     };
     let (res, _) = walk_forward_gated(&cfg(), &bs, &params, "IT", &quiet, &mut run).unwrap();
     let seen = seen.into_inner();
@@ -742,4 +757,34 @@ fn the_oos_gate_env_evidence_is_the_evidence_given_to_the_closure() {
     for (ev, fold) in oos.iter().zip(&res.folds) {
         assert_eq!(**ev, measurement_evidence(&fold.is));
     }
+}
+
+/// The run's trades with the charges the cost model gives each leg (as a real engine records).
+fn costed(cost: &CostModel<'_>, mut o: RunOutput) -> RunOutput {
+    for t in &mut o.trades {
+        for f in [&mut t.entry, &mut t.exit] {
+            f.charges = cost.charges_excl_dp(&f.leg).unwrap();
+        }
+    }
+    o
+}
+
+#[test]
+fn the_gated_runner_refuses_charges_from_another_cost_model() {
+    let (bs, ch, ps) = (bars("100"), charges(), sets(1));
+    let mut params = params(&ch, &ps);
+    params.cost = CostModel::new(&ch, HistoryPolicy::LatestForAll, ChargeExchange::Nse);
+    let cost = params.cost;
+    // Correct charges pass; a tampered component, or a zero (never costed) run, is refused.
+    let mut ok = |_: Window, _: usize, s: &WindowBars<'_>, _: GateEnv<'_>| {
+        Ok(costed(&cost, winner_loser(s, "50")))
+    };
+    assert!(walk_forward_gated(&cfg(), &bs, &params, "IT", &quiet, &mut ok).is_ok());
+    let mut tampered = |_: Window, _: usize, s: &WindowBars<'_>, _: GateEnv<'_>| {
+        let mut o = costed(&cost, winner_loser(s, "50"));
+        o.trades[0].exit.charges.stt += d("1");
+        Ok(o)
+    };
+    let r = walk_forward_gated(&cfg(), &bs, &params, "IT", &quiet, &mut tampered);
+    assert!(matches!(r, Err(BacktestError::Invalid(_))));
 }

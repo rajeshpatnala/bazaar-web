@@ -112,12 +112,17 @@ impl<'a> Ledger<'a> {
         self.realised
     }
 
-    /// Tag the open position of `token` with the regime of its entry decision. No-op when none
-    /// is open.
-    pub fn tag_open(&mut self, token: u32, regime: Option<String>) {
-        if let Some(p) = self.positions.get_mut(&token) {
-            p.regime = regime;
-        }
+    /// Tag the open position of `token` with the regime of its entry decision.
+    ///
+    /// # Errors
+    /// `Invalid` when no position is open for `token` (the caller has just opened it).
+    pub fn tag_open(&mut self, token: u32, regime: Option<String>) -> Result<(), BacktestError> {
+        let p = self
+            .positions
+            .get_mut(&token)
+            .ok_or_else(|| invalid(&token.to_string(), "tagging a position that is not open"))?;
+        p.regime = regime;
+        Ok(())
     }
 
     /// Book a fill. Prices its charges via `charges_with_dp`, then opens a position (no position

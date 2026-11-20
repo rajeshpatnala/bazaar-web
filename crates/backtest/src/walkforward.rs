@@ -38,7 +38,7 @@ use crate::foldvote::{FoldVote, vote};
 use crate::gate_policy::{EventsFor, GateEnv};
 use crate::metrics::{Assessment, Metrics, RunFacts, assess};
 use crate::provenance::ChargesEvidence;
-use crate::types::{BacktestError, Trade};
+use crate::types::{BacktestError, ChargeBreakdown, Trade};
 
 /// What the provenance records about the gate's evidence in a walk-forward run.
 pub const GATE_EVIDENCE: &str = "chosen-candidate IS window; walk_forward_pass assumed true \
@@ -340,14 +340,19 @@ fn window<'a>(
     Ok(WindowBars::new(all, hist))
 }
 
-/// Distinct market-trend tags over the trades. Derived from the engine's per-trade tags (the
-/// trend on the entry decision's bar), so the caller cannot raise the label by input; trades
-/// without a settled trend add nothing.
+/// Distinct market-trend tags with at least `min_per_regime` trades each (config
+/// `evidence.min_trades_per_regime`: one trade does not make a regime). Derived from the
+/// engine's per-trade tags (the trend on the entry decision's bar), so the caller cannot raise
+/// the label by input; trades without a settled trend add nothing.
 #[must_use]
-pub fn regimes_covered(trades: &[Trade]) -> u32 {
-    let tags: std::collections::BTreeSet<&str> =
-        trades.iter().filter_map(|t| t.regime.as_deref()).collect();
-    u32::try_from(tags.len()).unwrap_or(u32::MAX)
+pub fn regimes_covered(trades: &[Trade], min_per_regime: u32) -> u32 {
+    let mut counts: std::collections::BTreeMap<&str, u32> = std::collections::BTreeMap::new();
+    for tag in trades.iter().filter_map(|t| t.regime.as_deref()) {
+        let n = counts.entry(tag).or_insert(0);
+        *n = n.saturating_add(1);
+    }
+    let n = counts.values().filter(|&&c| c >= min_per_regime).count();
+    u32::try_from(n).unwrap_or(u32::MAX)
 }
 
 fn bar_met(cfg: &BacktestConfig, m: &Metrics, required_pf: Decimal) -> bool {
@@ -430,7 +435,7 @@ pub fn walk_forward(
     let ran = results.iter().filter(|f| f.oos.is_some()).count();
     let facts = RunFacts {
         folds: u32::try_from(ran).map_err(|_| BacktestError::Overflow("fold count"))?,
-        regimes: regimes_covered(&pooled),
+        regimes: regimes_covered(&pooled, cfg.evidence.min_trades_per_regime),
         costs_approximate: p.cost.costs_approximate(),
         trials_in_run: trials,
     };
@@ -454,8 +459,7 @@ pub fn walk_forward(
 }
 
 /// Builds and runs one window with the gate environment the runner made for it: `(window, index
-/// into the distinct sets, that window's bars only, gate env)`. The env is `window_env`'s, so no
-/// caller picks its own evidence.
+/// into the distinct sets, that window's bars preceded by its history-only warm-up, gate env)`. The env is `window_env`'s, so no caller picks its own evidence.
 pub type GatedRun<'a> =
     dyn FnMut(Window, usize, &WindowBars<'_>, GateEnv<'_>) -> Result<RunOutput, BacktestError> + 'a;
 
@@ -465,7 +469,10 @@ pub type GatedRun<'a> =
 /// counts (QUAN-93-3). A run with no legs says no charges were levied.
 ///
 /// # Errors
-/// As [`walk_forward`], plus a missing rate, GST or DP table for any leg.
+/// As [`walk_forward`], plus a missing rate, GST or DP table for any leg, and `Invalid` when a
+/// trade's recorded charges differ from what `p.cost` charges that leg (the closure's engine was
+/// built from another cost model: QUAN-99-3). The depository charge is stateful per run, so the
+/// check compares every other component.
 pub fn walk_forward_gated(
     cfg: &BacktestConfig,
     bars: &[Candle],
@@ -479,6 +486,20 @@ pub fn walk_forward_gated(
     let result = walk_forward(cfg, bars, p, &mut |w, c, b, ev| {
         let env = window_env(w, ev, sector.to_owned(), events)?;
         let out = run(w, c, b, env)?;
+        for fill in out.trades.iter().flat_map(|t| [&t.entry, &t.exit]) {
+            let want = p.cost.charges_excl_dp(&fill.leg)?;
+            let got = ChargeBreakdown {
+                dp: Decimal::ZERO,
+                ..fill.charges
+            };
+            if got != want {
+                return Err(BacktestError::Invalid(format!(
+                    "{}: recorded charges differ from the runner's cost model (the run's engine \
+                     must be built from the same CostModel)",
+                    fill.leg.symbol
+                )));
+            }
+        }
         let legs = out.trades.iter().flat_map(|t| [&t.entry.leg, &t.exit.leg]);
         if let Some((lo, hi)) = p.cost.used_verified_range(legs)? {
             range = Some(range.map_or((lo, hi), |(l, h)| (l.min(lo), h.max(hi))));
