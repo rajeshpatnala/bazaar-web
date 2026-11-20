@@ -527,13 +527,16 @@ fn approve(e: &Env, rows: &[[&str; 4]], s: &mut Fake) -> Result<RunOutput, Backt
 }
 
 /// Records how many closed trades the engine showed it at each decision bar.
-struct Recorder(Vec<usize>);
+struct Recorder(Vec<usize>, Option<chrono::DateTime<chrono_tz::Tz>>);
 
 impl EntryPolicy for Recorder {
     fn observe(&mut self, closed: &[Trade]) {
         self.0.push(closed.len());
+        self.1 = closed.iter().map(|t| t.exit.bar_time).max();
     }
-    fn decide(&mut self, _: &Signal, _: &Sized, _: Decimal) -> EntryVerdict {
+    fn decide(&mut self, s: &Signal, _: &Sized, _: Decimal) -> EntryVerdict {
+        // No look-ahead: every trade shown at this decision closed at or before its bar close.
+        assert!(self.1.is_none_or(|t| t <= s.signal_bar_time));
         EntryVerdict::Approve
     }
 }
@@ -555,7 +558,7 @@ fn the_policy_observes_closed_trades_at_every_decision_bar() {
         slippage_multiplier: d("1"),
     };
     let reg = regimes(&bars);
-    let mut rec = Recorder(Vec::new());
+    let mut rec = Recorder(Vec::new(), None);
     let out = run(&spec, &mut fake(1, None), &reg, &mut rec).unwrap();
     assert_ne!(rec.0.len(), 0);
     assert!(rec.0.windows(2).all(|w| w[0] <= w[1]));

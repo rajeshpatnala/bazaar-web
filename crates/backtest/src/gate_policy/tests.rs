@@ -427,6 +427,7 @@ fn the_gate_cost_is_the_engines_round_trip_estimate_for_buys_only() {
     let stop = snap(d("0.05"), d("96")).unwrap();
     let cost = GateCost {
         spec: &spec,
+        fp: fill_params(&spec),
         stop,
         token: 7,
         date: at("2026-11-24"),
@@ -440,9 +441,73 @@ fn the_gate_cost_is_the_engines_round_trip_estimate_for_buys_only() {
 }
 
 #[test]
-fn the_policy_source_has_no_approve_all() {
-    let src = include_str!("../gate_policy.rs");
-    let production = src.split("#[cfg(test)]").next().unwrap();
-    assert_eq!(production.matches("EntryVerdict::Approve").count(), 1);
-    assert!(production.contains("None,\n            &NoOverrideSink"));
+fn every_refusal_path_rejects_and_is_recorded() {
+    let r = rig(&[FLAT, FLAT]);
+    let spec = r.spec();
+    let now = r.bars[0].close_time();
+    let weak: [fn(&mut EvidenceInputs); 4] = [
+        |e| e.oos_trades = Tri::Known(5),
+        |e| e.profit_factor = Tri::Known(d("0.5")),
+        |e| e.expectancy_r = Tri::Known(d("-1")),
+        |e| e.walk_forward_pass = Tri::Known(false),
+    ];
+    for tweak in weak {
+        let mut ev = good_evidence();
+        tweak(&mut ev);
+        let mut p = GatePolicy::new(&spec, &r.gate, env(ev, &quiet)).unwrap();
+        let v = p.decide(&signal_at(now), &sized(), d("100000"));
+        assert!(matches!(v, EntryVerdict::Reject(_)));
+        assert_eq!(p.approved(), 0);
+        assert_eq!(p.rejections()[0].rules, vec![RuleId::G01]);
+    }
+}
+
+#[test]
+fn a_margin_shortfall_is_refused() {
+    // Notional 10100 against equity 5000: the order cannot be funded.
+    let r = rig(&[FLAT, FLAT]);
+    let spec = r.spec();
+    let mut p = GatePolicy::new(&spec, &r.gate, env(good_evidence(), &quiet)).unwrap();
+    let v = p.decide(&signal_at(r.bars[0].close_time()), &sized(), d("5000"));
+    assert!(matches!(v, EntryVerdict::Reject(_)));
+    assert_ne!(p.rejections()[0].rules.len(), 0);
+}
+
+#[test]
+fn the_loss_streak_counts_only_the_session_day_g08() {
+    // Two losses yesterday and one today: the streak resets at the session end, so it is 1.
+    let r = rig(&[FLAT, FLAT]);
+    let spec = r.spec();
+    let mut p = GatePolicy::new(&spec, &r.gate, env(good_evidence(), &quiet)).unwrap();
+    p.closed = vec![
+        closed("ABC", "2026-11-24", "2026-11-24", "-10"),
+        closed("ABC", "2026-11-24", "2026-11-24", "-10"),
+        closed("ABC", "2026-11-25", "2026-11-25", "-10"),
+    ];
+    let now = chrono_tz::Asia::Kolkata
+        .with_ymd_and_hms(2026, 11, 25, 15, 30, 0)
+        .unwrap();
+    assert_eq!(p.snapshot(now, d("1")).consecutive_losses, Tri::Known(1));
+}
+
+#[test]
+fn a_non_cash_equity_instrument_is_refused() {
+    let mut r = rig(&[FLAT, FLAT]);
+    r.inst.instrument_type = InstrumentType::parse("FUT");
+    let spec = r.spec();
+    let err = GatePolicy::new(&spec, &r.gate, env(good_evidence(), &quiet)).unwrap_err();
+    assert!(matches!(err, BacktestError::Invalid(_)));
+}
+
+#[test]
+fn a_reused_policy_starts_over_when_the_ledger_is_shorter() {
+    let r = rig(&[FLAT, FLAT, FLAT, DIP, FLAT, FLAT]);
+    let spec = r.spec();
+    let (out, mut p) = go(&r, &spec, &[1], env(good_evidence(), &quiet));
+    p.observe(&out.trades);
+    assert_eq!(p.closed.len(), 1);
+    p.observe(&[]);
+    assert_eq!(p.closed.len(), 0);
+    assert_eq!(p.approved(), 0);
+    assert_eq!(p.rejections(), &[]);
 }

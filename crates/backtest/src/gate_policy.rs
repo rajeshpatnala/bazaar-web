@@ -12,12 +12,16 @@
 //! evidence record, the symbol's sector and the event calendar. Unknown means reject (fail closed).
 //! Modelled as: session open (the order is staged for the next session), no kill switch, paper
 //! mode evidence, margin need = notional against equity (no intraday leverage). Not modelled: held
-//! positions in other symbols (single-instrument runs), so the G05 correlation window is empty.
+//! positions in other symbols (single-instrument runs), so the G05 correlation window is empty;
+//! the ban list (cash equity only: `new` refuses any other instrument) and the slippage class
+//! (always equity). On daily bars the session-day guards are approximations: G08 and G18 cover at
+//! most one trade a day, G16 counts entry and exit only, and G17 minutes run from the 15:30 close.
 
 use std::collections::BTreeMap;
 
 use bazaar_core::candle::Candle;
 use bazaar_core::clock::Clock;
+use bazaar_core::instrument::{Exchange, InstrumentType};
 use bazaar_core::money::{Price, Qty};
 use bazaar_risk::audit::{AuditError, AuditRecord, AuditSink};
 use bazaar_risk::baseline::MemoryBaseline;
@@ -38,7 +42,7 @@ use chrono_tz::Tz;
 use rust_decimal::Decimal;
 
 use crate::engine::{EntryPolicy, EntryVerdict, RunSpec, fill_params, round_trip_cost, snap};
-use crate::fill::trade_date;
+use crate::fill::{FillParams, trade_date};
 use crate::types::{BacktestError, Trade};
 
 /// Date-dependent event answers for the symbol (results window, policy day, own-expiry option).
@@ -47,6 +51,12 @@ pub type EventsFor<'a> = &'a dyn Fn(NaiveDate) -> EventFlags;
 /// Inputs a backtest cannot derive from bars. No `Default`: every field is a decision.
 pub struct GateEnv<'a> {
     /// Cost-adjusted out-of-sample evidence (G01). `Unknown` fields reject every entry.
+    ///
+    /// One static record for the whole run, so it must come from a window strictly before the
+    /// first decision bar, or from a prior walk-forward fold (slice 6 supplies it), never from
+    /// this run's own output: gating bar-i entries on statistics that include later trades is
+    /// look-ahead. The adapter cannot check this; the caller owns it, so approvals are only as
+    /// honest as the evidence passed in.
     pub evidence: EvidenceInputs,
     /// Sector of the run's symbol (G05).
     pub sector: String,
@@ -133,6 +143,7 @@ impl AuditSink for NoOverrideSink {
 #[derive(Debug)]
 struct GateCost<'a, 'b> {
     spec: &'b RunSpec<'a>,
+    fp: FillParams<'b>,
     stop: Price,
     token: u32,
     date: NaiveDate,
@@ -146,10 +157,9 @@ impl GateCostModel for GateCost<'_, '_> {
         let Ok(entry) = snap(self.spec.instrument.tick_size, price) else {
             return Tri::Unknown;
         };
-        let fp = fill_params(self.spec);
         round_trip_cost(
             self.spec,
-            &fp,
+            &self.fp,
             (entry, self.stop),
             qty,
             (self.token, self.date),
@@ -186,6 +196,15 @@ impl<'a> GatePolicy<'a> {
         cfg: &'a GateConfig,
         env: GateEnv<'a>,
     ) -> Result<Self, BacktestError> {
+        let inst = spec.instrument;
+        if inst.instrument_type != InstrumentType::Equity
+            || !matches!(inst.exchange, Exchange::Nse | Exchange::Bse)
+        {
+            return Err(BacktestError::Invalid(
+                "the gate adapter models NSE/BSE cash equity only (no ban list, equity slippage)"
+                    .into(),
+            ));
+        }
         if cfg.effective(&Baseline::none()) != *spec.limits {
             return Err(BacktestError::Invalid(
                 "run limits differ from the gate config".into(),
@@ -228,6 +247,8 @@ impl<'a> GatePolicy<'a> {
         let count = |n: usize| u32::try_from(n).map_or(Tri::Unknown, Tri::Known);
         let entries = self.closed.iter().filter(|c| c.entry_day == today).count();
         let exits = self.closed.iter().filter(|c| c.exit_day == today).count();
+        // G08 is "consecutive losses in the session day" (risk rules/behaviour.rs): the streak
+        // counts only today's exits and resets at the session end.
         let streak = self
             .closed
             .iter()
@@ -287,6 +308,7 @@ impl<'a> GatePolicy<'a> {
         let stop = snap(tick, signal.stop).map_err(|e| fail(e.to_string()))?;
         let cost = GateCost {
             spec,
+            fp: fill_params(spec),
             stop,
             token,
             date: fill_day,
@@ -295,6 +317,9 @@ impl<'a> GatePolicy<'a> {
         let data = DataInputs {
             inputs_as_of: Tri::Known(now),
             evidence: self.env.evidence,
+            // Unknown is fine only because the instrument is cash equity (checked in `new`), where
+            // the gate does not need the ban list; if the gate ever fails closed on it, every
+            // entry is rejected and recorded, never silently passed.
             ban_list: Tri::Unknown,
             stock_fno_underlying: Tri::Known(None),
             events,
@@ -361,6 +386,13 @@ impl<'a> GatePolicy<'a> {
 
 impl EntryPolicy for GatePolicy<'_> {
     fn observe(&mut self, closed: &[Trade]) {
+        // A shorter ledger than we hold means the policy is being reused for a new run: start over
+        // rather than keep stale trades in the day/week sums.
+        if closed.len() < self.closed.len() {
+            self.closed.clear();
+            self.approved = 0;
+            self.rejections.clear();
+        }
         let seen = self.closed.len();
         for t in closed.iter().skip(seen) {
             self.closed.push(Closed {
