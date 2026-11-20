@@ -24,8 +24,8 @@ fn charges() -> ChargesConfig {
         "schema_version = 1\nverified_on = \"2026-06-01\"\nsource = \"test\"\n\n\
          [meta]\nbroker = \"t\"\ncurrency = \"INR\"\nmax_age_days = 90\n\
          history_policy = \"effective_dated\"\n\n\
-         [gst]\nrate_pct = \"18\"\nverified_on = \"2026-06-01\"\nsource = \"test\"\n\n\
-         [dp]\nper_scrip_total = \"15.34\"\nincludes_gst = true\nverified_on = \"2026-06-01\"\n\
+         [gst]\nrate_pct = \"18\"\nverified_on = \"2026-01-05\"\nsource = \"test\"\n\n\
+         [dp]\nper_scrip_total = \"15.34\"\nincludes_gst = true\nverified_on = \"2026-07-01\"\n\
          source = \"test\"\n\n",
     );
     t += &row("buy", "2026-01-15");
@@ -50,22 +50,22 @@ fn sha256_of_abc_matches_the_reference() {
 #[test]
 fn verified_range_spans_file_gst_and_rate_sets() {
     assert_eq!(
-        charges_verified_range(&charges()),
-        Some((day(1, 15), day(6, 1)))
+        charges_file_verified_range(&charges()),
+        Some((day(1, 5), day(7, 1)))
     );
 }
 
 #[test]
 fn undated_charges_have_no_range() {
     let c = parse_str("schema_version = 1\nplaceholder = true\nsource = \"none\"\n").unwrap();
-    assert_eq!(charges_verified_range(&c), None);
+    assert_eq!(charges_file_verified_range(&c), None);
 }
 
 fn inputs<'a>(
     files: &'a [(&'a str, &'a [u8])],
     c: &'a ChargesConfig,
     uni: &'a [String],
-    sets: &'a [String],
+    sets: &'a [(String, String)],
     t: &'a Trials,
 ) -> ProvenanceInputs<'a> {
     ProvenanceInputs {
@@ -86,19 +86,26 @@ fn build_fills_every_field_deterministically() {
     let t = trials();
     let files: [(&str, &[u8]); 2] = [("risk.toml", b"b"), ("backtest.toml", b"abc")];
     let uni = ["TCS".to_owned(), "INFY".to_owned(), "TCS".to_owned()];
-    let sets = ["p=1".to_owned(), "p=2".to_owned(), "p=1".to_owned()];
+    let ps = |s: &str, p: &str| (s.to_owned(), p.to_owned());
+    // Same params under two strategies are two trials; an exact repeat counts once.
+    let sets = [
+        ps("a", "p=1"),
+        ps("a", "p=2"),
+        ps("a", "p=1"),
+        ps("b", "p=1"),
+    ];
     let p = build(&inputs(&files, &c, &uni, &sets, &t)).unwrap();
     assert_eq!(p.universe, ["INFY", "TCS"]);
-    assert_eq!(p.parameter_sets, ["p=1", "p=2"]);
-    // Two distinct trials: tier 1 penalty (+0.1 profit factor), prior_trials 0.
-    assert_eq!(p.trials, 2);
-    assert_eq!(p.trial_penalty_pf, t.profit_factor_penalty(2));
+    assert_eq!(p.parameter_sets, ["a: p=1", "a: p=2", "b: p=1"]);
+    // Three distinct trials: tier 1 penalty (+0.1 profit factor), prior_trials 0.
+    assert_eq!(p.trials, 3);
+    assert_eq!(p.trial_penalty_pf, t.profit_factor_penalty(3));
     assert!(p.trial_penalty_pf > Decimal::ZERO);
     let keys: Vec<&String> = p.config_hashes.keys().collect();
     assert_eq!(keys, ["backtest.toml", "risk.toml"]);
     assert_eq!(p.config_hashes["backtest.toml"], hash_hex(b"abc"));
-    assert_eq!(p.charges_verified_from, Some(day(1, 15)));
-    assert_eq!(p.charges_verified_to, Some(day(6, 1)));
+    assert_eq!(p.charges_verified_from, Some(day(1, 5)));
+    assert_eq!(p.charges_verified_to, Some(day(7, 1)));
     assert_eq!((p.data_from, p.data_to), (Some(day(1, 1)), Some(day(5, 1))));
     assert!(!p.costs_approximate);
     assert_eq!(p, build(&inputs(&files, &c, &uni, &sets, &t)).unwrap());
@@ -112,7 +119,9 @@ fn latest_for_all_marks_costs_approximate() {
     i.history_policy = HistoryPolicy::LatestForAll;
     let p = build(&i).unwrap();
     assert!(p.costs_approximate);
-    assert_eq!(p.trials, 0);
+    // A run with no grid is one trial (policy section 4).
+    assert_eq!(p.trials, 1);
+    assert_eq!(p.trial_penalty_pf, Decimal::ZERO);
 }
 
 #[test]

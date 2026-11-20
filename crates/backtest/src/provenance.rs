@@ -1,7 +1,7 @@
 //! Provenance of a result: config hashes, the charges `verified_on` range, data range, universe
 //! and the trial count with its penalty (F9 acceptance 6; policy section 4).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use bazaar_core::config::ChargesConfig;
 use chrono::NaiveDate;
@@ -13,6 +13,7 @@ use crate::types::{BacktestError, HistoryPolicy, Provenance};
 /// Lower-case hex SHA-256 of `bytes`.
 #[must_use]
 pub fn hash_hex(bytes: &[u8]) -> String {
+    // sha2 0.11 digests do not implement `LowerHex`, so encode by nibble.
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(64);
     for b in Sha256::digest(bytes) {
@@ -22,10 +23,12 @@ pub fn hash_hex(bytes: &[u8]) -> String {
     out
 }
 
-/// Earliest and latest `verified_on` over the whole charges file (file, GST, DP, option exercise
-/// and every rate set). `None` when the file carries no date at all.
+/// Earliest and latest `verified_on` over the WHOLE charges file (file, GST, DP, option exercise
+/// and every rate set), not only the sets a run used; use it for staleness warnings. The range of
+/// the rate sets actually selected (plus GST, and DP / option exercise only if levied) is a
+/// slice 7 task. `None` when the file carries no date at all.
 #[must_use]
-pub fn charges_verified_range(cfg: &ChargesConfig) -> Option<(NaiveDate, NaiveDate)> {
+pub fn charges_file_verified_range(cfg: &ChargesConfig) -> Option<(NaiveDate, NaiveDate)> {
     let dates: Vec<NaiveDate> = cfg
         .verified_on
         .into_iter()
@@ -47,8 +50,9 @@ pub struct ProvenanceInputs<'a> {
     pub data_to: NaiveDate,
     pub history_policy: HistoryPolicy,
     pub universe: &'a [String],
-    /// Parameter sets evaluated in-sample, in order; repeats count once.
-    pub parameter_sets: &'a [String],
+    /// `(strategy id, parameter set)` evaluated in-sample, in order; repeats count once. A fixed
+    /// parameter run still counts as one trial.
+    pub parameter_sets: &'a [(String, String)],
     pub trials: &'a Trials,
 }
 
@@ -62,15 +66,17 @@ pub fn build(i: &ProvenanceInputs<'_>) -> Result<Provenance, BacktestError> {
     if i.data_from > i.data_to {
         return Err(BacktestError::Invalid("data range is reversed".into()));
     }
-    let (from, to) = charges_verified_range(i.charges)
+    let (from, to) = charges_file_verified_range(i.charges)
         .ok_or_else(|| BacktestError::Invalid("charges file has no verified_on date".into()))?;
+    let mut seen = HashSet::new();
     let mut sets: Vec<String> = Vec::new();
-    for s in i.parameter_sets {
-        if !sets.contains(s) {
-            sets.push(s.clone());
+    for (strategy, params) in i.parameter_sets {
+        if seen.insert((strategy, params)) {
+            sets.push(format!("{strategy}: {params}"));
         }
     }
-    let in_run = u32::try_from(sets.len()).map_err(|_| BacktestError::Overflow("trial count"))?;
+    let distinct = u32::try_from(sets.len()).map_err(|_| BacktestError::Overflow("trial count"))?;
+    let in_run = distinct.max(1);
     let mut universe = i.universe.to_vec();
     universe.sort();
     universe.dedup();
