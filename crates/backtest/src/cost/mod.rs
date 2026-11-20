@@ -24,6 +24,12 @@ use crate::types::{
 /// Rupees per crore, the SEBI fee base.
 const CRORE: Decimal = Decimal::from_parts(10_000_000, 0, 0, false, 0);
 
+/// Whether a leg can carry the depository charge (a delivery sell; once per scrip-day in
+/// practice). The one predicate for both the charge and the provenance range, so they cannot drift.
+fn levies_dp(leg: &Leg) -> bool {
+    leg.product == Product::Delivery && leg.side == LegSide::Sell
+}
+
 /// Tracks which (scrip, IST day) already paid the depository charge.
 #[derive(Debug, Default, Clone)]
 pub struct DpLedger {
@@ -65,6 +71,12 @@ impl<'a> CostModel<'a> {
         }
     }
 
+    /// The history policy this model charges under.
+    #[must_use]
+    pub const fn policy(&self) -> HistoryPolicy {
+        self.policy
+    }
+
     /// True when `latest_for_all` is in use: provenance must say `costs_approximate = true`.
     #[must_use]
     pub fn costs_approximate(&self) -> bool {
@@ -92,7 +104,8 @@ impl<'a> CostModel<'a> {
     /// is exact whenever a delivery sell is present). `None` for no legs.
     ///
     /// Not included: `[option_exercise]`. Exercise STT is not charged yet; when it is, this must
-    /// add that table's `verified_on` or the range silently narrows.
+    /// add that table's `verified_on` or the range silently narrows (tracked as QUAN-94-5 in the
+    /// F9 record's Deferred list).
     ///
     /// # Errors
     /// As [`Self::charges_excl_dp`] for a missing rate set, GST table or DP table.
@@ -113,7 +126,7 @@ impl<'a> CostModel<'a> {
                     .ok_or_else(|| BacktestError::Invalid("charges.toml has no [gst]".into()))?
                     .verified_on,
             );
-            if leg.product == Product::Delivery && leg.side == LegSide::Sell {
+            if levies_dp(leg) {
                 note(
                     self.cfg
                         .dp
@@ -196,8 +209,7 @@ impl<'a> CostModel<'a> {
         leg: &Leg,
     ) -> Result<ChargeBreakdown, BacktestError> {
         let mut c = self.charges_excl_dp(leg)?;
-        if leg.product == Product::Delivery
-            && leg.side == LegSide::Sell
+        if levies_dp(leg)
             && !ledger
                 .paid
                 .contains(&(leg.instrument_token, leg.trade_date))

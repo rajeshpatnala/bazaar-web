@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use bazaar_core::config::parse_str;
+use bazaar_core::config::{ChargeExchange, parse_str};
 use rust_decimal::Decimal;
 
 use super::*;
@@ -56,9 +56,84 @@ fn verified_range_spans_file_gst_and_rate_sets() {
 }
 
 #[test]
+fn the_option_exercise_table_moves_the_file_range_at_either_end() {
+    use bazaar_core::config::OptionExercise;
+    let ex = |on| OptionExercise {
+        stt_pct: Decimal::ONE,
+        verified_on: on,
+        source: "test".into(),
+    };
+    let mut c = charges();
+    c.option_exercise = Some(ex(day(8, 1)));
+    assert_eq!(
+        charges_file_verified_range(&c),
+        Some((day(1, 5), day(8, 1)))
+    );
+    c.option_exercise = Some(ex(day(1, 1)));
+    assert_eq!(
+        charges_file_verified_range(&c),
+        Some((day(1, 1), day(7, 1)))
+    );
+}
+
+#[test]
+fn every_dated_source_moves_the_file_range_at_both_ends() {
+    type Set = fn(&mut ChargesConfig, NaiveDate);
+    use bazaar_core::config::OptionExercise;
+    let early = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+    let late = NaiveDate::from_ymd_opt(2027, 1, 1).unwrap();
+    // The fixture's own range is (01-05, 07-01), so each source starts inside it.
+    let sources: [(&str, Set); 6] = [
+        ("file", |c, d| c.verified_on = Some(d)),
+        ("gst", |c, d| c.gst.as_mut().unwrap().verified_on = d),
+        ("dp", |c, d| c.dp.as_mut().unwrap().verified_on = d),
+        ("option_exercise", |c, d| {
+            c.option_exercise = Some(OptionExercise {
+                stt_pct: Decimal::ONE,
+                verified_on: d,
+                source: "test".into(),
+            });
+        }),
+        ("rate_set buy", |c, d| c.rate_set[0].verified_on = d),
+        ("rate_set sell", |c, d| c.rate_set[1].verified_on = d),
+    ];
+    for (name, set) in sources {
+        let (mut lo, mut hi) = (charges(), charges());
+        set(&mut lo, early);
+        set(&mut hi, late);
+        let lo_range = charges_file_verified_range(&lo);
+        let hi_range = charges_file_verified_range(&hi);
+        // Moving a source to an extreme date must put that date at that end of the range.
+        assert_eq!(lo_range.map(|r| r.0), Some(early), "{name}: low end");
+        assert_eq!(hi_range.map(|r| r.1), Some(late), "{name}: high end");
+    }
+}
+
+#[test]
 fn undated_charges_have_no_range() {
     let c = parse_str("schema_version = 1\nplaceholder = true\nsource = \"none\"\n").unwrap();
     assert_eq!(charges_file_verified_range(&c), None);
+}
+
+fn ev(used: ChargesUsed) -> ChargesEvidence {
+    ev_with(used, HistoryPolicy::Strict)
+}
+
+fn ev_with(used: ChargesUsed, policy: HistoryPolicy) -> ChargesEvidence {
+    ChargesEvidence::for_test(used, policy)
+}
+
+#[test]
+fn costs_approximate_follows_the_cost_models_policy() {
+    let charges = charges();
+    let trials = trials();
+    let mut inp = inputs(&[], &charges, &[], &[], &trials);
+    assert!(!build(&inp).unwrap().costs_approximate);
+    let cost = CostModel::new(&charges, HistoryPolicy::LatestForAll, ChargeExchange::Nse);
+    inp.charges_used = ChargesEvidence::from_legs(&cost, &[]).unwrap();
+    let p = build(&inp).unwrap();
+    assert!(p.costs_approximate);
+    assert_eq!(p.history_policy, HistoryPolicy::LatestForAll);
 }
 
 fn inputs<'a>(
@@ -73,12 +148,11 @@ fn inputs<'a>(
         charges: c,
         data_from: day(1, 1),
         data_to: day(5, 1),
-        history_policy: HistoryPolicy::Strict,
         universe: uni,
         parameter_sets: sets,
         trials: t,
         kind: RunKind::Plain,
-        charges_used: (day(1, 5), day(7, 1)),
+        charges_used: ev(ChargesUsed::Range(day(1, 5), day(7, 1))),
     }
 }
 
@@ -115,6 +189,31 @@ fn walk_forward_gate_evidence_comes_from_the_result() {
 }
 
 #[test]
+fn a_run_with_no_legs_says_no_charges_were_levied() {
+    let charges = charges();
+    let trials = trials();
+    let mut inp = inputs(&[], &charges, &[], &[], &trials);
+    inp.charges_used = ev(ChargesUsed::NoneLevied);
+    let p = build(&inp).unwrap();
+    assert_eq!(
+        (
+            p.charges_verified_from,
+            p.charges_verified_to,
+            p.no_charges_levied
+        ),
+        (None, None, true)
+    );
+    // A model's own legs decide the state: none is NoneLevied, and the policy is the model's.
+    let cost = CostModel::new(&charges, HistoryPolicy::LatestForAll, ChargeExchange::Nse);
+    let none = ChargesEvidence::from_legs(&cost, &[]).unwrap();
+    assert_eq!(
+        none,
+        ev_with(ChargesUsed::NoneLevied, HistoryPolicy::LatestForAll)
+    );
+    assert_eq!(none.policy(), HistoryPolicy::LatestForAll);
+}
+
+#[test]
 fn the_provenance_records_the_used_charges_range_not_the_file_range() {
     let charges = charges();
     let trials = trials();
@@ -124,13 +223,22 @@ fn the_provenance_records_the_used_charges_range_not_the_file_range() {
         charges_file_verified_range(&charges),
         Some((day(1, 5), day(7, 1)))
     );
-    inp.charges_used = (day(3, 1), day(4, 1));
+    inp.charges_used = ev(ChargesUsed::Range(day(3, 1), day(4, 1)));
     let p = build(&inp).unwrap();
     assert_eq!(
-        (p.charges_verified_from, p.charges_verified_to),
-        (Some(day(3, 1)), Some(day(4, 1)))
+        (
+            p.charges_verified_from,
+            p.charges_verified_to,
+            p.no_charges_levied
+        ),
+        (Some(day(3, 1)), Some(day(4, 1)), false)
     );
-    inp.charges_used = (day(4, 1), day(3, 1));
+    // A range outside the file's own range means the wrong config or legs: refused.
+    inp.charges_used = ev(ChargesUsed::Range(day(1, 4), day(4, 1)));
+    assert!(matches!(build(&inp), Err(BacktestError::Invalid(_))));
+    inp.charges_used = ev(ChargesUsed::Range(day(3, 1), day(7, 2)));
+    assert!(matches!(build(&inp), Err(BacktestError::Invalid(_))));
+    inp.charges_used = ev(ChargesUsed::Range(day(4, 1), day(3, 1)));
     assert!(matches!(build(&inp), Err(BacktestError::Invalid(_))));
 }
 
@@ -170,7 +278,10 @@ fn latest_for_all_marks_costs_approximate() {
     let c = charges();
     let t = trials();
     let mut i = inputs(&[], &c, &[], &[], &t);
-    i.history_policy = HistoryPolicy::LatestForAll;
+    i.charges_used = ev_with(
+        ChargesUsed::Range(day(1, 5), day(7, 1)),
+        HistoryPolicy::LatestForAll,
+    );
     let p = build(&i).unwrap();
     assert!(p.costs_approximate);
     // A run with no grid is one trial (policy section 4).

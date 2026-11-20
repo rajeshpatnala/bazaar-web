@@ -8,7 +8,8 @@ use chrono::NaiveDate;
 use sha2::{Digest, Sha256};
 
 use crate::config::Trials;
-use crate::types::{BacktestError, HistoryPolicy, Provenance};
+use crate::cost::CostModel;
+use crate::types::{BacktestError, HistoryPolicy, Leg, Provenance};
 use crate::walkforward::WalkForwardResult;
 
 /// Lower-case hex SHA-256 of `bytes`.
@@ -49,7 +50,6 @@ pub struct ProvenanceInputs<'a> {
     pub charges: &'a ChargesConfig,
     pub data_from: NaiveDate,
     pub data_to: NaiveDate,
-    pub history_policy: HistoryPolicy,
     pub universe: &'a [String],
     /// `(strategy id, parameter set)` evaluated in-sample, in order; repeats count once. A fixed
     /// parameter run still counts as one trial.
@@ -57,11 +57,67 @@ pub struct ProvenanceInputs<'a> {
     pub trials: &'a Trials,
     /// Plain or walk-forward; a walk-forward run cannot be built without its evidence text.
     pub kind: RunKind<'a>,
-    /// Earliest and latest `verified_on` of what the run was charged with, from
-    /// `CostModel::used_verified_range`. Required: there is no whole-file fallback, so a runner
-    /// cannot claim the weaker range by omission. A run with no legs has no range to record and
-    /// cannot build provenance.
-    pub charges_used: (NaiveDate, NaiveDate),
+    /// What the run was charged with and under which history policy, built from the run's own
+    /// `CostModel` and legs ([`ChargesEvidence::from_legs`] or `walk_forward_gated`). Required:
+    /// there is no whole-file fallback, "no charges" cannot be claimed for a run that traded, and
+    /// `costs_approximate` cannot disagree with the policy the legs were costed under.
+    pub charges_used: ChargesEvidence,
+}
+
+/// The charges `verified_on` range a run used, or the explicit fact that it levied none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChargesUsed {
+    /// Earliest and latest `verified_on` of the tables the legs were charged with. Must lie inside
+    /// the charges file's own range.
+    Range(NaiveDate, NaiveDate),
+    /// A run with no legs (nothing traded): no charge was levied, so there is no range. This is a
+    /// stated state (`Provenance::no_charges_levied`), not a fallback to the whole file.
+    NoneLevied,
+}
+
+/// The charges evidence of a run: the used range and the history policy of the cost model that
+/// charged it. Fields are private; the only builders are [`Self::from_legs`] and the gated runner,
+/// both of which derive the state from legs and the model, so a run that traded cannot be
+/// reported as `NoneLevied` and the policy cannot be stated separately (QUAN-94-6, QUAN-94-7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChargesEvidence {
+    used: ChargesUsed,
+    policy: HistoryPolicy,
+}
+
+impl ChargesEvidence {
+    /// From every charged leg of the run: the range comes from `cost.used_verified_range`, no legs
+    /// is `NoneLevied`, and the policy is the model's own.
+    ///
+    /// # Errors
+    /// As `CostModel::used_verified_range`.
+    pub fn from_legs<'l>(
+        cost: &CostModel<'_>,
+        legs: impl IntoIterator<Item = &'l Leg>,
+    ) -> Result<Self, BacktestError> {
+        Ok(Self::from_range(cost, cost.used_verified_range(legs)?))
+    }
+
+    /// From a range already merged from `cost.used_verified_range` answers (the gated runner).
+    pub(crate) fn from_range(cost: &CostModel<'_>, range: Option<(NaiveDate, NaiveDate)>) -> Self {
+        Self {
+            used: range.map_or(ChargesUsed::NoneLevied, |(from, to)| {
+                ChargesUsed::Range(from, to)
+            }),
+            policy: cost.policy(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test(used: ChargesUsed, policy: HistoryPolicy) -> Self {
+        Self { used, policy }
+    }
+
+    /// The history policy the legs were charged under.
+    #[must_use]
+    pub const fn policy(&self) -> HistoryPolicy {
+        self.policy
+    }
 }
 
 /// The `gate_evidence` text of a walk-forward result. It has no public constructor: the only way
@@ -97,12 +153,22 @@ pub fn build(i: &ProvenanceInputs<'_>) -> Result<Provenance, BacktestError> {
     if i.data_from > i.data_to {
         return Err(BacktestError::Invalid("data range is reversed".into()));
     }
-    charges_file_verified_range(i.charges)
+    let (file_from, file_to) = charges_file_verified_range(i.charges)
         .ok_or_else(|| BacktestError::Invalid("charges file has no verified_on date".into()))?;
-    let (from, to) = i.charges_used;
-    if from > to {
-        return Err(BacktestError::Invalid("charges range is reversed".into()));
-    }
+    let used = match i.charges_used.used {
+        ChargesUsed::NoneLevied => None,
+        ChargesUsed::Range(from, to) => {
+            if from > to {
+                return Err(BacktestError::Invalid("charges range is reversed".into()));
+            }
+            if from < file_from || to > file_to {
+                return Err(BacktestError::Invalid(
+                    "charges_used lies outside the charges file range".into(),
+                ));
+            }
+            Some((from, to))
+        }
+    };
     let gate_evidence = match i.kind {
         RunKind::Plain => None,
         RunKind::WalkForward(EvidenceText(g)) => Some(g),
@@ -126,12 +192,13 @@ pub fn build(i: &ProvenanceInputs<'_>) -> Result<Provenance, BacktestError> {
         .collect();
     Ok(Provenance {
         config_hashes,
-        charges_verified_from: Some(from),
-        charges_verified_to: Some(to),
+        charges_verified_from: used.map(|r| r.0),
+        charges_verified_to: used.map(|r| r.1),
+        no_charges_levied: used.is_none(),
         data_from: Some(i.data_from),
         data_to: Some(i.data_to),
-        history_policy: i.history_policy,
-        costs_approximate: i.history_policy == HistoryPolicy::LatestForAll,
+        history_policy: i.charges_used.policy,
+        costs_approximate: i.charges_used.policy == HistoryPolicy::LatestForAll,
         universe,
         parameter_sets: sets,
         trial_penalty_pf: i.trials.profit_factor_penalty(in_run),
