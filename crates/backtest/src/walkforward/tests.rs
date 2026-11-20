@@ -530,3 +530,43 @@ fn the_result_vote_counts_skipped_folds_as_failures() {
     assert_eq!((r.vote.voting_folds, r.vote.skipped_folds), (5, 5));
     assert!(!r.vote.all_ok());
 }
+
+#[test]
+fn the_gated_runner_counts_in_sample_legs_in_the_charges_range() {
+    let (bs, ch, ps) = (bars("100"), charges(), sets(2));
+    // 2024 bars predate the shipped rate sets, so the cost model uses latest-for-all.
+    let mut params = params(&ch, &ps);
+    params.cost = CostModel::new(&ch, HistoryPolicy::LatestForAll, ChargeExchange::Nse);
+    // Only IS runs trade (every candidate), so the range can come from IS legs alone.
+    let (mut seen, mut legs) = (Vec::new(), Vec::new());
+    let mut run = |win: Window, _: usize, slice: &[Candle], env: GateEnv<'_>| {
+        seen.push((win, env.evidence.oos_trades));
+        let res = match win {
+            Window::InSample => wl(slice, ("10", "0.1"), ("-5", "-0.05")),
+            Window::OutOfSample => out(vec![]),
+        };
+        for tr in &res.trades {
+            legs.extend([tr.entry.leg.clone(), tr.exit.leg.clone()]);
+        }
+        Ok(res)
+    };
+    let (res, used) = walk_forward_gated(&cfg(), &bs, &params, "IT", &quiet, &mut run).unwrap();
+    assert_eq!(res.folds.len(), 5);
+    // IS runs got the selection-only evidence, never the OOS record.
+    assert!(
+        seen.iter()
+            .filter(|(win, _)| *win == Window::InSample)
+            .all(|(_, n)| *n == Tri::Known(u32::MAX))
+    );
+    let direct = params.cost.used_verified_range(&legs).unwrap().unwrap();
+    assert_eq!(used, ChargesUsed::Range(direct.0, direct.1));
+}
+
+#[test]
+fn a_gated_run_with_no_trades_levies_no_charges() {
+    let (bs, ch, ps) = (bars("100"), charges(), sets(1));
+    let mut run = |_: Window, _: usize, _: &[Candle], _: GateEnv<'_>| Ok(out(vec![]));
+    let (_, used) =
+        walk_forward_gated(&cfg(), &bs, &params(&ch, &ps), "IT", &quiet, &mut run).unwrap();
+    assert_eq!(used, ChargesUsed::NoneLevied);
+}

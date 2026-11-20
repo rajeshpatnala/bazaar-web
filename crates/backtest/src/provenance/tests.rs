@@ -56,6 +56,27 @@ fn verified_range_spans_file_gst_and_rate_sets() {
 }
 
 #[test]
+fn the_option_exercise_table_moves_the_file_range_at_either_end() {
+    use bazaar_core::config::OptionExercise;
+    let ex = |on| OptionExercise {
+        stt_pct: Decimal::ONE,
+        verified_on: on,
+        source: "test".into(),
+    };
+    let mut c = charges();
+    c.option_exercise = Some(ex(day(8, 1)));
+    assert_eq!(
+        charges_file_verified_range(&c),
+        Some((day(1, 5), day(8, 1)))
+    );
+    c.option_exercise = Some(ex(day(1, 1)));
+    assert_eq!(
+        charges_file_verified_range(&c),
+        Some((day(1, 1), day(7, 1)))
+    );
+}
+
+#[test]
 fn undated_charges_have_no_range() {
     let c = parse_str("schema_version = 1\nplaceholder = true\nsource = \"none\"\n").unwrap();
     assert_eq!(charges_file_verified_range(&c), None);
@@ -78,7 +99,7 @@ fn inputs<'a>(
         parameter_sets: sets,
         trials: t,
         kind: RunKind::Plain,
-        charges_used: (day(1, 5), day(7, 1)),
+        charges_used: ChargesUsed::Range(day(1, 5), day(7, 1)),
     }
 }
 
@@ -115,6 +136,27 @@ fn walk_forward_gate_evidence_comes_from_the_result() {
 }
 
 #[test]
+fn a_run_with_no_legs_says_no_charges_were_levied() {
+    let charges = charges();
+    let trials = trials();
+    let mut inp = inputs(&[], &charges, &[], &[], &trials);
+    inp.charges_used = ChargesUsed::of(None);
+    let p = build(&inp).unwrap();
+    assert_eq!(
+        (
+            p.charges_verified_from,
+            p.charges_verified_to,
+            p.no_charges_levied
+        ),
+        (None, None, true)
+    );
+    assert_eq!(
+        ChargesUsed::of(Some((day(2, 1), day(3, 1)))),
+        ChargesUsed::Range(day(2, 1), day(3, 1))
+    );
+}
+
+#[test]
 fn the_provenance_records_the_used_charges_range_not_the_file_range() {
     let charges = charges();
     let trials = trials();
@@ -124,13 +166,22 @@ fn the_provenance_records_the_used_charges_range_not_the_file_range() {
         charges_file_verified_range(&charges),
         Some((day(1, 5), day(7, 1)))
     );
-    inp.charges_used = (day(3, 1), day(4, 1));
+    inp.charges_used = ChargesUsed::Range(day(3, 1), day(4, 1));
     let p = build(&inp).unwrap();
     assert_eq!(
-        (p.charges_verified_from, p.charges_verified_to),
-        (Some(day(3, 1)), Some(day(4, 1)))
+        (
+            p.charges_verified_from,
+            p.charges_verified_to,
+            p.no_charges_levied
+        ),
+        (Some(day(3, 1)), Some(day(4, 1)), false)
     );
-    inp.charges_used = (day(4, 1), day(3, 1));
+    // A range outside the file's own range means the wrong config or legs: refused.
+    inp.charges_used = ChargesUsed::Range(day(1, 4), day(4, 1));
+    assert!(matches!(build(&inp), Err(BacktestError::Invalid(_))));
+    inp.charges_used = ChargesUsed::Range(day(3, 1), day(7, 2));
+    assert!(matches!(build(&inp), Err(BacktestError::Invalid(_))));
+    inp.charges_used = ChargesUsed::Range(day(4, 1), day(3, 1));
     assert!(matches!(build(&inp), Err(BacktestError::Invalid(_))));
 }
 

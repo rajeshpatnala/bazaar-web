@@ -24,6 +24,12 @@ use crate::types::{
 /// Rupees per crore, the SEBI fee base.
 const CRORE: Decimal = Decimal::from_parts(10_000_000, 0, 0, false, 0);
 
+/// Whether a leg can carry the depository charge (a delivery sell; once per scrip-day in
+/// practice). The one predicate for both the charge and the provenance range, so they cannot drift.
+fn levies_dp(leg: &Leg) -> bool {
+    leg.product == Product::Delivery && leg.side == LegSide::Sell
+}
+
 /// Tracks which (scrip, IST day) already paid the depository charge.
 #[derive(Debug, Default, Clone)]
 pub struct DpLedger {
@@ -113,7 +119,7 @@ impl<'a> CostModel<'a> {
                     .ok_or_else(|| BacktestError::Invalid("charges.toml has no [gst]".into()))?
                     .verified_on,
             );
-            if leg.product == Product::Delivery && leg.side == LegSide::Sell {
+            if levies_dp(leg) {
                 note(
                     self.cfg
                         .dp
@@ -196,8 +202,7 @@ impl<'a> CostModel<'a> {
         leg: &Leg,
     ) -> Result<ChargeBreakdown, BacktestError> {
         let mut c = self.charges_excl_dp(leg)?;
-        if leg.product == Product::Delivery
-            && leg.side == LegSide::Sell
+        if levies_dp(leg)
             && !ledger
                 .paid
                 .contains(&(leg.instrument_token, leg.trade_date))

@@ -233,6 +233,9 @@ pub struct Provenance {
     /// always sets them (the runner slice adds a test).
     pub charges_verified_from: Option<NaiveDate>,
     pub charges_verified_to: Option<NaiveDate>,
+    /// True for a run with no legs: no charge was levied, so the two charges dates are `None` by
+    /// design (an explicit state, not a missing value).
+    pub no_charges_levied: bool,
     pub data_from: Option<NaiveDate>,
     pub data_to: Option<NaiveDate>,
     pub history_policy: HistoryPolicy,

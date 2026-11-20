@@ -57,11 +57,29 @@ pub struct ProvenanceInputs<'a> {
     pub trials: &'a Trials,
     /// Plain or walk-forward; a walk-forward run cannot be built without its evidence text.
     pub kind: RunKind<'a>,
-    /// Earliest and latest `verified_on` of what the run was charged with, from
-    /// `CostModel::used_verified_range`. Required: there is no whole-file fallback, so a runner
-    /// cannot claim the weaker range by omission. A run with no legs has no range to record and
-    /// cannot build provenance.
-    pub charges_used: (NaiveDate, NaiveDate),
+    /// What the run was charged with, from `CostModel::used_verified_range` over EVERY charged
+    /// leg (see [`ChargesUsed::of`]). Required: there is no whole-file fallback, so a runner cannot
+    /// claim the weaker range by omission.
+    pub charges_used: ChargesUsed,
+}
+
+/// The charges `verified_on` range a run used, or the explicit fact that it levied none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChargesUsed {
+    /// Earliest and latest `verified_on` of the tables the legs were charged with. Must lie inside
+    /// the charges file's own range.
+    Range(NaiveDate, NaiveDate),
+    /// A run with no legs (nothing traded): no charge was levied, so there is no range. This is a
+    /// stated state (`Provenance::no_charges_levied`), not a fallback to the whole file.
+    NoneLevied,
+}
+
+impl ChargesUsed {
+    /// From `CostModel::used_verified_range`'s answer: `None` (no legs) is `NoneLevied`.
+    #[must_use]
+    pub fn of(range: Option<(NaiveDate, NaiveDate)>) -> Self {
+        range.map_or(Self::NoneLevied, |(from, to)| Self::Range(from, to))
+    }
 }
 
 /// The `gate_evidence` text of a walk-forward result. It has no public constructor: the only way
@@ -97,12 +115,22 @@ pub fn build(i: &ProvenanceInputs<'_>) -> Result<Provenance, BacktestError> {
     if i.data_from > i.data_to {
         return Err(BacktestError::Invalid("data range is reversed".into()));
     }
-    charges_file_verified_range(i.charges)
+    let (file_from, file_to) = charges_file_verified_range(i.charges)
         .ok_or_else(|| BacktestError::Invalid("charges file has no verified_on date".into()))?;
-    let (from, to) = i.charges_used;
-    if from > to {
-        return Err(BacktestError::Invalid("charges range is reversed".into()));
-    }
+    let used = match i.charges_used {
+        ChargesUsed::NoneLevied => None,
+        ChargesUsed::Range(from, to) => {
+            if from > to {
+                return Err(BacktestError::Invalid("charges range is reversed".into()));
+            }
+            if from < file_from || to > file_to {
+                return Err(BacktestError::Invalid(
+                    "charges_used lies outside the charges file range".into(),
+                ));
+            }
+            Some((from, to))
+        }
+    };
     let gate_evidence = match i.kind {
         RunKind::Plain => None,
         RunKind::WalkForward(EvidenceText(g)) => Some(g),
@@ -126,8 +154,9 @@ pub fn build(i: &ProvenanceInputs<'_>) -> Result<Provenance, BacktestError> {
         .collect();
     Ok(Provenance {
         config_hashes,
-        charges_verified_from: Some(from),
-        charges_verified_to: Some(to),
+        charges_verified_from: used.map(|r| r.0),
+        charges_verified_to: used.map(|r| r.1),
+        no_charges_levied: used.is_none(),
         data_from: Some(i.data_from),
         data_to: Some(i.data_to),
         history_policy: i.history_policy,

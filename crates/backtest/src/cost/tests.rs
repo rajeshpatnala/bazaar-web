@@ -710,6 +710,21 @@ fn the_dp_date_widens_the_range_for_a_delivery_sell_only() {
 }
 
 #[test]
+fn the_range_widens_exactly_when_the_first_leg_of_a_shape_pays_dp() {
+    let mut cfg = cfg();
+    cfg.dp.as_mut().unwrap().verified_on = date(2026, 9, 1);
+    let m = nse(&cfg);
+    for product in [Product::Delivery, Product::Intraday] {
+        for side in [LegSide::Buy, LegSide::Sell] {
+            let l = cash(product, side);
+            let paid = m.charges_with_dp(&mut DpLedger::new(), &l).unwrap().dp > Decimal::ZERO;
+            let widened = range_of(&cfg, &l).unwrap().unwrap().1 == date(2026, 9, 1);
+            assert_eq!(paid, widened, "{product:?} {side:?}");
+        }
+    }
+}
+
+#[test]
 fn a_missing_gst_or_dp_table_is_invalid_where_it_is_needed() {
     let mut cfg = cfg();
     cfg.dp = None;

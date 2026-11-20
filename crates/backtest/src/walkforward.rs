@@ -37,7 +37,8 @@ use crate::fill::trade_date;
 use crate::foldvote::{FoldVote, vote};
 use crate::gate_policy::{EventsFor, GateEnv};
 use crate::metrics::{Assessment, Metrics, RunFacts, assess};
-use crate::types::{BacktestError, Trade};
+use crate::provenance::ChargesUsed;
+use crate::types::{BacktestError, Leg, Trade};
 
 /// What the provenance records about the gate's evidence in a walk-forward run.
 pub const GATE_EVIDENCE: &str = "chosen-candidate IS window; walk_forward_pass assumed true \
@@ -199,10 +200,6 @@ fn selection_evidence() -> EvidenceInputs {
 ///
 /// # Errors
 /// `Invalid` for an OOS window without evidence.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the slice 7b runner builds its envs here")
-)]
 pub(crate) fn window_env(
     window: Window,
     evidence: Option<EvidenceInputs>,
@@ -394,6 +391,41 @@ pub fn walk_forward(
         param_sets: sets,
         gate_evidence: GATE_EVIDENCE,
     })
+}
+
+/// Builds and runs one window with the gate environment the runner made for it: `(window, index
+/// into the distinct sets, that window's bars only, gate env)`. The env is `window_env`'s, so no
+/// caller picks its own evidence.
+pub type GatedRun<'a> =
+    dyn FnMut(Window, usize, &[Candle], GateEnv<'_>) -> Result<RunOutput, BacktestError> + 'a;
+
+/// [`walk_forward`] with the gate environments built here (via `window_env`) and the charged legs
+/// of EVERY run collected: IS runs of all candidates and the OOS runs. The returned
+/// [`ChargesUsed`] is the verified range over all of them, so a rate set only an IS run used still
+/// counts (QUAN-93-3). A run with no legs gives [`ChargesUsed::NoneLevied`].
+///
+/// # Errors
+/// As [`walk_forward`], plus a missing rate, GST or DP table for any leg.
+pub fn walk_forward_gated(
+    cfg: &BacktestConfig,
+    bars: &[Candle],
+    p: &WfParams<'_>,
+    sector: &str,
+    events: EventsFor<'_>,
+    run: &mut GatedRun<'_>,
+) -> Result<(WalkForwardResult, ChargesUsed), BacktestError> {
+    let mut legs: Vec<Leg> = Vec::new();
+    let result = walk_forward(cfg, bars, p, &mut |w, c, b, ev| {
+        let env = window_env(w, ev, sector.to_owned(), events)?;
+        let out = run(w, c, b, env)?;
+        for t in &out.trades {
+            legs.push(t.entry.leg.clone());
+            legs.push(t.exit.leg.clone());
+        }
+        Ok(out)
+    })?;
+    let used = ChargesUsed::of(p.cost.used_verified_range(&legs)?);
+    Ok((result, used))
 }
 
 #[cfg(test)]
