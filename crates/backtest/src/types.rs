@@ -18,12 +18,14 @@ pub enum LegSide {
     Sell,
 }
 
-/// Product type; it decides which charge rates apply.
+/// Product type; it decides which charge rates apply. `Carry` (NRML) is the F&O overnight
+/// product; `Delivery` is cash equity only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Product {
     Delivery,
     Intraday,
+    Carry,
 }
 
 /// Slippage class (keys of `[slippage.<class>]` in `config/backtest.toml`).
@@ -47,12 +49,33 @@ impl SlippageClass {
     }
 }
 
-/// One executed leg, the input of the cost model (slice 1). The trade date is the IST date.
+/// Which charge row applies: STT, exchange transaction and stamp differ for cash, futures and
+/// options (options STT is on the premium, sell side).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegInstrument {
+    Cash,
+    Future,
+    Option(OptionRight),
+}
+
+/// Call or put.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OptionRight {
+    Call,
+    Put,
+}
+
+/// One executed leg, the input of the cost model (slice 1). `trade_date` is the IST date of the
+/// fill, derived from the bar time in IST only (a UTC bar at 23:59 IST must not shift it).
+/// Tick and lot sizes come from the instrument master as of `trade_date` (engine, slice 4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Leg {
     pub instrument_token: u32,
     pub symbol: String,
     pub segment: Segment,
+    pub instrument: LegInstrument,
     pub product: Product,
     pub side: LegSide,
     pub qty: Qty,
@@ -148,7 +171,8 @@ pub struct Fill {
     pub charges: ChargeBreakdown,
 }
 
-/// A closed round trip. P&L and R are net of charges and slippage.
+/// A closed round trip. `net_pnl` and R are net of charges and slippage (slice 4 builds it
+/// through one constructor that computes net and R).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Trade {
     pub strategy_id: String,
@@ -159,7 +183,9 @@ pub struct Trade {
     pub charges: ChargeBreakdown,
     #[serde(with = "rust_decimal::serde::str")]
     pub net_pnl: Decimal,
-    /// Rupees risked at entry (entry to stop, times quantity); the R denominator.
+    /// Rupees risked at entry: abs(slipped entry fill price - stop) x quantity, charges excluded;
+    /// the R denominator. `gross_pnl` is after slippage and before charges;
+    /// `net_pnl = gross_pnl - charges.total()`.
     #[serde(with = "rust_decimal::serde::str")]
     pub risk_inr: Decimal,
     /// `net_pnl / risk_inr`; `None` when the risk is zero.
@@ -190,7 +216,9 @@ pub enum HistoryPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceLabel {
-    /// Fewer pooled OOS trades than the floor, or too few folds, or an approximate-cost run.
+    /// An approximate-cost run (`costs_approximate`): any trade count, never reaches the bar.
+    Exploratory,
+    /// Fewer pooled OOS trades than the floor, or too few folds.
     LowEvidence,
     Provisional,
     Trusted,
@@ -201,6 +229,8 @@ pub enum EvidenceLabel {
 pub struct Provenance {
     /// Hex hashes of the config files used, keyed by file name (ordered for determinism).
     pub config_hashes: std::collections::BTreeMap<String, String>,
+    /// The four date fields are `Option` only while a result is being built; a finished result
+    /// always sets them (the runner slice adds a test).
     pub charges_verified_from: Option<NaiveDate>,
     pub charges_verified_to: Option<NaiveDate>,
     pub data_from: Option<NaiveDate>,
@@ -208,7 +238,15 @@ pub struct Provenance {
     pub history_policy: HistoryPolicy,
     /// True when `latest_for_all` was used: such a run is exploratory and never reaches the bar.
     pub costs_approximate: bool,
-    /// Distinct (strategy id, parameter set) evaluated in-sample, plus `prior_trials`.
+    /// Sorted instrument symbols of the universe.
+    pub universe: Vec<String>,
+    /// Every distinct parameter set evaluated in-sample, in evaluation order.
+    pub parameter_sets: Vec<String>,
+    /// Profit-factor penalty applied to the bar for the trial count (0 for one trial).
+    #[serde(with = "rust_decimal::serde::str")]
+    pub trial_penalty_pf: Decimal,
+    /// Distinct (strategy id, parameter set) evaluated in-sample plus `prior_trials`
+    /// (`Trials::total_trials`, saturating).
     pub trials: u32,
 }
 
@@ -252,6 +290,7 @@ mod tests {
             instrument_token: 1,
             symbol: "TCS".into(),
             segment: Segment::Equity,
+            instrument: LegInstrument::Cash,
             product: Product::Delivery,
             side: LegSide::Buy,
             qty: Qty(10),
@@ -323,6 +362,7 @@ mod tests {
 
     #[test]
     fn evidence_labels_order_low_to_trusted() {
+        assert!(EvidenceLabel::Exploratory < EvidenceLabel::LowEvidence);
         assert!(EvidenceLabel::LowEvidence < EvidenceLabel::Provisional);
         assert!(EvidenceLabel::Provisional < EvidenceLabel::Trusted);
     }

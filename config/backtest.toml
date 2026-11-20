@@ -2,13 +2,14 @@
 # docs/strategy/F9-backtest-policy.md. Every value is an owner-policy CONVENTION, UNVERIFIED for this
 # app, not a market fact; the owner confirms or changes them. Tightening is always allowed; loosening
 # needs a DECISIONS.md entry and the owner. A backtest is evidence, not a promise.
+# Every value below is also a floor: a looser value fails to load, a tighter one loads.
 # Money-like numbers are strings (never TOML floats). Unknown keys and out-of-range values fail to load.
 schema_version = 1
 source = "owner policy: docs/strategy/F9-backtest-policy.md (strategist, 2026-11-20)"
-verified_on = "2026-11-20"   # date the policy was written; the values stay UNVERIFIED conventions
+policy_date = "2026-11-20"   # when the owner policy was written; NOT a source check: every value stays an UNVERIFIED convention
 
 [run]
-history_policy = "strict"    # or "latest_for_all": per-run opt-in, stamps costs_approximate = true (exploratory only)
+history_policy = "strict"    # the file must say strict; "latest_for_all" is a per-run opt-in (stamps costs_approximate = true, exploratory only)
 
 # Slippage is adverse to the trader, then rounded against the trader to the tick (policy section 1).
 # *_pct is a percent of price (0.05 = 0.05%). The wider of the percent figure and the tick floor applies.
@@ -48,6 +49,7 @@ unverified = true
 in_sample_months = 24
 out_of_sample_months = 6
 step_months = 6              # never below out_of_sample_months: OOS windows must not overlap
+# Folds: a position open at the in-sample end is force-closed or discarded, never carried into OOS; indicator state is rebuilt per window.
 warmup_bars = 250            # indicator warm-up, excluded from in-sample
 min_folds = 4                # fewer = "low evidence", never "pass"
 min_pooled_oos_trades = 30   # pooled across folds and instruments; equals risk.toml [gate.evidence], hard floor

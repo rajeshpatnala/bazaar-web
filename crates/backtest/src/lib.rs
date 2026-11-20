@@ -11,5 +11,5 @@ pub mod types;
 pub use config::{BacktestConfig, BacktestConfigError};
 pub use types::{
     BacktestError, ChargeBreakdown, EquityPoint, EvidenceLabel, Fill, FillKind, HistoryPolicy, Leg,
-    LegSide, Product, Provenance, SlippageClass, Trade,
+    LegInstrument, LegSide, OptionRight, Product, Provenance, SlippageClass, Trade,
 };
