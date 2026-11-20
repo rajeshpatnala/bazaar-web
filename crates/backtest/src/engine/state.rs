@@ -18,6 +18,16 @@ use crate::types::{BacktestError, Fill, Leg, LegSide, Product, Trade};
 pub(super) struct Pending {
     signal: Signal,
     qty: Qty,
+    regime: Option<String>,
+}
+
+/// `trend/vol` of the market regime, or `None` if either label is `Unknown`.
+fn regime_tag(r: &bazaar_regime::RegimeState) -> Option<String> {
+    use bazaar_regime::{Trend, VolState};
+    if r.trend == Trend::Unknown || r.vol == VolState::Unknown {
+        return None;
+    }
+    Some(format!("{:?}/{:?}", r.trend, r.vol).to_lowercase())
 }
 
 pub(super) struct Open {
@@ -73,6 +83,12 @@ pub(super) struct Engine<'a, 'b> {
     pub(super) open: Option<Open>,
     pub(super) exit_next: bool,
     pub(super) skipped: u32,
+    /// Regime tag of the position being held or last closed; tags the trades it produces.
+    pub(super) tag: Option<String>,
+    /// Trades already tagged.
+    pub(super) tagged: usize,
+    /// Bars before this index are history only: no decision is made whose fill would land in them.
+    pub(super) warmup: usize,
 }
 
 impl Engine<'_, '_> {
@@ -120,6 +136,7 @@ impl Engine<'_, '_> {
         );
         let stop = snap(self.tick(), p.signal.stop)?;
         book(&mut self.ledger, self.sid, sim, &leg, bar, Some(stop))?;
+        self.tag = p.regime;
         self.open = Some(Open {
             entry: sim.price,
             stop: p.signal.stop,
@@ -179,6 +196,9 @@ impl Engine<'_, '_> {
         }
         let marks = BTreeMap::from([(self.token, snap(self.tick(), bar.close())?)]);
         self.ledger.mark(bar.close_time(), &marks)?;
+        let n = self.ledger.trades().len();
+        self.ledger.tag_regime_from(self.tagged, self.tag.as_deref());
+        self.tagged = n;
         if let Some(o) = &mut self.open {
             o.bars_held += 1;
         }
@@ -251,6 +271,7 @@ impl Engine<'_, '_> {
                     self.pending = Some(Pending {
                         signal,
                         qty: Qty(sized.qty),
+                        regime: ctx.as_ref().and_then(|c| regime_tag(c.market_regime)),
                     });
                 }
                 _ => self.skipped += 1,

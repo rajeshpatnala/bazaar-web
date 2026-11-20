@@ -253,6 +253,7 @@ fn exec(
         product: Product::Delivery,
         capital: d("100000"),
         slippage_multiplier: d("1"),
+        warmup_bars: 0,
     };
     let regimes = Regimes {
         states: bars

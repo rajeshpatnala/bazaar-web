@@ -314,6 +314,7 @@ fn go(
         product,
         capital: e.capital,
         slippage_multiplier: d(mult),
+        warmup_bars: 0,
     };
     let reg = Odd {
         inner: regimes(&bars),
@@ -513,6 +514,7 @@ fn unsorted_bars_are_refused() {
         product: Product::Delivery,
         capital: d("100000"),
         slippage_multiplier: d("1"),
+        warmup_bars: 0,
     };
     let r = run(
         &spec,
@@ -557,6 +559,7 @@ fn the_policy_observes_closed_trades_at_every_decision_bar() {
         product: Product::Delivery,
         capital: e.capital,
         slippage_multiplier: d("1"),
+        warmup_bars: 0,
     };
     let reg = regimes(&bars);
     let mut rec = Recorder(Vec::new(), None);
@@ -738,6 +741,7 @@ fn stressed(
         product: Product::Delivery,
         capital: e.capital,
         slippage_multiplier: mult,
+        warmup_bars: 0,
     };
     let mut make = || RunParts {
         strategy: Box::new(fake(at, None)),

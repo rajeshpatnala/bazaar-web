@@ -76,6 +76,10 @@ pub struct RunSpec<'a> {
     pub capital: Decimal,
     /// `>= 1`: 1 normally, `fills.stress_slippage_multiplier` for the stress run (QUAN-84-8).
     pub slippage_multiplier: Decimal,
+    /// The first `warmup_bars` bars are history only (indicator warm-up): no equity marks, and no
+    /// entry fills in them (the first decision is at the last history bar, filling at the first
+    /// window bar). 0 for a plain run; at most `bars.len()`.
+    pub warmup_bars: usize,
 }
 
 /// What a run produced.
@@ -90,6 +94,9 @@ pub struct RunOutput {
 fn validate(spec: &RunSpec<'_>) -> Result<(), BacktestError> {
     if spec.slippage_multiplier < Decimal::ONE {
         return Err(invalid("slippage multiplier must be at least 1"));
+    }
+    if spec.warmup_bars > spec.bars.len() {
+        return Err(invalid("warm-up is longer than the bars"));
     }
     let inst = spec.instrument;
     let cash_equity = inst.instrument_type == InstrumentType::Equity
@@ -150,18 +157,23 @@ pub fn run(
         open: None,
         exit_next: false,
         skipped: 0,
+        tag: None,
+        tagged: 0,
+        warmup: spec.warmup_bars,
     };
     for (i, bar) in spec.bars.iter().enumerate() {
-        if e.pending.is_some() {
-            e.enter(bar)?;
-        } else {
-            e.exit_at_open(bar)?;
-        }
-        e.check_stops(bar)?;
-        e.square_off(bar)?;
         let last = i + 1 == spec.bars.len();
-        e.end_of_bar(bar, last)?;
-        if !last {
+        if i >= e.warmup {
+            if e.pending.is_some() {
+                e.enter(bar)?;
+            } else {
+                e.exit_at_open(bar)?;
+            }
+            e.check_stops(bar)?;
+            e.square_off(bar)?;
+            e.end_of_bar(bar, last)?;
+        }
+        if !last && i + 1 >= e.warmup {
             e.decide(i, strategy, regimes, policy)?;
         }
     }

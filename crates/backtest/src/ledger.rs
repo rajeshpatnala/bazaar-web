@@ -94,6 +94,15 @@ impl<'a> Ledger<'a> {
         &self.trades
     }
 
+    /// Tag every trade from index `from` on that has no regime yet.
+    pub(crate) fn tag_regime_from(&mut self, from: usize, tag: Option<&str>) {
+        for t in self.trades.iter_mut().skip(from) {
+            if t.regime.is_none() {
+                t.regime = tag.map(str::to_owned);
+            }
+        }
+    }
+
     #[must_use]
     pub fn equity_curve(&self) -> &[EquityPoint] {
         &self.equity
@@ -338,6 +347,7 @@ fn build_trade(open: &Position, exit: Fill) -> Result<Trade, BacktestError> {
         net_pnl: net,
         risk_inr: risk,
         r_multiple,
+        regime: None,
     })
 }
 

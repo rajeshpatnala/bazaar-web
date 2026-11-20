@@ -191,6 +191,10 @@ pub struct Trade {
     /// `net_pnl / risk_inr`; `None` when the risk is zero.
     #[serde(with = "opt_decimal")]
     pub r_multiple: Option<Decimal>,
+    /// Market regime at the entry decision bar (`trend/vol`, lowercase), set by the engine; `None`
+    /// when either label was `Unknown` (never counted as a regime) or the trade did not come from
+    /// the engine.
+    pub regime: Option<String>,
 }
 
 /// Equity after a bar closed (net of all charges so far).
