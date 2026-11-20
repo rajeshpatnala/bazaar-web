@@ -526,6 +526,47 @@ fn approve(e: &Env, rows: &[[&str; 4]], s: &mut Fake) -> Result<RunOutput, Backt
     go(e, rows, Product::Delivery, "1", EntryVerdict::Approve, s)
 }
 
+/// Records how many closed trades the engine showed it at each decision bar.
+struct Recorder(Vec<usize>, Option<chrono::DateTime<chrono_tz::Tz>>);
+
+impl EntryPolicy for Recorder {
+    fn observe(&mut self, closed: &[Trade]) {
+        self.0.push(closed.len());
+        self.1 = closed.iter().map(|t| t.exit.bar_time).max();
+    }
+    fn decide(&mut self, s: &Signal, _: &Sized, _: Decimal) -> EntryVerdict {
+        // No look-ahead: every trade shown at this decision closed at or before its bar close.
+        assert!(self.1.is_none_or(|t| t <= s.signal_bar_time));
+        EntryVerdict::Approve
+    }
+}
+
+#[test]
+fn the_policy_observes_closed_trades_at_every_decision_bar() {
+    let e = env();
+    let rows = [FLAT, FLAT, FLAT, FLAT, FLAT, FLAT];
+    let bars = bars_from(&e.cal, e.start, &rows);
+    let spec = RunSpec {
+        bars: &bars,
+        instrument: &e.inst,
+        calendar: &e.cal,
+        config: &e.cfg,
+        cost: CostModel::new(&e.charges, HistoryPolicy::Strict, ChargeExchange::Nse),
+        limits: &e.limits,
+        product: Product::Delivery,
+        capital: e.capital,
+        slippage_multiplier: d("1"),
+    };
+    let reg = regimes(&bars);
+    let mut rec = Recorder(Vec::new(), None);
+    let out = run(&spec, &mut fake(1, None), &reg, &mut rec).unwrap();
+    assert_ne!(rec.0.len(), 0);
+    assert!(rec.0.windows(2).all(|w| w[0] <= w[1]));
+    assert_eq!(rec.0.first(), Some(&0));
+    assert_eq!(out.trades.len(), 1);
+    assert!(rec.0.iter().all(|n| *n <= 1));
+}
+
 #[test]
 fn the_end_of_data_exit_is_in_the_final_equity_point() {
     let e = env();
