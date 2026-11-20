@@ -29,11 +29,11 @@ pub(super) struct Open {
     opened_at: chrono::DateTime<chrono_tz::Tz>,
 }
 
-pub(super) fn invalid(why: impl Into<String>) -> BacktestError {
+pub(crate) fn invalid(why: impl Into<String>) -> BacktestError {
     BacktestError::Invalid(why.into())
 }
 
-pub(super) fn ov(what: &'static str) -> BacktestError {
+pub(crate) fn ov(what: &'static str) -> BacktestError {
     BacktestError::Overflow(what)
 }
 
@@ -58,7 +58,7 @@ fn book(
     ledger.apply(id, sim.into_fill(leg, bar.close_time()), stop)
 }
 
-pub(super) fn snap(tick: Decimal, v: Decimal) -> Result<Price, BacktestError> {
+pub(crate) fn snap(tick: Decimal, v: Decimal) -> Result<Price, BacktestError> {
     Price::snap_to_tick(v, tick).map_err(|e| invalid(e.to_string()))
 }
 
@@ -194,6 +194,7 @@ impl Engine<'_, '_> {
         policy: &mut dyn EntryPolicy,
     ) -> Result<(), BacktestError> {
         let spec = self.spec;
+        policy.observe(self.ledger.trades());
         let view = DataView::ending_at(spec.bars, i).ok_or_else(|| invalid("view out of range"))?;
         let portfolio = PortfolioView {
             positions: self

@@ -27,7 +27,9 @@ use crate::types::{BacktestError, EquityPoint, Product, SlippageClass, Trade};
 mod sizing;
 mod state;
 
-use state::{Engine, invalid};
+pub(crate) use sizing::round_trip_cost;
+use state::Engine;
+pub(crate) use state::{invalid, snap};
 
 /// A verdict on one sized entry. There is no default implementation outside tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +40,11 @@ pub enum EntryVerdict {
 
 /// Decides whether a sized signal may enter (slice 4c adapts the `DecisionGate` to this).
 pub trait EntryPolicy {
+    /// Called at every decision bar before any entry is judged, with every trade closed so far
+    /// (oldest first). A stateful policy (the gate adapter) derives its day and week figures from
+    /// it; the default ignores it.
+    fn observe(&mut self, _closed: &[Trade]) {}
+
     fn decide(&mut self, signal: &Signal, sized: &Sized, equity: Decimal) -> EntryVerdict;
 }
 
@@ -104,6 +111,16 @@ fn validate(spec: &RunSpec<'_>) -> Result<(), BacktestError> {
     Ok(())
 }
 
+/// The fill parameters of a run; the gate adapter prices its cost estimate with the same ones.
+pub(crate) fn fill_params<'a>(spec: &'a RunSpec<'_>) -> FillParams<'a> {
+    FillParams {
+        tick: spec.instrument.tick_size,
+        slippage: spec.config.slippage.for_class(SlippageClass::Equity),
+        fills: &spec.config.fills,
+        slippage_multiplier: spec.slippage_multiplier,
+    }
+}
+
 /// Run the loop. Single instrument: the whole `capital` is available to it, so pooling several
 /// runs overstates capacity and must not be reported as a portfolio result. Intraday needs daily
 /// bars (square-off at the bar close is a daily-bar approximation).
@@ -123,12 +140,7 @@ pub fn run(
         u32::try_from(spec.instrument.instrument_token).map_err(|_| invalid("token too large"))?;
     let mut e = Engine {
         spec,
-        fp: FillParams {
-            tick: spec.instrument.tick_size,
-            slippage: spec.config.slippage.for_class(SlippageClass::Equity),
-            fills: &spec.config.fills,
-            slippage_multiplier: spec.slippage_multiplier,
-        },
+        fp: fill_params(spec),
         ledger: Ledger::new(spec.cost, spec.capital),
         token,
         sid: strategy.meta().id,
