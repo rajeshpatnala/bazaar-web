@@ -234,6 +234,9 @@ name = "bazaar-backtest"
 version = "0.1.0"
 dependencies = [
  "bazaar-core",
+ "bazaar-regime",
+ "bazaar-risk",
+ "bazaar-strategies",
  "chrono",
  "chrono-tz",
  "proptest",

@@ -124,7 +124,7 @@ fn level(x: Decimal, tick: Decimal, up: bool) -> Result<Price, BacktestError> {
 }
 
 /// Slippage in rupees per unit: `max(price x pct / 100, min_ticks x tick)`, rounded up to tick.
-fn slip_amount(
+pub(crate) fn slip_amount(
     reference: Decimal,
     pct: Decimal,
     min_ticks: u32,
