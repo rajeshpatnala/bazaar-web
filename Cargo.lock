@@ -400,6 +400,7 @@ dependencies = [
  "sha2",
  "thiserror",
  "toml",
+ "tracing",
 ]
 
 [[package]]

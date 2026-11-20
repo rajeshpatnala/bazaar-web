@@ -9,7 +9,7 @@
 //!   above the high of bar t-1 (the turn). Entry zone: from that close up to
 //!   `entry_zone_atr_frac` x ATR above it.
 //! * **Stop:** lowest low over the lookback window and t, minus `stop_buffer_atr` x ATR; the signal
-//!   is dropped when `entry_high - stop` exceeds `max_stop_atr` x ATR. The stop only moves up.
+//!   is dropped when `entry_high - stop` exceeds `max_stop_atr` x ATR. The stop is fixed at entry: v1 has no trailing, so `manage` never tightens it.
 //! * **Exit:** reference target `entry_low + target_r x risk`; leave at the next open when the close
 //!   is under the longer average; time stop after `max_hold_bars`.
 //! * **Best regime:** stock Up with Low or Normal volatility, market Up or Range (declared in
@@ -19,6 +19,10 @@
 //!   gap down through the stop fills at the open, worse than planned; overlaps with
 //!   `donchian_breakout` in strong trends (same trade, counted once); a touch of the short average
 //!   is arbitrary and shallow dips never trigger; the time stop can cut slow winners.
+//!
+//! Performance note (for F9): every call recomputes EMA and ATR over the whole view, O(n) per bar; a
+//! streaming state inside the strategy is the follow-up if backtests get slow. Callers should supply
+//! well over `min_history_bars` so the long average is more than its seed.
 //!
 //! Every default is UNVERIFIED (convention or proposal) and is never tuned on strategy P&L. A signal
 //! is not advice. Only closed bars are used: the view ends at the decision bar and the stop, entry
@@ -47,6 +51,8 @@ use crate::strategy::{Strategy, StrategyMeta};
 
 /// Strategy id, the `[strategy.<id>]` key in `config/strategies.toml`.
 pub const ID: &str = "trend_pullback";
+/// Label of the fact that carries the why-text (a local const until `common.rs` owns it).
+pub const WHY_TEXT_LABEL: &str = "why_text";
 /// Bumped when the rules change (provenance).
 pub const VERSION: u32 = 1;
 
@@ -131,6 +137,10 @@ impl ParamSet for Params {
         if !f(self.min_rr, 1.5, 2.0) {
             return Err(bad(id, "min_rr", "must be 1.5..=2.0"));
         }
+        // Tick rounding only ever enlarges the risk, so a target at or under the floor never fires.
+        if self.target_r <= self.min_rr {
+            return Err(bad(id, "target_r", "must be above min_rr"));
+        }
         // Indicator periods are bounded above, so these cannot fail once the ranges hold; still
         // checked so a future range change cannot leave a strategy that never fires.
         Ema::new(self.ema_pullback).map_err(|_| bad(id, "ema_pullback", "bad period"))?;
@@ -141,14 +151,13 @@ impl ParamSet for Params {
 }
 
 impl Params {
-    /// Bars needed before every input exists: the long average at t, the short average at the
-    /// oldest lookback bar, ATR, and bar t-1 for the turn.
+    /// Bars needed before every input exists: the long average at t (N bars), ATR (N+1 bars) and
+    /// the short average at the oldest lookback bar. Bar t-1 lies inside all of those windows.
     #[must_use]
     pub fn min_history_bars(&self) -> usize {
         self.ema_trend
             .max(self.atr_period + 1)
             .max(self.ema_pullback + self.pullback_lookback)
-            + 1
     }
 }
 
@@ -157,6 +166,15 @@ impl Params {
 enum Skip {
     Guard(Reject),
     NoSetup(&'static str),
+}
+
+impl std::fmt::Display for Skip {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Guard(r) => write!(f, "{r}"),
+            Self::NoSetup(s) => f.write_str(s),
+        }
+    }
 }
 
 impl From<Reject> for Skip {
@@ -183,6 +201,15 @@ fn ema_series(bars: &[Candle], period: usize) -> Result<Vec<Option<f64>>, Reject
     Ok(batch(ema, closes))
 }
 
+/// The newest Wilder ATR, or the reason it does not exist yet.
+fn last_atr(ohlcv: &[Ohlcv], period: usize) -> Result<f64, Reject> {
+    let atr = Atr::new(period).map_err(|_| Reject::Indicator("atr"))?;
+    need(
+        "atr",
+        batch(atr, ohlcv.iter().copied()).last().copied().flatten(),
+    )
+}
+
 impl TrendPullback {
     /// Build from checked params and the provenance hash of the config table.
     #[must_use]
@@ -200,27 +227,19 @@ impl TrendPullback {
         let bars = view.bars();
         let t = bars.len().saturating_sub(1);
         let bar = |i: usize| bars.get(i).ok_or(Reject::Indicator("bar"));
-        let (now, prev) = (bar(t)?, bar(t.saturating_sub(1))?);
-
+        let before = t.checked_sub(1).ok_or(Reject::Indicator("bar"))?; // guards ensure t >= 1
+        let (now, prev) = (bar(t)?, bar(before)?);
         let ohlcv = bars
             .iter()
             .map(Ohlcv::try_from)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| Reject::NotFinite)?;
-        let atr_n = Atr::new(p.atr_period).map_err(|_| Reject::Indicator("atr"))?;
-        let atr = need(
-            "atr",
-            batch(atr_n, ohlcv.iter().copied())
-                .last()
-                .copied()
-                .flatten(),
-        )?;
+        let atr = last_atr(&ohlcv, p.atr_period)?;
         let short = ema_series(bars, p.ema_pullback)?;
         let long = ema_series(bars, p.ema_trend)?;
         let at = |s: &[Option<f64>], i: usize| s.get(i).copied().flatten();
         let ema_short_t = need("ema_pullback", at(&short, t))?;
         let ema_long_t = need("ema_trend", at(&long, t))?;
-
         let close = now.close();
         let close_f = need("close", Ohlcv::try_from(now).ok().map(|o| o.c))?;
         // The turn: back above the short and long averages and above yesterday's high.
@@ -241,7 +260,6 @@ impl TrendPullback {
                 "no close under the short average in the window",
             ));
         }
-
         let window = bars.get(first..=t).ok_or(Reject::Indicator("window"))?;
         let pullback_low = window
             .iter()
@@ -371,7 +389,7 @@ fn facts(d: &Detail<'_>) -> Vec<Fact> {
     let p = d.params;
     let mut out = vec![
         Fact::new(
-            "why_text",
+            WHY_TEXT_LABEL,
             d.why.clone(),
             "Plain-English reason, risk first.",
         ),
@@ -443,12 +461,9 @@ impl Strategy for TrendPullback {
     fn on_bar(&mut self, view: &DataView<'_>, ctx: &StrategyContext<'_>) -> Option<Signal> {
         match self.evaluate(view, ctx) {
             Ok(s) => Some(s),
-            Err(Skip::Guard(r)) => {
-                tracing_debug(&format!("{ID}: no signal: {r}"));
-                None
-            }
-            Err(Skip::NoSetup(why)) => {
-                tracing_debug(&format!("{ID}: no signal: {why}"));
+            Err(skip) => {
+                // Lazy `%` formatting: nothing is allocated unless debug logging is on.
+                tracing::debug!(strategy = ID, reason = %skip, "no signal");
                 None
             }
         }
@@ -470,11 +485,19 @@ impl Strategy for TrendPullback {
             )));
         }
         let (Some(last), Ok(series)) = (view.last(), ema_series(view.bars(), p.ema_trend)) else {
+            tracing::debug!(
+                strategy = ID,
+                "trend exit not evaluated: bars unusable, holding"
+            );
             return Ok(ExitAction::Hold);
         };
         let (Some(Some(avg)), Some(close)) =
             (series.last(), Ohlcv::try_from(last).ok().map(|o| o.c))
         else {
+            tracing::debug!(
+                strategy = ID,
+                "trend exit not evaluated: average not ready, holding"
+            );
             return Ok(ExitAction::Hold);
         };
         if close < *avg {
@@ -487,18 +510,13 @@ impl Strategy for TrendPullback {
     }
 }
 
-/// Debug-level reason for a skipped bar. The crate has no logging dependency, so this is a no-op
-/// hook point kept in one place; tests assert the reason through [`TrendPullback::why_none`].
-fn tracing_debug(_reason: &str) {}
-
 impl TrendPullback {
     /// The reason a bar gave no signal, for tests and diagnostics; `None` when it fires.
     #[must_use]
     pub fn why_none(&self, view: &DataView<'_>, ctx: &StrategyContext<'_>) -> Option<String> {
         match self.evaluate(view, ctx) {
             Ok(_) => None,
-            Err(Skip::Guard(r)) => Some(r.to_string()),
-            Err(Skip::NoSetup(s)) => Some(s.to_owned()),
+            Err(skip) => Some(skip.to_string()),
         }
     }
 }
@@ -619,7 +637,7 @@ mod tests {
         assert_eq!(fact("pullback_low"), "109.00");
         assert_eq!(fact("atr"), "2.65");
         assert!(
-            fact("why_text").starts_with("Risk first: you could lose about Rs 7.05 per share.")
+            fact(WHY_TEXT_LABEL).starts_with("Risk first: you could lose about Rs 7.05 per share.")
         );
     }
 
@@ -687,11 +705,23 @@ mod tests {
     fn lookahead_later_bars_change_nothing_and_a_future_regime_is_refused() {
         let full = bars_dec(&load("entry"), true);
         let mut s = strat();
-        for end in [K - 1, K, K + 3] {
+        let pos = OpenPosition {
+            instrument_token: 7,
+            entry_price: d("114.00"),
+            stop: d("107.65"),
+            opened_at: session_time(K),
+            bars_held: 3,
+        };
+        for end in 0..full.len() {
             let cut = &full[..=end];
-            let a = at(&mut s, cut, end, &world(end));
-            let b = at(&mut s, &full, end, &world(end));
-            assert_eq!(a, b, "bar {end}");
+            let w = world(end);
+            let on_cut = at(&mut s, cut, end, &w);
+            let on_full = at(&mut s, &full, end, &w);
+            assert_eq!(on_cut, on_full, "bar {end}");
+            let run = |s: &mut TrendPullback, bars: &[Candle]| {
+                s.manage(&DataView::ending_at(bars, end).unwrap(), &w.ctx(), &pos)
+            };
+            assert_eq!(run(&mut s, cut), run(&mut s, &full), "manage bar {end}");
         }
         // Regime as of a later session than the decision bar: refused, not trusted.
         let future = world(K + 2);
@@ -764,6 +794,7 @@ mod tests {
             ("pullback_lookback", "2"),
             ("pullback_lookback", "9"),
             ("target_r", "1.0"),
+            ("target_r", "1.5"),
             ("min_rr", "2.5"),
             ("max_stop_atr", "4.0"),
             ("ema_trend", "20"),
@@ -802,6 +833,53 @@ mod tests {
         };
         let built = TrendPullbackFactory.build(&input).unwrap();
         assert_eq!(built.meta().id, ID);
-        assert_eq!(built.meta().min_history_bars, 51);
+        assert_eq!(built.meta().min_history_bars, 50);
+    }
+
+    #[test]
+    fn reward_to_risk_below_the_floor_and_missing_indicators_give_none() {
+        let b = bars_dec(&load("entry"), true);
+        // rr at bar K is 1.97; a floor of 2.0 rejects it (built directly, validate() would refuse
+        // target_r 2.0 <= min_rr 2.0).
+        let p = Params {
+            min_rr: 2.0,
+            ..Params::default()
+        };
+        let mut s = TrendPullback::new(meta(p.min_history_bars()), p, "h".into());
+        assert!(at(&mut s, &b, K, &world(K)).is_none());
+        assert!(why(&s, &b, K, &world(K)).contains("reward:risk"));
+        // ATR(14) needs 15 bars: with 10 allowed by the meta it is None.
+        let s = TrendPullback::new(meta(10), Params::default(), "h".into());
+        assert!(why(&s, &b, 9, &world(9)).contains("atr"));
+    }
+
+    #[test]
+    fn shipped_config_regime_cells_gate_the_real_strategy() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/strategies.toml");
+        let cfg: StrategiesConfig =
+            toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let sc = StrategyConfig::from_table(ID, cfg.strategy.get(ID).unwrap()).unwrap();
+        let input = BuildInput {
+            params: &sc.params,
+            params_hash: "h".into(),
+            config: &sc,
+        };
+        let b = bars_dec(&load("entry"), true);
+        let fires = |w: &World| {
+            let mut s = TrendPullbackFactory.build(&input).unwrap();
+            s.on_bar(&DataView::ending_at(&b, K).unwrap(), &w.ctx())
+                .is_some()
+        };
+        let mk = |m, st, sv| World::new(m, V::Normal, st, sv).at(K);
+        assert!(fires(&mk(T::Up, T::Up, V::Normal)));
+        assert!(fires(&mk(T::Range, T::Up, V::Low)));
+        assert!(!fires(&mk(T::Up, T::Up, V::High)));
+        for st in [T::Range, T::Down, T::Mixed, T::Unknown] {
+            assert!(!fires(&mk(T::Up, st, V::Normal)), "{st:?}");
+        }
+        let mut stressed = mk(T::Up, T::Up, V::Normal);
+        stressed.market.breakdown = bazaar_regime::Tri::True;
+        assert!(!fires(&stressed));
     }
 }
