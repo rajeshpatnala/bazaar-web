@@ -54,7 +54,7 @@ Idea: in an established uptrend, a short dip toward the 20-day average is often 
 Regime fit: Works: stock Up x Low/Normal. Suppress: Up x High (dips are deeper, stops wide, size tiny), Range, Down, Mixed, Unknown, market Down or Breakdown.
 Entry (closed bar t): some close in t-`pullback_lookback`..t-1 was below EMA20 at its own bar; close_t > EMA20_t; close_t > high_{t-1}; close_t > EMA50_t.
 Stop: (lowest low over t-`pullback_lookback`..t) - `stop_buffer_atr` x ATR; drop the signal if entry_high - stop > `max_stop_atr` x ATR.
-Targets/exit: target1 = entry_low + `target_r` x risk (limit); exit at the next open if close < EMA50; time stop `max_hold_bars`. Stop only moves up.
+Targets/exit: target1 = entry_low + `target_r` x risk (limit); exit at the next open if close < EMA50; time stop `max_hold_bars`. v1: fixed stop (no trailing); trailing stops belong to donchian_breakout.
 Sizing note: typical stop 1.5 to 2.5 ATR; price Rs 500, ATR Rs 10 gives about Rs 15-25 risk per share: 40-60 shares, about Rs 20,000-30,000, so G14 (Rs 25,000) and G16 will often shrink the size. Say so in the panel.
 | Param | Default | Range | Meaning |
 |---|---|---|---|
