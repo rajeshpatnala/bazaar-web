@@ -12,7 +12,7 @@ use crate::types::{IntentId, OrderIntent};
 /// The constructor is `pub(crate)`: only the pipeline inside `execution` can mint one, so no
 /// caller can reach an `Executor` with a raw order.
 ///
-/// ```compile_fail
+/// ```compile_fail,E0624
 /// use bazaar_execution::executor::ApprovedOrder;
 /// fn forge(i: bazaar_execution::types::OrderIntent) -> ApprovedOrder { ApprovedOrder::new(i) }
 /// ```

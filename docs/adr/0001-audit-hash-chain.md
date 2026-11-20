@@ -25,6 +25,8 @@ callers pass `chain_hash` as a `ChainFn` to `AuditRepo::append`, and the store a
 the append transaction against the last row. A pinned-hash unit test guards the format.
 
 ## Limits
+The chain is unkeyed SHA-256: it is tamper-evident against accidents and partial edits, not
+tamper-proof. Anyone with write access to the database can recompute every hash.
 Rows alone detect altered, removed (middle) and reordered rows. Truncating the tail is not
 detectable from the rows; anchoring the latest hash outside the database is a later decision.
 The log has no UPDATE/DELETE path; SQLite triggers refuse both (store slice).

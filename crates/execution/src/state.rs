@@ -50,6 +50,27 @@ pub struct IllegalTransition {
     pub event: ExecEvent,
 }
 
+impl ExecEvent {
+    /// Stable label used in storage (`OrderRepo::advance` event kind).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GatePassed => "gate_passed",
+            Self::GateBlocked => "gate_blocked",
+            Self::Approve => "approve",
+            Self::Decline => "decline",
+            Self::Expire => "expire",
+            Self::Send => "send",
+            Self::GuardBlocked => "guard_blocked",
+            Self::PartialFill => "partial_fill",
+            Self::Fill => "fill",
+            Self::Reject => "reject",
+            Self::Cancel => "cancel",
+            Self::Lost => "lost",
+        }
+    }
+}
+
 impl OrderState {
     /// Terminal states never change.
     #[must_use]
@@ -202,6 +223,14 @@ mod tests {
             OrderState::Unknown.apply(ExecEvent::Reject),
             Ok(OrderState::Rejected)
         );
+    }
+
+    #[test]
+    fn event_labels_are_unique() {
+        let mut v: Vec<_> = EVENTS.iter().map(|e| e.as_str()).collect();
+        v.sort_unstable();
+        v.dedup();
+        assert_eq!(v.len(), EVENTS.len());
     }
 
     #[test]

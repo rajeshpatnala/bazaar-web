@@ -60,12 +60,15 @@ latest_expiry_day_no_new_after_ist = "13:30"   # G07
 min_confirm_delay_secs = 10             # override cooling delay may not go below this
 max_size_factor = "0.5"                 # an overridden trade may not be sized above this
 min_oos_trades = 30                     # G01 floor, equals the default; no loosening without the owner
+max_approval_ttl_secs = 3600               # F10 ceiling; unverified, owner to confirm (SEC-96-1); raise only with an ADR
+max_quote_drift_bps = 500               # F10 ceiling; unverified, owner to confirm; raise only with an ADR
 
 [execution]
 paper_starting_cash_inr = "100000"
 approval_ttl_secs = 300                 # F10; unverified, owner to confirm (source and verified_on empty)
 max_quote_drift_bps = 50                # F10; unverified, owner to confirm
-max_orders_per_second = 1               # F10; unverified, owner to confirm; not above the per-minute ceiling
+max_orders_per_second = 1               # F10; unverified, owner to confirm; [limits] per-minute and per-day caps always also apply
+kill_allow_reduce_only = true           # F10; unverified, owner to confirm
 kill_switch_release_phrase = "RELEASE KILL SWITCH"   # F10; unverified, owner to confirm the wording
 breaker_engages_kill_switch = false     # F10; unverified, default off
 paper_max_participation = "0.1"         # F10; unverified, owner to confirm

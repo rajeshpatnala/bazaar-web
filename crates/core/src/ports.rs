@@ -176,16 +176,47 @@ pub trait OrderRepo: Send + Sync {
     ) -> impl Future<Output = Result<u32, RepoError>> + Send;
 }
 
+/// A user's decision on an approval request: a closed set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalDecision {
+    Approve,
+    Decline,
+}
+
+impl ApprovalDecision {
+    /// Stable label stored in the database.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Approve => "approve",
+            Self::Decline => "decline",
+        }
+    }
+
+    /// Parse a stored label.
+    ///
+    /// # Errors
+    /// `RepoError::Corrupt` for any value outside the closed set; stores use this on read.
+    pub fn parse(s: &str) -> Result<Self, RepoError> {
+        match s {
+            "approve" => Ok(Self::Approve),
+            "decline" => Ok(Self::Decline),
+            _ => Err(RepoError::Corrupt),
+        }
+    }
+}
+
 /// Approval decisions, one per intent (first wins).
 pub trait ApprovalRepo: Send + Sync {
     /// Record `decision` for the intent. Returns the decision that stands: `decision` when this
-    /// call was first, the earlier one otherwise.
+    /// call was first, the earlier one otherwise. A stored value outside the closed set is
+    /// `RepoError::Corrupt`.
     fn decide(
         &self,
         intent_id: u128,
-        decision: String,
+        decision: ApprovalDecision,
         at_ist_rfc3339: String,
-    ) -> impl Future<Output = Result<String, RepoError>> + Send;
+    ) -> impl Future<Output = Result<ApprovalDecision, RepoError>> + Send;
 }
 
 /// Persistent kill switch. A read error must be treated as engaged by the caller.
@@ -249,6 +280,11 @@ pub trait MarginSource: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuoteSnapshot {
     pub last: rust_decimal::Decimal,
+    /// Circuit limits, when known; paper never fills at a circuit.
+    pub lower_circuit: Option<rust_decimal::Decimal>,
+    pub upper_circuit: Option<rust_decimal::Decimal>,
+    /// Volume of the current bar, for `paper_max_participation`.
+    pub bar_volume: Option<u64>,
     pub at_ist_rfc3339: String,
 }
 
@@ -415,6 +451,18 @@ mod tests {
         assert!(block(repo.get(&Exchange::Nfo, "ABC1")).unwrap().is_some());
         assert!(block(repo.get(&Exchange::Nse, "ABC1")).unwrap().is_none());
         assert_eq!(block(repo.ping()), Ok(()));
+    }
+
+    #[test]
+    fn approval_decision_round_trips_and_rejects_unknown() {
+        for d in [ApprovalDecision::Approve, ApprovalDecision::Decline] {
+            assert_eq!(ApprovalDecision::parse(d.as_str()), Ok(d));
+        }
+        assert_eq!(
+            ApprovalDecision::parse("approve_all"),
+            Err(RepoError::Corrupt)
+        );
+        assert_eq!(ApprovalDecision::parse(""), Err(RepoError::Corrupt));
     }
 
     #[test]
