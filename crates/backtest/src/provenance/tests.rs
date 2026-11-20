@@ -78,6 +78,7 @@ fn inputs<'a>(
         parameter_sets: sets,
         trials: t,
         kind: RunKind::Plain,
+        charges_used: None,
     }
 }
 
@@ -110,8 +111,21 @@ fn walk_forward_gate_evidence_comes_from_the_result_and_blank_text_is_refused() 
     inp.kind = RunKind::of(&res);
     let prov = build(&inp).unwrap();
     assert_eq!(prov.gate_evidence.as_deref(), Some(res.gate_evidence));
-    assert_ne!(res.gate_evidence, "");
-    inp.kind = RunKind::WalkForward("  ");
+    assert_ne!(res.gate_evidence.trim(), "");
+}
+
+#[test]
+fn the_used_charges_range_replaces_the_file_range_and_must_be_ordered() {
+    let charges = charges();
+    let trials = trials();
+    let mut inp = inputs(&[], &charges, &[], &[], &trials);
+    inp.charges_used = Some((day(3, 1), day(4, 1)));
+    let p = build(&inp).unwrap();
+    assert_eq!(
+        (p.charges_verified_from, p.charges_verified_to),
+        (Some(day(3, 1)), Some(day(4, 1)))
+    );
+    inp.charges_used = Some((day(4, 1), day(3, 1)));
     assert!(matches!(build(&inp), Err(BacktestError::Invalid(_))));
 }
 

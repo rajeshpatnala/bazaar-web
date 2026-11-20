@@ -667,3 +667,38 @@ fn leg_is_approximate_counts_only_legs_off_their_own_rate_set() {
     assert!(!latest.leg_is_approximate(&mk(date(2027, 2, 1))).unwrap());
     assert!(!nse(&cfg).leg_is_approximate(&mk(day0())).unwrap());
 }
+
+#[test]
+fn used_verified_range_follows_the_sets_the_legs_actually_used() {
+    let cfg = two_date_cfg();
+    let m = nse(&cfg);
+    let buy = |on| {
+        leg(
+            LegInstrument::Cash,
+            Product::Intraday,
+            LegSide::Buy,
+            "500",
+            1,
+            on,
+        )
+    };
+    assert_eq!(m.used_verified_range([]).unwrap(), None);
+    // Rate set verified 2026-01-01, GST table 2026-06-01.
+    let early = buy(day0());
+    assert_eq!(
+        m.used_verified_range([&early]).unwrap(),
+        Some((date(2026, 1, 1), date(2026, 6, 1)))
+    );
+    // The 2027 set (verified 2027-01-01) widens the upper end only when a leg used it.
+    let late = buy(date(2027, 2, 1));
+    assert_eq!(
+        m.used_verified_range([&early, &late]).unwrap(),
+        Some((date(2026, 1, 1), date(2027, 1, 1)))
+    );
+    // A leg before the earliest set is an error, not a silently skipped leg.
+    let before = buy(date(2025, 12, 31));
+    assert!(matches!(
+        m.used_verified_range([&before]),
+        Err(BacktestError::NoRateSet(_))
+    ));
+}

@@ -86,6 +86,43 @@ impl<'a> CostModel<'a> {
             .map_or(true, |s| s.effective_from != latest.effective_from))
     }
 
+    /// Earliest and latest `verified_on` over what `legs` were actually charged with: the rate set
+    /// each leg used (per the history policy), the GST table, and the DP table for delivery sells
+    /// (DP is levied once per scrip-day, so this may include a DP date no leg paid: the range can
+    /// only be wider than exact, never narrower). `None` for no legs.
+    ///
+    /// # Errors
+    /// As [`Self::charges_excl_dp`] for a missing rate set, GST table or DP table.
+    pub fn used_verified_range<'l>(
+        &self,
+        legs: impl IntoIterator<Item = &'l Leg>,
+    ) -> Result<Option<(NaiveDate, NaiveDate)>, BacktestError> {
+        let mut range: Option<(NaiveDate, NaiveDate)> = None;
+        let mut note = |d: NaiveDate| {
+            range = Some(range.map_or((d, d), |(lo, hi)| (lo.min(d), hi.max(d))));
+        };
+        for leg in legs {
+            note(self.rate_set(leg)?.verified_on);
+            note(
+                self.cfg
+                    .gst
+                    .as_ref()
+                    .ok_or_else(|| BacktestError::Invalid("charges.toml has no [gst]".into()))?
+                    .verified_on,
+            );
+            if leg.product == Product::Delivery && leg.side == LegSide::Sell {
+                note(
+                    self.cfg
+                        .dp
+                        .as_ref()
+                        .ok_or_else(|| BacktestError::Invalid("charges.toml has no [dp]".into()))?
+                        .verified_on,
+                );
+            }
+        }
+        Ok(range)
+    }
+
     /// Charges on one leg with the DEPOSITORY CHARGE OMITTED (`dp` is always 0): a delivery sell
     /// booked through this is Rs 15.34-class too cheap. The engine must call
     /// [`Self::charges_with_dp`]; this stateless form is for tests and per-line checks.
