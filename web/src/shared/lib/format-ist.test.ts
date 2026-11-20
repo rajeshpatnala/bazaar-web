@@ -17,6 +17,9 @@ describe("formatIst", () => {
 });
 
 describe("formatIstIso", () => {
+  it("runs under a non-IST zone (vitest config forces TZ)", () => {
+    expect(new Date(0).getTimezoneOffset()).not.toBe(-330);
+  });
   it("converts any offset to IST", () => {
     expect(formatIstIso("2026-11-19T10:00:00+05:30")).toBe("19 Nov, 10:00 IST");
     expect(formatIstIso("2026-11-19T04:30:00Z")).toBe("19 Nov, 10:00 IST");

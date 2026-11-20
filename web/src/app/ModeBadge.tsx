@@ -7,6 +7,14 @@ type Mode = components["schemas"]["ModeDto"];
 
 const LABEL: Record<Mode, string> = { paper: "PAPER", semi_auto: "SEMI-AUTO", auto: "AUTO" };
 
+function serverTime(iso: string): string {
+  try {
+    return formatIstIso(iso);
+  } catch {
+    return "time unavailable";
+  }
+}
+
 /** Mode badge, a read-only live note and the server time. Nothing here can change the mode. */
 export function ModeBadge() {
   const { data } = useQuery(statusQuery);
@@ -18,7 +26,7 @@ export function ModeBadge() {
       </span>
       <span className="lbl">Live: {data.live_enabled ? "on" : "off"} (set on the server)</span>
       <time className="lbl" dateTime={data.server_time}>
-        {formatIstIso(data.server_time)}
+        {serverTime(data.server_time)}
       </time>
     </div>
   );

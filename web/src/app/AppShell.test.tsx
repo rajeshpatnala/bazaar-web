@@ -67,4 +67,20 @@ describe("AppShell", () => {
     renderApp();
     expect(await screen.findByText("Live: on (set on the server)")).toBeVisible();
   });
+
+  it("survives a bad server_time and keeps the disclaimer", async () => {
+    server.use(
+      http.get("/api/v1/status", () =>
+        HttpResponse.json({
+          server_time: "garbage",
+          version: "0.1.0",
+          mode: "paper",
+          live_enabled: false,
+        }),
+      ),
+    );
+    renderApp();
+    expect(await screen.findByText("time unavailable")).toBeVisible();
+    expect(screen.getByRole("contentinfo")).toHaveTextContent(DISCLAIMER);
+  });
 });
