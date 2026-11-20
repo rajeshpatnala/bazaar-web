@@ -46,7 +46,7 @@ Sizing note (illustration, not data): price Rs 500, ATR Rs 10: stop about Rs 27 
 | `min_rr` | 1.5 | 1.5-2.0 | Reference reward:risk floor |
 Weaknesses: many small losses and false breakouts in ranges (regime filter reduces, does not remove); gap-up entries fill above the zone and the setup is then "missed";
 gives back open profit before the exit channel triggers; results-day gaps are blind spots; crowded breakouts reverse in market stress.
-Why text (fields in braces): "Risk first: you could lose about {risk_rupees} on this trade. Setup: {symbol} closed above its {entry_n}-day high on {volume_ratio}x normal volume. Market today: {regime_label}; this setup likes uptrends. Proven wrong if: price closes below {stop}. Exit plan: we leave if it closes below its {exit_n}-day low or after {max_hold_bars} days. Watch out: breakouts fail often; many small losses are normal for this idea."
+Why text (fields in braces): "Risk first: you could lose about {risk_rupees} on this trade. Setup: {symbol} closed above its {entry_n}-day high on {volume_ratio}x normal volume. Market today: {regime_label}; this setup likes uptrends. Proven wrong if: price falls to or below {stop}. Exit plan: we leave if it closes below its {exit_n}-day low or after {max_hold_bars} days. Watch out: breakouts fail often; many small losses are normal for this idea."
 Facts: `channel_high`, `breakout_close`, `volume_ratio`, `atr`, `stop_basis`, `exit_rule`, `time_stop_bars`, stock and market regime labels.
 
 ## 4. `trend_pullback` (swing, long)
@@ -66,7 +66,7 @@ Sizing note: typical stop 1.5 to 2.5 ATR; price Rs 500, ATR Rs 10 gives about Rs
 | `min_rr` | 1.5 | 1.5-2.0 | Reward:risk floor |
 Weaknesses: a dip can be the start of a trend change (the stop, not hope, handles it); gap-downs through the stop fill at the open, worse than planned; overlaps with `donchian_breakout` in strong trends (same trade, counted once);
 EMA20 touch is arbitrary and shallow dips never trigger; 15-day time stop can cut slow winners.
-Why text: "Risk first: you could lose about {risk_rupees}. Setup: {symbol} is in an uptrend and dipped for {days} days, then closed back above its 20-day average. Why now: today's close is above yesterday's high. Market today: {regime_label}. Proven wrong if: price closes below {stop}. Target: {target1} (about {rr} times the risk), or we leave if it falls under its 50-day average."
+Why text: "Risk first: you could lose about {risk_rupees}. Setup: {symbol} is in an uptrend and dipped for {days} days, then closed back above its 20-day average. Why now: today's close is above yesterday's high. Market today: {regime_label}. Proven wrong if: price falls to or below {stop}. Target: {target1} (about {rr} times the risk), or we leave if it falls under its 50-day average."
 Facts: `ema20`, `pullback_low`, `days_in_pullback`, `atr`, `stop_basis`, `target_r`, `exit_rule`, regime labels.
 
 ## 5. `bollinger_reversion` (swing, long)
@@ -85,7 +85,7 @@ Sizing note: stop about 1 to 1.5 ATR; price Rs 500, ATR Rs 10: stop Rs 10-15 awa
 | `max_hold_bars` | 8 | 5-12 | Time stop |
 | `min_rr` | 1.2 | 1.2-2.0 | Reward:risk floor (low by design; mean reversion wins small; costs bite hardest here) |
 Weaknesses: falling knives when a range breaks (gap down through the stop); bands widen in a real trend so "cheap" keeps getting cheaper; targets are small so costs and slippage eat a large share of the edge; few signals if Range is rare (low evidence for a long time); results/news gaps.
-Why text: "Risk first: you could lose about {risk_rupees}. Setup: {symbol} has been moving sideways, fell below its usual range yesterday and closed back inside today. Why now: prices like this have tended to drift back to the average ({target1}). Market today: {regime_label}; this setup works in sideways markets and is skipped in downtrends. Proven wrong if: price falls below {stop}. Watch out: if the stock starts a real downtrend this idea loses; we leave if it does."
+Why text: "Risk first: you could lose about {risk_rupees}. Setup: {symbol} has been moving sideways, fell below its usual range yesterday and closed back inside today. Why now: prices like this have tended to drift back to the average ({target1}). Market today: {regime_label}; this setup works in sideways markets and is skipped in downtrends. Proven wrong if: price falls to or below {stop}. Watch out: if the stock starts a real downtrend this idea loses; we leave if it does."
 Facts: `lower_band`, `prev_close`, `middle_band`, `atr`, `stop_basis`, `exit_rule`, `time_stop_bars`, regime labels.
 
 ## 6. Evidence bar and what F8 can and cannot prove

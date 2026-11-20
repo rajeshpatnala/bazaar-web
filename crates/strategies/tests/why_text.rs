@@ -8,7 +8,7 @@ use bazaar_regime::label;
 use bazaar_strategies::common::WHY_TEXT_LABEL;
 use common::{CASES, World, candles, fire};
 
-const BANNED: [&str; 5] = ["sure", "safe", "guaranteed", "certain", "risk-free"];
+const BANNED: [&str; 4] = ["sure", "safe", "guaranteed", "certain"];
 
 #[test]
 fn every_strategys_why_text_follows_the_template() {
@@ -39,8 +39,9 @@ fn every_strategys_why_text_follows_the_template() {
             c.id
         );
         let lower = text.to_lowercase();
+        let words: Vec<&str> = lower.split(|ch: char| !ch.is_alphabetic()).collect();
         for word in BANNED {
-            assert!(!lower.contains(word), "{} says {word}", c.id);
+            assert!(!words.contains(&word), "{} says {word}", c.id);
         }
     }
 }

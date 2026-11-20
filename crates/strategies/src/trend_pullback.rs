@@ -483,10 +483,8 @@ impl Strategy for TrendPullback {
             )));
         }
         // Unusable data is a fault the engine must see, never a silent hold (as donchian does).
-        let fault = |why: String| {
-            tracing::warn!(strategy = ID, %why, "cannot manage the open position");
-            ExitError::Context(why)
-        };
+        // The caller logs the returned error; nothing is logged here.
+        let fault = |why: String| ExitError::Context(why);
         if view.bars().iter().any(|c| !c.adjusted()) {
             return Err(fault("candles are not adjusted".into()));
         }
@@ -494,12 +492,13 @@ impl Strategy for TrendPullback {
         let last = view
             .last()
             .ok_or_else(|| fault("the view has no bars".into()))?;
-        let (Some(Some(avg)), Some(close)) =
-            (series.last(), Ohlcv::try_from(last).ok().map(|o| o.c))
-        else {
+        let close = Ohlcv::try_from(last)
+            .map_err(|_| fault("the last candle is not finite".into()))?
+            .c;
+        let Some(Some(avg)) = series.last() else {
             tracing::debug!(
                 strategy = ID,
-                "trend exit not evaluated: average not ready, holding"
+                "trend exit not evaluated: average still warming up, holding"
             );
             return Ok(ExitAction::Hold);
         };

@@ -27,7 +27,7 @@ Slices 1-4: `common.rs` helpers (guards, entry zone, tick rounding, stop and rr 
 Slice 5: `registry::{factories, build_all}` (the three factories, enabled ones built from `config/strategies.toml`, unknown names, unknown param keys and out-of-range values are load errors) and cross-strategy tests in `crates/strategies/tests/` (`lookahead`, `regime_fit`, `why_text`, `config`, shared `common/`) that build every strategy through the shipped config. Every strategy ships `enabled = false`. `trend_pullback::manage` returns `ExitError::Context` for unadjusted or non-finite candles, and holds only while the 50-day average is warming up.
 
 ## Deferred
-First evidence run (F9, owner-run F3 fetch); catalog rows and `bz-quant` skill-text amendments (manager); 
+First evidence run (F9, owner-run F3 fetch); catalog rows and `bz-quant` skill-text amendments (manager).
 
 Deferred from PR 77: QUAN-77-8 (stop fills are intraday with gap handling, `min(stop, open)`) to F9 and the tech lead; the `trend_pullback` `target_r` param style vs the `donchian_breakout` const is a tech-lead call (QUAN-77-5).
 
@@ -41,7 +41,9 @@ Deferred from PR 77: QUAN-77-8 (stop fills are intraday with gap handling, `min(
 - Limit: `StrategyConfig::from_table` does not range-check `params` (types live in slices 2-4); each strategy's shipped-config test must cover its disabled table.
 - Deferred (QUAN-74-10): F9 slice 0 adds `OpenPosition` fields (initial stop, quantity, strategy id) when it re-reads the types.
 
+## Deferred (later rounds)
 - Donchian stop fills: the F9 backtest must model intraday stop touches filled at min(stop, open), because a close-only model overstates the 10-day-low trail (QUAN-77-8).
 - Worst-case `reward_risk` convention in `check_rr` (QUAN-79-1) is a separate fix PR (F8-rr) before F11; reward_risk is currently measured from the bottom of the entry zone, so optimistic.
+- Worst-case reward_risk in check_rr (QUAN-79-1, QUAN-80-1) is a separate fix PR (F8-rr) before F11. No strategy may be enabled before it lands; the shipped config and registry doc say so.
 - trend_pullback and bollinger: EMA/ATR/SMA are recomputed over the whole view on every bar (O(n) per bar); F9 should add streaming state inside the strategy (CR-76-3, QUAN-76-7).
 - Optional QUAN-76-8: round the f64-converted level to 4 dp before tick snapping (direction is already conservative).

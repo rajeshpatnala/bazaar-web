@@ -45,44 +45,57 @@ fn an_unknown_strategy_name_is_a_load_error() {
 
 fn with_param(id: &str, key: &str, value: toml::Value) -> Result<usize, ParamError> {
     let mut cfg = enabled();
-    cfg.strategy
+    let params = cfg
+        .strategy
         .get_mut(id)
         .unwrap()
         .get_mut("params")
         .and_then(toml::Value::as_table_mut)
-        .unwrap()
-        .insert(key.into(), value);
+        .unwrap();
+    // A range test is only real if the shipped table already has the key.
+    assert_eq!(params.contains_key(key), key != "not_a_param", "{id} {key}");
+    params.insert(key.into(), value);
     build_all(&cfg).map(|v| v.len())
 }
 
 #[test]
 fn an_unknown_param_key_is_a_load_error_for_every_strategy() {
     for c in &CASES {
-        assert!(
-            with_param(c.id, "not_a_param", 1.into()).is_err(),
-            "{}",
-            c.id
-        );
+        let err = with_param(c.id, "not_a_param", 1.into()).unwrap_err();
+        assert!(matches!(err, ParamError::Parse { .. }), "{}: {err}", c.id);
     }
 }
 
 #[test]
 fn an_out_of_range_param_is_a_load_error_for_every_strategy() {
     for c in &CASES {
+        for v in [1, 10_000] {
+            let err = with_param(c.id, "atr_period", v.into()).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ParamError::Invalid {
+                        key: "atr_period",
+                        ..
+                    }
+                ),
+                "{} {v}: {err}",
+                c.id
+            );
+        }
+    }
+    // `max_stop_atr` exists in the trend_pullback and bollinger tables only.
+    for id in ["trend_pullback", "bollinger_reversion"] {
+        let err = with_param(id, "max_stop_atr", 0.0.into()).unwrap_err();
         assert!(
-            with_param(c.id, "atr_period", 1.into()).is_err(),
-            "{} atr_period 1",
-            c.id
-        );
-        assert!(
-            with_param(c.id, "atr_period", 10_000.into()).is_err(),
-            "{} atr_period huge",
-            c.id
-        );
-        assert!(
-            with_param(c.id, "max_stop_atr", 0.0.into()).is_err(),
-            "{} max_stop_atr 0",
-            c.id
+            matches!(
+                err,
+                ParamError::Invalid {
+                    key: "max_stop_atr",
+                    ..
+                }
+            ),
+            "{id}: {err}"
         );
     }
 }
