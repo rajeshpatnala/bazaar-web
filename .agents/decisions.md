@@ -12,3 +12,5 @@ One line per decision, newest first. Full records in `docs/adr/`.
 - 2026-11-20 owner: G16 max_orders_per_minute = 4 (was 10), max_notional_per_order_inr stays 25000 (paper only); still unverified, no broker/SEBI source (PR 69).
 
 - 2026-11-20 (manager, owner offline): F8 entry_zone_atr_frac = 0.25 accepted as UNVERIFIED default (spec gave no value); strategies ship enabled=false; owner to confirm before enabling. QUAN-74-10 (OpenPosition fields) deferred to F9 slice 0.
+- 2026-11-20 F9: `bazaar-backtest` -> `bazaar-regime` edge allowed (engine drives the real Strategy, whose StrategyContext carries RegimeState); same edge scanner already has; no cycle (regime depends on core, indicators). Handbook crate-map row for backtest to add `regime` (tech lead).
+- 2026-11-20 F9 s6 (tech lead, owner offline): walk-forward OOS runs use the real gate with G01 evidence from the chosen candidate IS window and walk_forward_pass=Known(true) set by one named constructor (measurement context; verdict computed ex post from pooled OOS). Owner to confirm; see plan F9 "Slice 6 G01 design".
