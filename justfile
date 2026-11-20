@@ -143,6 +143,34 @@ worktree-clean *args:
 records-pr *args:
     @python3 .claude/kit/kit.py records-pr "$@"
 
+# one plan for every open PR, worked out by the script: what to run next, who to launch, what to wait on
+next:
+    @python3 .claude/kit/kit.py next
+
+# wait in the script (free) until every required review of a PR is in; run it in the background
+review-wait *args:
+    @python3 .claude/kit/kit.py review-wait "$@"
+
+# the developer's fix brief: only the findings to fix, plus the fix-round rules
+fix-list *args:
+    @python3 .claude/kit/kit.py fix-list "$@"
+
+# changes since the last review: which ones a finding asked for, which ones nobody asked for
+fix-scope *args:
+    @python3 .claude/kit/kit.py fix-scope "$@"
+
+# tech lead: mark minor/nit fixes verified after reading the fix diff (never blocking or security/safety findings)
+verify-fixes *args:
+    @python3 .claude/kit/kit.py verify-fixes "$@"
+
+# deferred findings still open, and whether the feature record carries them (promote refuses lost ones)
+deferred *args:
+    @python3 .claude/kit/kit.py deferred "$@"
+
+# the kit's own decision tests (fake repos and reviews; no GitHub, no agents) - run after changing .claude/kit/*.py
+kit-test:
+    @python3 .claude/kit/tests/test_kit.py
+
 # fast-forward your local integration branch to origin (ship does this after every merge)
 sync-base:
     @python3 .claude/kit/kit.py sync-base
@@ -313,6 +341,7 @@ cli-fixture *args:
 
 # golden backtest regression against committed baselines
 golden:
+    @test -f crates/backtest/tests/golden.rs || { echo "golden: no golden suite yet (crates/backtest/tests/golden.rs arrives with F9 slice 7b3) - nothing to run"; exit 0; }
     cargo test -q -p bazaar-backtest --test golden
 
 # benchmarks (indicators, scanner, backtest loop)

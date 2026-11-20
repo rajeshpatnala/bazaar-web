@@ -82,7 +82,8 @@ def just_recipes() -> set:
         for line in jf.read_text(errors="replace").splitlines():
             m = re.match(r"^@?([A-Za-z_][A-Za-z0-9_-]*)(\s[^:]*)?:(?!=)", line)
             a = re.match(r"^alias\s+([A-Za-z0-9_-]+)\s*:=", line)
-            if m and not re.match(r"^(set|export|import|mod)\b", line):
+            directive = re.match(r"^set\s+[\w-]+\s*(:=.*)?$", line) or re.match(r"^(export|import|mod)\b", line)
+            if m and not directive:  # `set positional-arguments` is a setting; `set *args:` is a recipe
                 names.add(m.group(1))
             if a:
                 names.add(a.group(1))

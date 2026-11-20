@@ -438,7 +438,9 @@
           "skill": "bz-execution",
           "sections": "golden rules"
         }
-      ]
+      ],
+      "envelope": false,
+      "safety": true
     },
     {
       "name": "quant",
@@ -532,5 +534,6 @@
     "crates/server/src/**/session*",
     "config/charges.toml",
     "config/risk.toml"
-  ]
+  ],
+  "live_path_review": "risk"
 }

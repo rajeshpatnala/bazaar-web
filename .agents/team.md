@@ -116,6 +116,8 @@ then there is no fixed cap on developers - the budget is the governor.
 | reuse_window_minutes | 90 |
 | reuse_max_context | 120,000 |
 | efficiency_review | yes |
+| reuse_max_steps | 60 |
+| min_slice_lines | 150 |
 - `work_mode`: `worktrees` (developers in parallel, each in its own git worktree) or `in-place` (one developer at a
   time in this checkout, for repos where worktrees fail). `just preflight` recommends one; `just work-mode <mode>` switches.
 - `small_max_files`: work touching at most this many files in one area is size S (no plan, one developer, gate only).
@@ -145,13 +147,15 @@ Code review runs on every PR. Security review and testing scale with risk so sma
 | envelope_max_diff_chars | 60000 |
 | envelope_command | claude |
 | require_feature_t2 | yes |
+| review_rounds | full |
+| defer_minor_after_round | off |
+| security_block_severities | critical, high, medium |
+| require_reviewed_commit | yes |
 `security_review`: `always` or `sensitive-or-large` (auth, config, SQL/migrations, dependency/lock files, CI, Dockerfile, or >= large_pr_lines).
 `tester_review`: `feature` = the full test matrix runs **once per feature** (T2 after the last slice); a PR gets its own
 tester run only when it touches a risk area (money maths, auth, migrations, destructive operations: `tester_risk_globs`
 in `.agents/stack.json` plus kit defaults) with >= tester_min_source_lines production lines. Older options: `always`,
 `behaviour-change` (every feat/fix/perf PR with >= tester_min_source_lines), `large`.
-`require_feature_t2`: `yes` = `just promote` refuses while a feature merged since the last release has no signed-off T2
-report (`.agents/reviews/<F>/tests-t2.md`).
 `require_feature_record`: `yes` = a feat/fix/refactor/perf PR for feature F<n> can't merge until `docs/features/F<n>-*.md` exists (on the PR or already merged).
 `require_bug_record`: `yes` = a `fix/B<n>-...` PR can't merge until it commits `docs/bugs/B<n>-*.md` with `Regression test:` filled.
 ## Context (token use)
@@ -174,6 +178,7 @@ Set `usd_per_million_tokens` to your blended rate to see dollar estimates.
 | warn_percent | 80 |
 | usd_per_million_tokens | - |
 | manager_clear_at | 150,000 |
+| budget_measure | tokens |
 
 ## Branches
 
@@ -189,6 +194,7 @@ passes (reviewers' verdicts, CI checks, target branch). The release branch only 
 | delete_merged_branches | no |
 
 | require_merge_approval | yes |
+| records_extra_globs | docs/strategy/**, .claude/agent-memory/** |
 ## Approvals (manager asks the user before)
 
 | checkpoint | required |

@@ -132,6 +132,8 @@ If one of these seems to have no effect, it may need to be set in your shell bef
 | `reuse_roles` | `tech-lead, architect` (+ the kit's consulting agents) | agent names, comma-separated | Agents the manager continues instead of relaunching; a hook blocks the first fresh launch within `reuse_window_minutes` (90) and names the warm agent |
 | `reuse_window_minutes` | 90 | How long after a run an agent still counts as warm for the reuse hook |
 | `reuse_max_context` | 120,000 | Past this size a warm agent is restarted with a short handoff instead of continued (`just warm`) |
+| `reuse_max_steps` | 60 | Past this many steps a developer's next slice goes to a fresh developer with the slice brief (`just warm`, `just next`): long runs cost more per step |
+| `min_slice_lines` | 150 | `just plan` flags slices estimated below this (each PR pays its own reviews); `0` turns the flag off |
 | `efficiency_review` | `yes` | After a feature's last merge the manager runs `just efficiency` and adds a few observations (no agent) |
 | `preview_first` | `yes` | Look-and-feel work gets a cheap preview you pick from before anything is built (frontend kits: clickable demo pages) |
 
@@ -150,6 +152,10 @@ If one of these seems to have no effect, it may need to be set in your shell bef
 | `envelope_max_lines` | 400 | number | Largest PR (counted lines, tests at half) the one-call review takes |
 | `envelope_command` | `claude` | path or name | The `claude` program for one-call reviews (found automatically inside a session) |
 | `require_merge_approval` | `yes` | `yes`, `no` | Feature PRs merge only once approved: by `just triage` when nothing needs judgment, else by the tech lead (`just approve`) |
+| `review_rounds` | `full` | `full`, `fixes-only` | `fixes-only`: from round 2 a reviewer gets its earlier findings plus only the changes since its review (`just review-pack`, envelope); it reads all of that fix diff and elsewhere reports only blocking problems. Changes no finding asked for are listed and reviewed fully |
+| `defer_minor_after_round` | `off` | `off`, `1`, `2` | `1`: a minor/nit first raised after round 1, outside the fix, is deferred to the next slice by `just triage` instead of opening another round. Never applies to security or safety findings, or to problems in the fix itself |
+| `security_block_severities` | `critical, high, medium` | severities, comma-separated | Security findings at these severities block a merge while open |
+| `require_reviewed_commit` | `yes` | `yes`, `no` | Every review file and approval names the commit it covered; merge-check refuses when the branch has its own changes after it (re-review), or its history was rewritten (full re-review) |
 | `light_review_docs` | `yes` | `yes`, `no` | Docs-only PRs (never agent, CI or settings files) need no reviewer launch; the tech lead reads the diff |
 
 Check what a PR will get: `just review-plan <pr>`.
@@ -162,6 +168,7 @@ Check what a PR will get: `just review-plan <pr>`.
 | `warn_percent` | 80 | When the manager warns you a budget is nearly used |
 | `usd_per_million_tokens` | `-` | Your blended price, to show dollar estimates |
 | `manager_clear_at` | 150,000 | Manager conversation size at which you are told to run `just milestone` and `/clear` |
+| `budget_measure` | `tokens` | `tokens`: caps count each run's final context (well below the real cost). `cost-eq`: caps count what runs really cost, the manager included - raise `per_day_tokens` about 3x when you switch |
 
 See usage any time: `just budget` (today) or `just budget <task>`; `just budget-report <task>` breaks it down per agent.
 Every run also shows its **cold start** (what the agent loaded before doing any work) separately from its work; `just budget-starts` lists the typical start per agent type. A large start is the reason to continue agents rather than relaunch them, and to keep preloaded skills small.
@@ -175,6 +182,7 @@ current task (`just budget-task F12`), and the manager's own session is measured
 | `release_branch` | `main` | Branch that only moves with your approval (`just promote`) |
 | `require_ci_checks` | `yes` | Whether GitHub CI must pass before a merge |
 | `delete_merged_branches` | `no` | `yes` deletes a work branch after `just ship` merges it; the integration and release branches never |
+| `records_extra_globs` | `-` | More paths `just records-pr` may commit without review (comma-separated globs, e.g. `docs/strategy/**`): notes only, never code or settings |
 
 ### Approvals
 Says what the manager asks you before. Rows marked `always` can't be turned off.

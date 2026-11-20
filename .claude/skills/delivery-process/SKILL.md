@@ -42,24 +42,33 @@ pick becomes owner rules and acceptance criteria. Details: `references/preview-a
             Architect only for new services/stores, cross-cutting or irreversible choices
 3 Approve   plan summary + `just budget-check` to the user (if plan approval = yes)
 4 Build     M: one developer, continued. L: one developer per independent slice. T0+T1 per step (§4)
-5 Review    at each hand-off: small PR -> `just envelope <pr>` first: every required review in one
-            tool-free call, findings written to the usual files (re-reviews too). Exit 4 (can't run here) ->
-            one `combined-reviewer` with the prompt it prints, same files. Exit 3 or a big PR ->
-            `just review-plan <pr>` and launch exactly the reviewers it names, each with the output path
-            `review-pack` prints. Docs-only PRs: `light` (no reviewer). The tester still runs when required
-6 Triage    `just triage <id> --ref <pr-N|branch>` applies the defaults (§8). Fixes go straight to the
-            developer; the tech lead only for what it lists under "needs tech lead"
-7 Fix loop  continue the SAME developer with finding ids; re-check by the same reviewers; one push per round
+5 Review    `just next` says what each open PR needs. Small PR -> `just envelope <pr>` first: every required
+            review in one tool-free call, findings written to the usual files (re-reviews too). Exit 4 (can't
+            run here) -> one `combined-reviewer` with the prompt it prints. Exit 3 or a big PR -> launch
+            exactly the reviewers `review-plan` names, ALL IN ONE MESSAGE (in parallel, each fresh, each with
+            the path `review-pack` prints), so they come back together; in the background, `just review-wait
+            <pr>` wakes you once. Risk/safety reviewers marked `envelope: false` always review their own
+            paths. Docs-only PRs: `light`. The tester still runs when required
+6 Triage    `just triage <id> --ref <pr-N|branch>` applies the defaults (§8) and approves only once every
+            required review is in. The tech lead only for what it lists under "needs tech lead"
+7 Fix loop  `just fix-list <pr>` IS the developer's prompt (only the fix-now findings + the fix-round rules);
+            continue the SAME developer. Round 2+: `just fix-scope <pr>`, then only reviewers with open items
+            re-check (fixes-only when review_rounds = fixes-only); a round with only minor/nit left from
+            code/domain reviewers is closed by the tech lead reading the fix diff and `just verify-fixes`
 8 Verify    after the last slice: ONE tester runs T2 for the whole feature
 9 Merge     approval: `just triage` writes it when nothing needs judgment; else the tech lead decides and ends
-            with `just approve <pr>`. Then the MANAGER runs `just ship <pr>` in the background - no agent
-            is launched just to merge. It waits for CI in the script,
-            merge-check, merge, updates the integration branch and codemap
+            with `just approve <pr>`. Reviews and approvals name the commit they covered: a push after them
+            means a re-review (merge-check says so). Then the MANAGER runs `just ship <pr>` in the background -
+            no agent is launched just to merge. It waits for CI in the script, merge-check, merge, updates the
+            integration branch and codemap
 10 Release  user asks -> promotion PR -> `just promote` (asks the user) -> release PR -> tag
 11 Report   fixed format (references/budget-and-reports.md); retrospective for L, over-budget or rework;
             after the feature's last merge `just efficiency F<n>` + <= 15 lines of observations (efficiency_review)
 ```
-Slicing (L): independently mergeable, owns distinct files, <= `max_slice_changed_lines`; slice 0 = shared contracts.
+Slicing (L): independently mergeable, owns distinct files, `min_slice_lines`-`max_slice_changed_lines` estimated lines
+(`est. lines` column; `just plan` flags misses); slice 0 = shared contracts and formulas every later slice uses. New
+code stays unused until the slice that connects it; that slice is marked `live path: yes` and gets the safety review.
+Ask the owner for every input the plan needs (data, calendars, rates, decisions) at plan time, in one batch.
 Assign by dominant skill: `dev-data`, `dev-quant`, `dev-backtest`, `dev-execution`, `dev-api`, `dev-ui`, `dev-core`, `cicd`, or an agent added later.
 
 ## 4. Verification tiers
@@ -83,16 +92,17 @@ Owner rules, work mode, skills and CLAUDE.md reach every agent already: never re
 **Reuse over cold start.** Every fresh agent re-pays its whole start (Claude Code's prompt, CLAUDE.md, preloaded skills,
 memory) - often more than the work. Continue the existing agent (SendMessage to its id) for fix rounds, the next step
 in the same area, triage questions and command-only steps (rebase). Never launch or continue an agent to run `just ship`. The tech lead who planned or merged is
-the one you continue. Continue only while an agent is small: `just warm` says continue or start fresh
-(`reuse_max_context`). **Reviewers are fresh per PR** (a reused reviewer carries every earlier review pack: measured
+the one you continue. Continue only while an agent is small: `just warm` / `just next` say continue or start fresh
+(`reuse_max_context`, `reuse_max_steps`: a long run costs more per step, so the next slice goes to a fresh developer
+with `just plan <id> --slice <n>` as its brief). **Reviewers are fresh per PR** (a reused reviewer carries every earlier review pack: measured
 ~150k per review against ~80k fresh) and are continued only for re-reviews of the same PR. A hook blocks the first
 fresh launch of a `reuse_roles` agent (tech lead, architect) that already ran on this feature.
 Fresh launches are for parallel work or a different area. `just budget-report <id>` shows start vs work per run.
 
 **Records and reviews:** the manager's own records (board, decisions, reports) reach the integration branch through `just records-pr` (no reviewer). Reviewers in worktrees end with `just save-review <path>` so findings survive the worktree. `just run-report <agent>` explains one run's cost.
 
-**Hand-backs:** read once; pass on the verdict and the path, never restate or relay the text; don't re-read files you
-just wrote. **Checkpoints:** developers commit on their branch whenever T0 passes, so undo = `git revert`.
+**Hand-backs:** an agent's final reply IS its hand-back (agents never also send a message, which would wake you twice).
+Read once; pass on the verdict and the path, never restate or relay the text; don't re-read files you just wrote. **Checkpoints:** developers commit on their branch whenever T0 passes, so undo = `git revert`.
 **Milestones:** after a merged wave, a merged feature or a release, update the board and run `just milestone "<resume>"`;
 then suggest `/clear` - the manager's conversation is re-sent on every step, the board carries the state. Things only
 the owner can do go in the board's "Owner actions" list (`just status` shows them).
@@ -110,10 +120,16 @@ Feature questions: `just feature F<n>` first. Full procedure: `references/record
 | Finding | Default |
 |---|---|
 | blocker, critical, high, major, medium; failing acceptance test; missing unit tests | fix now (blocks merge) |
-| minor, nit, low, info | fix now if cheap; the developer may propose defer |
+| minor, nit, low, info | fix now if cheap (security/safety findings: fix now) |
+| a minor/nit the reviewer itself says belongs in a later slice | defer: that slice |
+| a minor/nit first raised after round 1, outside the fix (`defer_minor_after_round`) | defer: next slice |
 | disputed, conflicting fixes for one spot, no clear fix, unknown severity | **needs the tech lead** |
+| a blocking finding, or a security/safety finding of any severity, that mentions a later slice | fix now; only the tech lead defers it, by name |
 | `question` severity, or a finding that asks for a decision (design, wording, policy, limits) | **never auto-decided**: tech lead, or the owner for product calls |
-Deferrals and rejections are the tech lead's call and go into the feature record.
+Every deferral names a target and goes into the feature record's Deferred list: `just deferred <F>` shows the open ones,
+and `just promote` refuses while one isn't carried. An open "fix now" finding of any severity blocks the merge until
+its reviewer marks it fixed (minor/nit from code or domain reviewers: the tech lead may `just verify-fixes`).
+Security findings at `security_block_severities` (default critical, high, medium) block while open.
 
 **Status is checked, never remembered:** "green / ready" only from `merge-check`, `pr-wait`, `ship` or `status` run
 just now. `PENDING` = CI not finished, never a failure. **Waiting is a script's job:** never poll CI or chain merge
@@ -121,5 +137,6 @@ steps with agent turns. Developers push once per hand-off or fix round (every pu
 
 ## 9. Budget
 `just budget-task <id>` at the start; usage is measured automatically. Before a batch:
-`just budget-check <id> dev-data:2 code-reviewer:2` (WARN: tell the user; OVER LIMIT: ask). Report
+`just budget-check <id> dev-data:2 code-reviewer:2` (WARN: tell the user; OVER LIMIT: ask). The owner's real plan usage
+outranks the kit's caps: 70% tell the user, 85% finish the current slice and plan the rest with them, 95% stop and ask. Report
 `agents X + manager Y` from `just budget-report <id>`. More: `references/budget-and-reports.md`.

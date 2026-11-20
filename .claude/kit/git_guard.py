@@ -24,7 +24,7 @@ GIT_OPTS_WITH_ARG = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--e
 JUST_OPTS_WITH_ARG = {"-f", "--justfile", "-d", "--working-directory", "--set", "--dotenv-path", "--dotenv-filename",
                       "--shell", "--shell-arg", "--chooser", "--color", "--dump-format", "--list-heading", "--list-prefix",
                       "--command", "-c", "--unstable"}
-LEAD_ONLY = {"merge", "ship", "promote", "approve", "setup-branches", "protect-branches"}
+LEAD_ONLY = {"merge", "ship", "promote", "approve", "verify-fixes", "setup-branches", "protect-branches"}
 
 
 class Blocked(Exception):

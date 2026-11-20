@@ -21,10 +21,13 @@ Size: M | L   Estimate: <tokens>   Status: draft | approved | in progress | done
 1. 
 
 ## Slices (L only)
-| slice | developer type | scope (modules/files owned) | depends on | order |
-|---|---|---|---|---|
-| 0 | dev-core | shared contracts: domain types, ports, DTOs | - | 1 |
-| 1 | dev-data | | 0 | 2 (parallel) |
+| slice | developer type | scope (modules/files owned) | depends on | order | est. lines | live path |
+|---|---|---|---|---|---|---|
+| 0 | dev-core | shared contracts and formulas every later slice uses: domain types, ports, DTOs | - | 1 | | no |
+| 1 | dev-data | | 0 | 2 (parallel) | | no |
+<!-- est. lines: counted lines (tests at half), between min_slice_lines and max_slice_changed_lines; `just plan` flags misses.
+     live path: yes when the slice connects new code to a live or money path (that PR always gets the safety review);
+     until then new code stays unused. Branch names carry the slice: feat/<id>-s<slice>-<slug>. -->
 
 ## Feature record
 <!-- draft of docs/features/F<n>-<slug>.md (template: .agents/templates/feature-record.md): Status, Summary, Owner area,
@@ -35,6 +38,10 @@ Size: M | L   Estimate: <tokens>   Status: draft | approved | in progress | done
 
 ## Security notes
 <!-- trust boundaries, sensitive data, authz rules -->
+
+## Owner inputs needed
+<!-- every file, rate, calendar or decision the owner must supply, asked once at plan time -->
+-
 
 ## Risks / open questions
 -

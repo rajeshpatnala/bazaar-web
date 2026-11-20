@@ -66,6 +66,27 @@ def limits() -> dict:
     return out
 
 
+def measure() -> str:
+    """What the caps count (team.md -> budget_measure): `tokens` = each run's final context (the old figure, far below
+    the real cost), `cost-eq` = what the runs really cost in plain-input tokens, with the manager included."""
+    return "cost-eq" if team_value("budget_measure", "tokens").lower() in ("cost-eq", "cost_eq", "costeq") else "tokens"
+
+
+def used_by(history: list, keep, today: str = "") -> int:
+    """Usage of the selected rows in the configured measure (cost-eq falls back to tokens for unmeasured rows);
+    with cost-eq and a day, the manager's own sessions of that day are added."""
+    if measure() == "tokens":
+        return sum(int(r["tokens"]) for r in history if keep(r))
+    total = sum(int(float(r.get("cost_eq") or 0)) or int(r["tokens"]) for r in history if keep(r))
+    if today:
+        try:
+            sessions = json.loads(SESSIONS.read_text()) if SESSIONS.exists() else {}
+        except ValueError:
+            sessions = {}
+        total += sum(int(v.get("cost_eq", 0)) for v in sessions.values() if v.get("last") == today)
+    return total
+
+
 def rows() -> list:
     if not LEDGER.exists():
         return []
@@ -196,6 +217,12 @@ def plan_usage() -> dict:
         return json.loads(USAGE_FILE.read_text())
     except (OSError, ValueError):
         return {}
+
+
+def plan_usage_age():
+    """Minutes since the status line last recorded plan usage, or None when it never did."""
+    at = plan_usage().get("at")
+    return int((dt.datetime.now().timestamp() - at) // 60) if at else None
 
 
 def plan_usage_line() -> str:
@@ -417,10 +444,10 @@ def main(argv: list) -> int:
 
     if cmd == "status":
         task = args[0] if args else None
-        day_used = sum(int(r["tokens"]) for r in history if r["date"] == today)
+        day_used = used_by(history, lambda r: r["date"] == today, today)
         parts = []
         if task:
-            used = sum(int(r["tokens"]) for r in history if r["task"] == task)
+            used = used_by(history, lambda r: r["task"] == task)
             parts.append(usage_line(f"task {task}", used, lim["per_task_tokens"], lim["usd_per_million_tokens"]))
         parts.append(usage_line("today", day_used, lim["per_day_tokens"], lim["usd_per_million_tokens"]))
         est = sum(int(r["tokens"]) for r in history if r["date"] == today and r["source"] == "estimate")
@@ -507,8 +534,8 @@ def main(argv: list) -> int:
             est = estimate(agent, history)
             cap = agent_caps().get(agent)
             projected += (min(est, cap) if cap else est) * int(count or 1)
-        task_used = sum(int(r["tokens"]) for r in history if r["task"] == task)
-        day_used = sum(int(r["tokens"]) for r in history if r["date"] == today)
+        task_used = used_by(history, lambda r: r["task"] == task)
+        day_used = used_by(history, lambda r: r["date"] == today, today)
         worst, notes = 0, []
         for label, used, limit in (("task", task_used, lim["per_task_tokens"]), ("today", day_used, lim["per_day_tokens"])):
             if not limit:
@@ -523,8 +550,15 @@ def main(argv: list) -> int:
         for key, label in (("five_hour", "5-hour plan window"), ("seven_day", "7-day plan window")):
             pct = float((plan_usage().get(key) or {}).get("used_percentage") or 0)
             if pct:
-                notes.append(f"{label} {pct:.0f}% used")
+                tier = (" - stop and ask the user" if pct >= 95 else " - finish the current slice, plan the rest with the user"
+                        if pct >= 85 else " - tell the user" if pct >= 70 else "")
+                notes.append(f"{label} {pct:.0f}% used{tier}")
                 worst = max(worst, 2 if pct >= 95 else 1 if pct >= 70 else 0)
+        age = plan_usage_age()
+        if age is None:
+            notes.append("real plan usage unknown (the kit status line records it; `just doctor` checks it is installed)")
+        elif age > 60:
+            notes.append(f"real plan usage is {age} min old - treat it as a lower bound")
         verdict = {0: "OK", 1: "WARN (tell the user)", 2: "OVER LIMIT (ask the user before launching)"}[worst]
         print(f"{verdict}: " + ("; ".join(notes) if notes else f"no limits set, projected ~{fmt(projected)}"))
         return worst
