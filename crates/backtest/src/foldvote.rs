@@ -24,14 +24,18 @@ pub struct FoldVote {
     pub skipped_folds: u32,
     /// `profitable_folds / voting_folds` in percent, 4 dp toward zero; `None` with no voting fold.
     pub profitable_pct: Option<Decimal>,
-    /// `profitable_pct >= min_profitable_fold_pct` (exact, not on the rounded figure).
+    /// `profitable_pct >= min_profitable_fold_pct` (exact, not on the rounded figure) AND
+    /// `voting_folds >= min_folds`: thin folds are left out of the vote, so they cannot supply the
+    /// fold minimum either.
     pub vote_ok: bool,
-    /// Mean OOS R over mean IS R across folds with an OOS run, weighted by R trades, 4 dp toward
+    /// Mean OOS R over mean IS R across non-thin folds with an OOS run, weighted by R trades, 4 dp toward
     /// zero. `None` when there is no such fold or the IS mean is not above zero.
     pub oos_is_ratio: Option<Decimal>,
     /// `oos_is_ratio >= min_oos_is_ratio`.
     pub ratio_ok: bool,
-    /// More than one fold made a profit: no single fold supplies all of it.
+    /// More than one voting fold made a profit: no single fold supplies ALL of it. This is the
+    /// literal reading; it does not cap one fold's share of the profit (a config share cap would
+    /// be stricter and needs an owner decision).
     pub single_fold_ok: bool,
 }
 
@@ -85,6 +89,7 @@ pub fn vote(cfg: &BacktestConfig, folds: &[FoldResult]) -> Result<FoldVote, Back
         .and_then(|x| x.checked_div(den))
         .map(|p| p.round_dp_with_strategy(4, RoundingStrategy::ToZero));
     let vote_ok = voting_folds > 0
+        && voting_folds >= cfg.walk_forward.min_folds
         && num.checked_mul(Decimal::ONE_HUNDRED).is_some_and(|lhs| {
             cfg.evidence
                 .min_profitable_fold_pct
@@ -92,7 +97,8 @@ pub fn vote(cfg: &BacktestConfig, folds: &[FoldResult]) -> Result<FoldVote, Back
                 .is_some_and(|rhs| lhs >= rhs)
         });
     let (mut is_parts, mut oos_parts) = (Vec::new(), Vec::new());
-    for f in folds.iter().filter(ran) {
+    // Thin folds are out of the ratio as well (one rule for the whole per-fold verdict).
+    for f in folds.iter().filter(ran).filter(|f| !f.thin) {
         if let (Some(i), Some(Some(o))) =
             (f.is.expectancy_r, f.oos.as_ref().map(|m| m.expectancy_r))
         {

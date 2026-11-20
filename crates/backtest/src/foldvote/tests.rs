@@ -9,8 +9,17 @@ fn d(s: &str) -> Decimal {
     Decimal::from_str(s).unwrap()
 }
 
+/// The thresholds the tests rely on are set here, not read from the config file.
+const THIN: u32 = 5;
+
 fn cfg() -> BacktestConfig {
-    BacktestConfig::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config")).unwrap()
+    let mut c =
+        BacktestConfig::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config")).unwrap();
+    c.evidence.min_profitable_fold_pct = d("60");
+    c.evidence.min_oos_is_ratio = d("0.5");
+    c.walk_forward.min_folds = 3;
+    c.walk_forward.thin_fold_trades = THIN;
+    c
 }
 
 fn m(r_trades: u32, net: &str, exp: &str) -> Metrics {
@@ -40,7 +49,7 @@ fn ran(n: u32, net: &str, is: &str, oos: &str) -> FoldResult {
         is: m(20, "10", is),
         oos: Some(m(n, net, oos)),
         skipped_in_is: false,
-        thin: n < 5,
+        thin: n < THIN,
     }
 }
 
@@ -106,6 +115,59 @@ fn oos_is_ratio_is_weighted_and_fails_closed() {
     assert_eq!(
         (v.oos_is_ratio, v.ratio_ok, v.vote_ok),
         (None, false, false)
+    );
+}
+
+#[test]
+fn thin_folds_cannot_supply_the_fold_minimum() {
+    let c = cfg();
+    // 2 profitable voting folds (100%) plus 6 thin losing ones: below min_folds (3) voting folds.
+    let mut folds = vec![ran(10, "100", "0.3", "0.3"), ran(10, "50", "0.3", "0.3")];
+    folds.extend((0..6).map(|_| ran(2, "-20", "0.3", "-0.5")));
+    let v = vote(&c, &folds).unwrap();
+    assert_eq!((v.voting_folds, v.profitable_pct), (2, Some(d("100"))));
+    assert!(!v.vote_ok);
+    folds.push(ran(10, "40", "0.3", "0.3"));
+    assert!(vote(&c, &folds).unwrap().vote_ok);
+}
+
+#[test]
+fn a_thin_fold_with_an_extreme_r_does_not_move_the_ratio() {
+    let c = cfg();
+    let base = [ran(10, "10", "0.4", "0.2")];
+    let mut with_thin = base.to_vec();
+    with_thin.push(ran(2, "10", "0.4", "50"));
+    assert_eq!(
+        vote(&c, &base).unwrap().oos_is_ratio,
+        vote(&c, &with_thin).unwrap().oos_is_ratio
+    );
+}
+
+#[test]
+fn an_overflowing_r_mean_is_an_error_not_a_pass() {
+    let max = Decimal::MAX.to_string();
+    let r = vote(
+        &cfg(),
+        &[ran(10, "10", &max, "0.2"), ran(10, "10", &max, "0.2")],
+    );
+    assert!(matches!(r, Err(BacktestError::Overflow(_))));
+}
+
+#[test]
+fn weighted_mean_reports_overflow_in_the_product_and_in_the_sum() {
+    let big = Decimal::MAX;
+    assert!(matches!(
+        weighted_mean(&[(big, 2)]),
+        Err(BacktestError::Overflow(_))
+    ));
+    assert!(matches!(
+        weighted_mean(&[(big, 1), (big, 1)]),
+        Err(BacktestError::Overflow(_))
+    ));
+    assert_eq!(weighted_mean(&[]).unwrap(), None);
+    assert_eq!(
+        weighted_mean(&[(d("1"), 1), (d("3"), 3)]).unwrap(),
+        Some(d("2.5"))
     );
 }
 

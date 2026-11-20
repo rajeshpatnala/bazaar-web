@@ -182,6 +182,8 @@ pub(crate) fn measurement_evidence(is: &Metrics) -> EvidenceInputs {
 /// The evidence an IS run is gated with: the G01 leg passes by construction (maximal figures, no
 /// threshold literal here), so IS runs measure the strategy under every OTHER gate rule. It is a
 /// selection-only policy: IS trades are never pooled and never reach a verdict. Never reuse it.
+/// Only G01 reads these four fields (a test runs the real gate on them); if another rule ever reads
+/// the evidence, these sentinels must be revisited.
 fn selection_evidence() -> EvidenceInputs {
     EvidenceInputs {
         oos_trades: Tri::Known(u32::MAX),
@@ -191,8 +193,8 @@ fn selection_evidence() -> EvidenceInputs {
     }
 }
 
-/// The gate environment for one window: the ONLY way a walk-forward closure gets its evidence, so
-/// it cannot pick a looser policy. IS gets the selection-only evidence (any `evidence` argument is
+/// The gate environment for one window: the intended path for a walk-forward closure to get its
+/// evidence (the 7b runner must use it, so no caller picks a looser policy). IS gets the selection-only evidence (any `evidence` argument is
 /// ignored); OOS must be given the evidence the engine computed from the chosen set's IS window.
 ///
 /// # Errors
