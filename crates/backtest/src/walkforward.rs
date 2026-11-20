@@ -85,10 +85,54 @@ pub fn distinct_sets(sets: &[ParamSet]) -> Vec<ParamSet> {
     out
 }
 
-/// Builds and runs one window: `(window, index into the distinct sets, that window's bars only,
-/// evidence)`. `evidence` is `Some` for OOS only. The closure must read nothing but the bars it is
-/// given (it can capture the full series; a caller-side leak test is the guard, see slice 7).
-pub type RunWindow<'a> = dyn FnMut(Window, usize, &[Candle], Option<EvidenceInputs>) -> Result<RunOutput, BacktestError>
+/// One window's bars: the window itself (what the slice derefs to) preceded by history-only
+/// warm-up bars. History is strictly before the window (for OOS it includes the IS bars, which
+/// are past data); a run must give it to the engine as `RunSpec::warmup`, so strategies see it
+/// but nothing is traded on it.
+#[derive(Debug, Clone, Copy)]
+pub struct WindowBars<'a> {
+    all: &'a [Candle],
+    warmup: usize,
+}
+
+impl<'a> WindowBars<'a> {
+    /// The window's own bars preceded by `warmup` history bars (`all` is history then window).
+    #[must_use]
+    pub const fn new(all: &'a [Candle], warmup: usize) -> Self {
+        Self { all, warmup }
+    }
+
+    /// History and window together: `RunSpec::bars`.
+    #[must_use]
+    pub const fn with_history(&self) -> &'a [Candle] {
+        self.all
+    }
+
+    /// Number of leading history-only bars: `RunSpec::warmup`.
+    #[must_use]
+    pub const fn warmup(&self) -> usize {
+        self.warmup
+    }
+}
+
+impl std::ops::Deref for WindowBars<'_> {
+    type Target = [Candle];
+
+    fn deref(&self) -> &[Candle] {
+        self.all.get(self.warmup..).unwrap_or(&[])
+    }
+}
+
+/// Builds and runs one window: `(window, index into the distinct sets, that window's bars with
+/// its warm-up history, evidence)`. `evidence` is `Some` for OOS only. The closure must read
+/// nothing but the bars it is given (it can capture the full series; the caller-side leak test is
+/// the guard).
+pub type RunWindow<'a> = dyn FnMut(
+        Window,
+        usize,
+        &WindowBars<'_>,
+        Option<EvidenceInputs>,
+    ) -> Result<RunOutput, BacktestError>
     + 'a;
 
 /// Inputs outside the bars and config.
@@ -99,9 +143,6 @@ pub struct WfParams<'a> {
     /// Every parameter set the closure may run in IS. Duplicates count once; the distinct count is
     /// the trial count (the closure must run exactly these sets, nothing hidden behind an index).
     pub sets: &'a [ParamSet],
-    /// Distinct regimes the OOS trades cover. Caller input until slice 7 derives it from
-    /// per-trade regime tags; it can lift the label, so treat it as unverified.
-    pub regimes: u32,
     /// The cost model of the runs; `costs_approximate` comes from it, never the caller.
     pub cost: CostModel<'a>,
 }
@@ -286,9 +327,27 @@ pub fn split(bars: &[Candle], cfg: &BacktestConfig) -> Result<Vec<Fold>, Backtes
     Ok(folds)
 }
 
-fn window<'a>(bars: &'a [Candle], r: &Range<usize>) -> Result<&'a [Candle], BacktestError> {
-    bars.get(r.clone())
-        .ok_or_else(|| BacktestError::Invalid("fold range outside the bars".into()))
+/// The window `r` with up to `warmup_bars` bars of history before it.
+fn window<'a>(
+    bars: &'a [Candle],
+    r: &Range<usize>,
+    warmup_bars: usize,
+) -> Result<WindowBars<'a>, BacktestError> {
+    let hist = warmup_bars.min(r.start);
+    let all = bars
+        .get(r.start - hist..r.end)
+        .ok_or_else(|| BacktestError::Invalid("fold range outside the bars".into()))?;
+    Ok(WindowBars::new(all, hist))
+}
+
+/// Distinct market-trend tags over the trades. Derived from the engine's per-trade tags (the
+/// trend on the entry decision's bar), so the caller cannot raise the label by input; trades
+/// without a settled trend add nothing.
+#[must_use]
+pub fn regimes_covered(trades: &[Trade]) -> u32 {
+    let tags: std::collections::BTreeSet<&str> =
+        trades.iter().filter_map(|t| t.regime.as_deref()).collect();
+    u32::try_from(tags.len()).unwrap_or(u32::MAX)
 }
 
 fn bar_met(cfg: &BacktestConfig, m: &Metrics, required_pf: Decimal) -> bool {
@@ -330,13 +389,14 @@ pub fn walk_forward(
         .checked_add(cfg.trials.profit_factor_penalty(trials))
         .ok_or(BacktestError::Overflow("required profit factor"))?;
     let folds = split(bars, cfg)?;
+    let warm = usize::try_from(cfg.walk_forward.warmup_bars).unwrap_or(usize::MAX);
     let (mut results, mut pooled) = (Vec::new(), Vec::new());
     for fold in &folds {
-        let is_bars = window(bars, &fold.is)?;
-        let oos_bars = window(bars, &fold.oos)?;
+        let is_bars = window(bars, &fold.is, warm)?;
+        let oos_bars = window(bars, &fold.oos, warm)?;
         let mut all: Vec<(usize, Metrics)> = Vec::new();
         for c in 0..sets.len() {
-            let out = run(Window::InSample, c, is_bars, None)?;
+            let out = run(Window::InSample, c, &is_bars, None)?;
             all.push((
                 c,
                 Metrics::from_trades(&out.trades, p.capital, &out.equity)?,
@@ -348,7 +408,7 @@ pub fn walk_forward(
         };
         let oos = if met.is_some() {
             let ev = Some(measurement_evidence(&is));
-            let out = run(Window::OutOfSample, chosen, oos_bars, ev)?;
+            let out = run(Window::OutOfSample, chosen, &oos_bars, ev)?;
             let m = Metrics::from_trades(&out.trades, p.capital, &out.equity)?;
             pooled.extend(out.trades);
             Some(m)
@@ -370,7 +430,7 @@ pub fn walk_forward(
     let ran = results.iter().filter(|f| f.oos.is_some()).count();
     let facts = RunFacts {
         folds: u32::try_from(ran).map_err(|_| BacktestError::Overflow("fold count"))?,
-        regimes: p.regimes,
+        regimes: regimes_covered(&pooled),
         costs_approximate: p.cost.costs_approximate(),
         trials_in_run: trials,
     };
@@ -397,7 +457,7 @@ pub fn walk_forward(
 /// into the distinct sets, that window's bars only, gate env)`. The env is `window_env`'s, so no
 /// caller picks its own evidence.
 pub type GatedRun<'a> =
-    dyn FnMut(Window, usize, &[Candle], GateEnv<'_>) -> Result<RunOutput, BacktestError> + 'a;
+    dyn FnMut(Window, usize, &WindowBars<'_>, GateEnv<'_>) -> Result<RunOutput, BacktestError> + 'a;
 
 /// [`walk_forward`] with the gate environments built here (via `window_env`) and the charged legs
 /// of EVERY run collected: IS runs of all candidates and the OOS runs. The returned

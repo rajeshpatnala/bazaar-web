@@ -36,6 +36,8 @@ pub struct Position {
     pub entry: Fill,
     pub stop: Option<Price>,
     pub last_mark: Price,
+    /// Regime tag of the entry decision (see `Trade::regime`).
+    pub regime: Option<String>,
 }
 
 /// Worst peak-to-trough fall of an equity curve: the largest rupee fall and the largest
@@ -110,6 +112,14 @@ impl<'a> Ledger<'a> {
         self.realised
     }
 
+    /// Tag the open position of `token` with the regime of its entry decision. No-op when none
+    /// is open.
+    pub fn tag_open(&mut self, token: u32, regime: Option<String>) {
+        if let Some(p) = self.positions.get_mut(&token) {
+            p.regime = regime;
+        }
+    }
+
     /// Book a fill. Prices its charges via `charges_with_dp`, then opens a position (no position
     /// open for the token) or closes it in full (opposite side, same quantity and product).
     /// `stop` only matters on an opening fill: it sets the R denominator and must be below a long
@@ -162,6 +172,7 @@ impl<'a> Ledger<'a> {
                     entry: fill,
                     stop,
                     last_mark,
+                    regime: None,
                 },
             );
             return Ok(None);
@@ -338,6 +349,7 @@ fn build_trade(open: &Position, exit: Fill) -> Result<Trade, BacktestError> {
         net_pnl: net,
         risk_inr: risk,
         r_multiple,
+        regime: open.regime.clone(),
     })
 }
 

@@ -191,6 +191,10 @@ pub struct Trade {
     /// `net_pnl / risk_inr`; `None` when the risk is zero.
     #[serde(with = "opt_decimal")]
     pub r_multiple: Option<Decimal>,
+    /// The market trend (`Up`, `Down` or `Range`) of the bar the entry signal was decided on;
+    /// `None` when the trend was `Mixed` or `Unknown` or the trade was booked without one. The
+    /// walk-forward regime count is derived from these tags, never from caller input.
+    pub regime: Option<String>,
 }
 
 /// Equity after a bar closed (net of all charges so far).

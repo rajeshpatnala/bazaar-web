@@ -5,7 +5,10 @@ use std::collections::BTreeMap;
 use bazaar_core::candle::Candle;
 use bazaar_core::dataview::DataView;
 use bazaar_core::money::{Price, Qty};
-use bazaar_strategies::{ExitAction, OpenPosition, PortfolioView, Signal, Strategy};
+use bazaar_regime::Trend;
+use bazaar_strategies::{
+    ExitAction, OpenPosition, PortfolioView, Signal, Strategy, StrategyContext,
+};
 use rust_decimal::Decimal;
 
 use super::sizing::{cash_leg, size_entry};
@@ -18,6 +21,7 @@ use crate::types::{BacktestError, Fill, Leg, LegSide, Product, Trade};
 pub(super) struct Pending {
     signal: Signal,
     qty: Qty,
+    regime: Option<String>,
 }
 
 pub(super) struct Open {
@@ -27,6 +31,14 @@ pub(super) struct Open {
     time_stop_bars: u32,
     bars_held: u32,
     opened_at: chrono::DateTime<chrono_tz::Tz>,
+}
+
+/// The tag of a settled market trend; `Mixed` and `Unknown` are no regime.
+fn regime_tag(c: &StrategyContext<'_>) -> Option<String> {
+    match c.market_regime.trend {
+        t @ (Trend::Up | Trend::Down | Trend::Range) => Some(format!("{t:?}")),
+        Trend::Mixed | Trend::Unknown => None,
+    }
 }
 
 pub(crate) fn invalid(why: impl Into<String>) -> BacktestError {
@@ -120,6 +132,7 @@ impl Engine<'_, '_> {
         );
         let stop = snap(self.tick(), p.signal.stop)?;
         book(&mut self.ledger, self.sid, sim, &leg, bar, Some(stop))?;
+        self.ledger.tag_open(self.token, p.regime);
         self.open = Some(Open {
             entry: sim.price,
             stop: p.signal.stop,
@@ -246,11 +259,13 @@ impl Engine<'_, '_> {
                 .or_else(|| view.last())
                 .map(|b| trade_date(b.close_time()))
                 .ok_or_else(|| invalid("no bar"))?;
+            let regime = ctx.as_ref().and_then(regime_tag);
             match size_entry(spec, &self.fp, &signal, equity, self.token, fill_day)? {
                 Some(sized) if policy.decide(&signal, &sized, equity) == EntryVerdict::Approve => {
                     self.pending = Some(Pending {
                         signal,
                         qty: Qty(sized.qty),
+                        regime,
                     });
                 }
                 _ => self.skipped += 1,
