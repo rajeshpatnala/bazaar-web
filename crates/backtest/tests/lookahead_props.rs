@@ -1,6 +1,8 @@
-//! No look-ahead (F9 AC 4, QUAN-88-9): a peeking double cannot gain from future bars, results up to
-//! bar `k` do not depend on bars after `k`, and every entry fills at the next bar's open plus
-//! slippage. Also TS-88-1: stop and target in one bar, the stop fills.
+//! No look-ahead (F9 AC 4, QUAN-88-9): results up to bar `k` do not depend on bars after `k`; a
+//! strategy that peeks at the next close still gets only the next bar's open plus adverse
+//! slippage (the engine gives it no earlier or better fill); views end at the closed bar; a peeking
+//! regime provider is rejected. Also TS-88-1: stop and target in one bar, the stop fills. A fixed
+//! test keeps the flat-series-with-one-high case that once failed the proptest.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -116,7 +118,8 @@ impl Strategy for Probe<'_> {
         assert_eq!(view.bars().len(), i + 1);
         assert_eq!(last.close_time(), self.full[i].close_time());
         assert_eq!(view.lookback(usize::MAX).len(), i + 1);
-        ctx.check_closed_bar(view).ok()?;
+        ctx.check_closed_bar(view)
+            .expect("the engine already vets the context");
         self.seen.borrow_mut().push((view.len(), last.close_time()));
         let fire = match self.mode {
             Mode::PastUp => i > 0 && last.close() > self.full[i - 1].close(),
@@ -131,18 +134,24 @@ impl Strategy for Probe<'_> {
         }
         let at = last.close_time();
         self.signals.borrow_mut().push(at);
+        // Wide levels so the generated bars (about 99-105) are always inside the zone and never
+        // reach the stop or target; `At` keeps tight levels for the stop/target tie tests.
+        let (low, high, stop, target, risk, rr) = match self.mode {
+            Mode::At(_) => ("100", "101", "96", "130", "5", "5.8"),
+            _ => ("98", "110", "90", "200", "20", "4.5"),
+        };
         Some(Signal {
             strategy_id: "probe",
             instrument_token: 7,
             strategy_version: 1,
             params_hash: "h".into(),
             signal_bar_time: at,
-            entry_low: d("100"),
-            entry_high: d("101"),
-            stop: d("96"),
-            targets: vec![d("130")],
-            risk_per_share: d("5"),
-            reference_rr: d("5.8"),
+            entry_low: d(low),
+            entry_high: d(high),
+            stop: d(stop),
+            targets: vec![d(target)],
+            risk_per_share: d(risk),
+            reference_rr: d(rr),
             exit_plan: ExitPlan {
                 time_stop_bars: 3,
                 rule_text: "t".into(),
@@ -315,7 +324,11 @@ proptest! {
             prop_assert!(signals.contains(&bars[idx - 1].close_time()));
             prop_assert_eq!(t.entry.kind, FillKind::Entry);
             prop_assert_eq!(t.entry.reference_price.value(), bars[idx].open());
-            prop_assert!(t.entry.leg.price.value() >= bars[idx].open());
+            // Adverse, non-zero and tick-aligned: the fill is exactly open plus the slippage.
+            let slip = t.entry.slippage_per_unit;
+            prop_assert!(slip > Decimal::ZERO);
+            prop_assert_eq!(slip % e.inst.tick_size, Decimal::ZERO);
+            prop_assert_eq!(t.entry.leg.price.value(), bars[idx].open() + slip);
         }
     }
 }
@@ -338,7 +351,63 @@ fn stop_and_target_in_one_bar_the_stop_fills() {
     let bars = candles(&e.cal, &[flat, flat, wide, flat, flat]);
     let (out, _, _) = exec(&e, &bars, Mode::At(1), false);
     let out = out.unwrap();
+    assert_eq!(out.trades.len(), 1);
     let t = out.trades.first().unwrap();
     assert_eq!(t.exit.kind, FillKind::Stop);
     assert_eq!(t.exit.reference_price.value(), d("96"));
+}
+
+#[test]
+fn stop_and_target_in_a_later_bar_the_stop_fills() {
+    // QUAN-89-2: entry on bar 2 (stays inside 99-101), then bar 3 trades through both levels.
+    let e = env();
+    let flat = row(2000, 20, 20, 5);
+    let wide = [2000, 1900, 2700, 2000].map(|t| Decimal::new(t * 5, 2));
+    let bars = candles(&e.cal, &[flat, flat, flat, wide, flat]);
+    let (out, _, _) = exec(&e, &bars, Mode::At(1), false);
+    let out = out.unwrap();
+    assert_eq!(out.trades.len(), 1);
+    let t = out.trades.first().unwrap();
+    assert_eq!(t.entry.reference_price.value(), d("100"));
+    assert_eq!(t.exit.kind, FillKind::Stop);
+    assert_eq!(t.exit.reference_price.value(), d("96"));
+}
+
+#[test]
+fn a_rising_series_enters_and_the_fill_is_open_plus_slippage() {
+    // CR-89-1: the proptest loops over trades, so prove here that entries do happen.
+    let e = env();
+    let rows = [
+        row(2000, 5, 5, 3),
+        row(2000, 5, 5, 8),
+        row(2000, 5, 5, 5),
+        row(2000, 5, 5, 5),
+        row(2000, 5, 5, 5),
+        row(2000, 5, 5, 5),
+    ];
+    let bars = candles(&e.cal, &rows);
+    let (out, _, signals) = exec(&e, &bars, Mode::PastUp, false);
+    let out = out.unwrap();
+    assert_ne!(signals.len(), 0);
+    let t = out.trades.first().unwrap();
+    assert_eq!(t.entry.reference_price.value(), d("100"));
+    assert!(t.entry.slippage_per_unit > Decimal::ZERO);
+    assert_eq!(
+        t.entry.leg.price.value(),
+        d("100") + t.entry.slippage_per_unit
+    );
+}
+
+#[test]
+fn regression_flat_series_with_one_high_runs_clean() {
+    // Shrunk proptest failure (8 flat rows at 99.00, row 2 with a 99.10 high): it exposed a
+    // strategy that assumed one view per bar while a held position skips `on_bar`.
+    let e = env();
+    let mut rows = [row(1980, 0, 0, 0); 8];
+    rows[2] = row(1980, 0, 2, 0);
+    let bars = candles(&e.cal, &rows);
+    for mode in [Mode::PastUp, Mode::Peek] {
+        let (out, _, _) = exec(&e, &bars, mode, false);
+        assert!(out.is_ok());
+    }
 }
