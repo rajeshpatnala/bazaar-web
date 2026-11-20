@@ -58,8 +58,10 @@ pub struct ProvenanceInputs<'a> {
     /// Plain or walk-forward; a walk-forward run cannot be built without its evidence text.
     pub kind: RunKind<'a>,
     /// Earliest and latest `verified_on` of what the run was charged with, from
-    /// `CostModel::used_verified_range`. `None` falls back to the whole charges file (wider).
-    pub charges_used: Option<(NaiveDate, NaiveDate)>,
+    /// `CostModel::used_verified_range`. Required: there is no whole-file fallback, so a runner
+    /// cannot claim the weaker range by omission. A run with no legs has no range to record and
+    /// cannot build provenance.
+    pub charges_used: (NaiveDate, NaiveDate),
 }
 
 /// The `gate_evidence` text of a walk-forward result. It has no public constructor: the only way
@@ -95,9 +97,9 @@ pub fn build(i: &ProvenanceInputs<'_>) -> Result<Provenance, BacktestError> {
     if i.data_from > i.data_to {
         return Err(BacktestError::Invalid("data range is reversed".into()));
     }
-    let file_range = charges_file_verified_range(i.charges)
+    charges_file_verified_range(i.charges)
         .ok_or_else(|| BacktestError::Invalid("charges file has no verified_on date".into()))?;
-    let (from, to) = i.charges_used.unwrap_or(file_range);
+    let (from, to) = i.charges_used;
     if from > to {
         return Err(BacktestError::Invalid("charges range is reversed".into()));
     }

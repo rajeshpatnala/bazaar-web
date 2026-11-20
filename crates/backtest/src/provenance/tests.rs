@@ -78,12 +78,12 @@ fn inputs<'a>(
         parameter_sets: sets,
         trials: t,
         kind: RunKind::Plain,
-        charges_used: None,
+        charges_used: (day(1, 5), day(7, 1)),
     }
 }
 
 #[test]
-fn walk_forward_gate_evidence_comes_from_the_result_and_blank_text_is_refused() {
+fn walk_forward_gate_evidence_comes_from_the_result() {
     use crate::cost::CostModel;
     use crate::walkforward::{ParamSet, WfParams, walk_forward};
     let charges = charges();
@@ -115,17 +115,22 @@ fn walk_forward_gate_evidence_comes_from_the_result_and_blank_text_is_refused() 
 }
 
 #[test]
-fn the_used_charges_range_replaces_the_file_range_and_must_be_ordered() {
+fn the_provenance_records_the_used_charges_range_not_the_file_range() {
     let charges = charges();
     let trials = trials();
     let mut inp = inputs(&[], &charges, &[], &[], &trials);
-    inp.charges_used = Some((day(3, 1), day(4, 1)));
+    // The whole-file range is a different pair, so this proves the used range is what is stored.
+    assert_eq!(
+        charges_file_verified_range(&charges),
+        Some((day(1, 5), day(7, 1)))
+    );
+    inp.charges_used = (day(3, 1), day(4, 1));
     let p = build(&inp).unwrap();
     assert_eq!(
         (p.charges_verified_from, p.charges_verified_to),
         (Some(day(3, 1)), Some(day(4, 1)))
     );
-    inp.charges_used = Some((day(4, 1), day(3, 1)));
+    inp.charges_used = (day(4, 1), day(3, 1));
     assert!(matches!(build(&inp), Err(BacktestError::Invalid(_))));
 }
 

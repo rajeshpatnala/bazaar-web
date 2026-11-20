@@ -88,8 +88,11 @@ impl<'a> CostModel<'a> {
 
     /// Earliest and latest `verified_on` over what `legs` were actually charged with: the rate set
     /// each leg used (per the history policy), the GST table, and the DP table for delivery sells
-    /// (DP is levied once per scrip-day, so this may include a DP date no leg paid: the range can
-    /// only be wider than exact, never narrower). `None` for no legs.
+    /// (there is one `[dp]` table and the first delivery sell of a run always pays it, so its date
+    /// is exact whenever a delivery sell is present). `None` for no legs.
+    ///
+    /// Not included: `[option_exercise]`. Exercise STT is not charged yet; when it is, this must
+    /// add that table's `verified_on` or the range silently narrows.
     ///
     /// # Errors
     /// As [`Self::charges_excl_dp`] for a missing rate set, GST table or DP table.

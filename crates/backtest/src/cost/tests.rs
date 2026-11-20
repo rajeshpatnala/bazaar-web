@@ -668,6 +668,88 @@ fn leg_is_approximate_counts_only_legs_off_their_own_rate_set() {
     assert!(!nse(&cfg).leg_is_approximate(&mk(day0())).unwrap());
 }
 
+fn range_of(cfg: &ChargesConfig, l: &Leg) -> Result<Option<(NaiveDate, NaiveDate)>, BacktestError> {
+    nse(cfg).used_verified_range([l])
+}
+
+fn cash(product: Product, side: LegSide) -> Leg {
+    leg(LegInstrument::Cash, product, side, "500", 1, day0())
+}
+
+#[test]
+fn the_dp_date_widens_the_range_for_a_delivery_sell_only() {
+    let base = (date(2026, 1, 1), date(2026, 6, 1));
+    let mut cfg = cfg();
+    let sell = cash(Product::Delivery, LegSide::Sell);
+    assert_eq!(range_of(&cfg, &sell).unwrap(), Some(base));
+    // DP the latest date in the set.
+    cfg.dp.as_mut().unwrap().verified_on = date(2026, 9, 1);
+    assert_eq!(
+        range_of(&cfg, &sell).unwrap(),
+        Some((base.0, date(2026, 9, 1)))
+    );
+    // A delivery buy and an intraday sell do not levy DP: no widening.
+    assert_eq!(
+        range_of(&cfg, &cash(Product::Delivery, LegSide::Buy)).unwrap(),
+        Some(base)
+    );
+    assert_eq!(
+        range_of(&cfg, &cash(Product::Intraday, LegSide::Sell)).unwrap(),
+        Some(base)
+    );
+    // DP the earliest date in the set.
+    cfg.dp.as_mut().unwrap().verified_on = date(2025, 6, 1);
+    assert_eq!(
+        range_of(&cfg, &sell).unwrap(),
+        Some((date(2025, 6, 1), base.1))
+    );
+    assert_eq!(
+        range_of(&cfg, &cash(Product::Delivery, LegSide::Buy)).unwrap(),
+        Some(base)
+    );
+}
+
+#[test]
+fn a_missing_gst_or_dp_table_is_invalid_where_it_is_needed() {
+    let mut cfg = cfg();
+    cfg.dp = None;
+    let sell = cash(Product::Delivery, LegSide::Sell);
+    let intraday = cash(Product::Intraday, LegSide::Buy);
+    assert!(matches!(
+        range_of(&cfg, &sell),
+        Err(BacktestError::Invalid(_))
+    ));
+    assert!(range_of(&cfg, &intraday).unwrap().is_some());
+    cfg.gst = None;
+    assert!(matches!(
+        range_of(&cfg, &intraday),
+        Err(BacktestError::Invalid(_))
+    ));
+}
+
+#[test]
+fn latest_for_all_reports_the_newest_set_date() {
+    let cfg = two_date_cfg();
+    let latest = CostModel::new(&cfg, HistoryPolicy::LatestForAll, ChargeExchange::Nse);
+    let early = leg(
+        LegInstrument::Cash,
+        Product::Intraday,
+        LegSide::Buy,
+        "500",
+        1,
+        date(2025, 12, 31),
+    );
+    // Strict has no set that early; latest_for_all uses the 2027 set (verified 2027-01-01).
+    assert!(matches!(
+        range_of(&cfg, &early),
+        Err(BacktestError::NoRateSet(_))
+    ));
+    assert_eq!(
+        latest.used_verified_range([&early]).unwrap(),
+        Some((date(2026, 6, 1), date(2027, 1, 1)))
+    );
+}
+
 #[test]
 fn used_verified_range_follows_the_sets_the_legs_actually_used() {
     let cfg = two_date_cfg();
