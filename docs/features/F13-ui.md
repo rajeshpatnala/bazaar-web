@@ -20,7 +20,7 @@ Owner area: `web/` (nothing in `crates/`). Plan: `.agents/plans/F13-ui-slice1.md
 
 ## Decisions
 - Preview B, system/Georgia fonts only, no webfonts, no new dependency.
-- Disclaimer "not SEBI registered" wording is wanted (manager decision, 2026-11-21) but NOT applied: `crates/cli/tests/workspace.rs` requires the TS constant to be byte-equal to `bazaar_core::disclaimer::DISCLAIMER`, so it needs a lockstep crates/core change (see Deferred).
+- Disclaimer "not SEBI registered" wording was applied in PR 103 on 2026-11-21 with owner approval, in lockstep in `crates/core/src/disclaimer.rs` and `web/src/shared/disclaimer.ts` (byte-equality test in `crates/cli/tests/workspace.rs`).
 - The preview's disabled Live toggle becomes a read-only note: live is chosen on the server, never in the UI.
 - Time shown comes from `status.server_time`, never `Date.now()`.
 - Types for ideas, order preview and account are provisional (`// PROVISIONAL`) until F13 server slices publish OpenAPI.
