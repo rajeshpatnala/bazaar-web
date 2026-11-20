@@ -70,6 +70,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - if: hashFiles('web/package.json') != ''
+        name: pinned tool versions (packageManager, .nvmrc)
+        run: |
+          node -e "if(!require('./package.json').packageManager){console.log('::error::add packageManager (e.g. pnpm@10.x) to web/package.json; pnpm/action-setup needs it');process.exit(1)}"
+          test -f .nvmrc || { echo '::error::add web/.nvmrc with the Node major (setup-node reads it)'; exit 1; }
+      - if: hashFiles('web/package.json') != ''
         uses: pnpm/action-setup@v4
         with: { package_json_file: web/package.json }
       - if: hashFiles('web/package.json') != ''
