@@ -274,6 +274,24 @@ pub struct CandleRange {
 }
 
 impl CandleRange {
+    /// Range over `[from, to]` (close times, inclusive) for one symbol, interval and adjusted flag.
+    #[must_use]
+    pub fn new(
+        symbol: &str,
+        interval: Interval,
+        from: DateTime<Tz>,
+        to: DateTime<Tz>,
+        adjusted: bool,
+    ) -> Self {
+        Self {
+            symbol: symbol.to_owned(),
+            interval,
+            from,
+            to,
+            adjusted,
+        }
+    }
+
     /// True when `c` belongs to this range (same interval and adjusted flag, close time inside).
     #[must_use]
     pub fn contains(&self, c: &Candle) -> bool {
@@ -307,7 +325,7 @@ pub trait CandleSink: Send + Sync {
     /// Upsert `candles` for `symbol` keyed by `(symbol, interval, adjusted, close_time)`: the new
     /// row wins, no duplicate remains. All-or-nothing: on error earlier data is intact. A batch
     /// mixing intervals or adjusted flags is refused with `RepoError::Conflict` and writes
-    /// nothing. Updates the `last_candle_ts` marker. Returns the rows written.
+    /// nothing. Duplicate close times inside one batch: the last one wins. Updates the `last_candle_ts` marker. Returns the rows written.
     fn write_candles(
         &self,
         symbol: &str,

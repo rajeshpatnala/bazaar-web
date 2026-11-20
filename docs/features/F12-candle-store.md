@@ -11,3 +11,4 @@ Plan: `.agents/plans/F12-candle-store.md`. Status: in progress.
 ## Deferred
 - Corrupt-value and leftover `*.tmp` cases are adapter-specific; slices 1 and 2.
 - Parquet/DuckDB needs owner approval of new dependencies.
+- SEC-104-1 (slices 1 and 2): bind the symbol as a SQL parameter (never format it into SQL); allowlist the symbol before it is used in a Parquet file path.
