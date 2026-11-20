@@ -115,16 +115,18 @@ pub struct RunFacts {
 
 /// The label and whether the pooled profit factor / expectancy bar was met. `label` and
 /// `meets_pooled_bar` are independent verdicts: a run can be Trusted by trade count and still miss
-/// the bar (PF 0.8), and the trial cap lowers the label but not the bar. Neither is the full bar:
-/// the OOS/IS ratio, the profitable-fold vote, "no single fold supplies all the profit" and the 2x
-/// slippage stress need per-fold data (slice 7), so a consumer needs label AND the full bar.
+/// the bar (PF 0.8), and the trial cap lowers the label but not the bar. `meets_pooled_bar` is
+/// NOT "the evidence bar is met": it covers only the pooled checks. The OOS/IS ratio, the
+/// profitable-fold vote and the single-fold check are in `FoldVote::all_ok` (on
+/// `WalkForwardResult.vote`); the 2x slippage stress is still to come. Never show a run as
+/// meeting the bar from this flag alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Assessment {
     pub label: EvidenceLabel,
     /// Profit factor the run had to reach: the floor plus the trial penalty.
     pub required_profit_factor: Decimal,
     /// R-carrying trade gate, fold count, profit factor and expectancy all met, and not
-    /// approximate-cost. Partial: see the type doc.
+    /// approximate-cost. Pooled checks only, not the full bar: see the type doc.
     pub meets_pooled_bar: bool,
     /// Trades without an R multiple (excluded from the evidence count); show it in the Why panel.
     pub no_r_trades: u32,

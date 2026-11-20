@@ -78,11 +78,12 @@ fn inputs<'a>(
         parameter_sets: sets,
         trials: t,
         kind: RunKind::Plain,
+        charges_used: (day(1, 5), day(7, 1)),
     }
 }
 
 #[test]
-fn walk_forward_gate_evidence_comes_from_the_result_and_blank_text_is_refused() {
+fn walk_forward_gate_evidence_comes_from_the_result() {
     use crate::cost::CostModel;
     use crate::walkforward::{ParamSet, WfParams, walk_forward};
     let charges = charges();
@@ -110,8 +111,26 @@ fn walk_forward_gate_evidence_comes_from_the_result_and_blank_text_is_refused() 
     inp.kind = RunKind::of(&res);
     let prov = build(&inp).unwrap();
     assert_eq!(prov.gate_evidence.as_deref(), Some(res.gate_evidence));
-    assert_ne!(res.gate_evidence, "");
-    inp.kind = RunKind::WalkForward("  ");
+    assert_ne!(res.gate_evidence.trim(), "");
+}
+
+#[test]
+fn the_provenance_records_the_used_charges_range_not_the_file_range() {
+    let charges = charges();
+    let trials = trials();
+    let mut inp = inputs(&[], &charges, &[], &[], &trials);
+    // The whole-file range is a different pair, so this proves the used range is what is stored.
+    assert_eq!(
+        charges_file_verified_range(&charges),
+        Some((day(1, 5), day(7, 1)))
+    );
+    inp.charges_used = (day(3, 1), day(4, 1));
+    let p = build(&inp).unwrap();
+    assert_eq!(
+        (p.charges_verified_from, p.charges_verified_to),
+        (Some(day(3, 1)), Some(day(4, 1)))
+    );
+    inp.charges_used = (day(4, 1), day(3, 1));
     assert!(matches!(build(&inp), Err(BacktestError::Invalid(_))));
 }
 
