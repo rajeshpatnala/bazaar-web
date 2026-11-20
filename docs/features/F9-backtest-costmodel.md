@@ -41,6 +41,8 @@ Slice 3 fix round (PR 86 review): conservative conventions the engine must respe
 - `square_off_intraday` stops at the first error; positions closed before it stay closed (CR-86-5). The slice exceeds the 400-line cap (CR-86-6), flagged only.
 - New dev-dependency for the crate: `proptest` (workspace dep).
 
+Slice 5 (metrics, provenance): `metrics.rs` `Metrics::from_trades` (all Decimal, no float: win rate, profit factor, expectancy R, net, drawdown from starting equity); trades with `r_multiple = None` are excluded from R stats and counted in `no_r_trades`. Profit factor with no losing trade is `None` and fails the bar (conservative). `assess` gives the label (Exploratory for approximate costs, Low below 30 pooled trades or `min_folds`, Trusted at 100 trades and 2 regimes unless the trial count caps it, else Provisional) and `meets_bar` (trade gate, folds, PF >= floor + trial penalty, expectancy); OOS/IS ratio and profitable-fold vote need per-fold data and come with slice 7. `provenance.rs`: SHA-256 config hashes, charges `verified_on` range over the whole file, `build` fills `Provenance`. New dependency: `sha2` (workspace dep, already used by bazaar-data).
+
 ## Deferred
 Contract-note cross-check; QUAN-66-3 (delivery minimum); Monte Carlo (drawdown and stability are reported, not blocking).
 Slice 4 must call `charges_with_dp` (one `DpLedger` per run, never shared across rayon runs) and test `dp == 15.34` on a delivery round trip; `[option_exercise]` STT (0.15% of intrinsic on exercised long options, QUAN-85-5) is deferred to the expiry/engine slice; the charges `verified_on` range for provenance is not yet exposed by `CostModel` (slice 4/7).
