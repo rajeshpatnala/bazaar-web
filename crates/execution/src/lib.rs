@@ -7,5 +7,7 @@
 
 pub mod audit;
 pub mod executor;
+pub mod killswitch;
+pub mod sink;
 pub mod state;
 pub mod types;

@@ -13,18 +13,22 @@ TTL check, fresh-quote re-gate and drift check happen while the order is still `
 (a failure ends `Blocked` via `GateBlocked`), then `Approve` and `Send`. `Approved` only exits via
 `Send` or `GuardBlocked`.
 
-## Slice 1/2 acceptance items (from PR 96 review)
-- One execution-owned kill-switch reader maps `Err` to engaged; test with an erroring repo (RISK-96-6).
-- `ApprovedOrder` minted only inside the pipeline module with a gate-pass token (RISK-96-8).
-- Minute cap still blocks the 5th order with the per-second cap on (RISK-96-5).
-- Store test: append via `chain_hash`, then `verify_chain(read_all())`; fail closed with `Corrupt`; trigger test is a merge condition (SEC-96-3, RISK-96-9).
-- Anchor the latest audit (seq, hash) outside the table (SEC-96-2, RISK-96-9).
+## Slice 1 (kill switch + chain audit sink)
+- `execution::killswitch`: `KillSwitch<R>`; `admits(reduce_only)` is the one decision for pipeline and `GuardedExecutor`; unreadable state refuses everything incl. reduce-only (RISK-96-6). `engage`/`release` write state + audit row together; wrong phrase writes nothing.
+- `execution::sink`: `ChainAuditSink` (`risk::AuditSink`) over `AuditRepo` via a writer task and bounded `recv_timeout`; needs a multi-thread runtime or `spawn_blocking`, else it fails closed by timeout.
+- Fake-repo chain test: sink + kill-switch rows verify with `verify_chain`; wrong hash fails closed (SEC-96-3, fake part).
+
+## Open acceptance items (from PR 96 review)
+- `ApprovedOrder` minted only inside the pipeline module with a gate-pass token (RISK-96-8, slice 3).
+- Minute cap still blocks the 5th order with the per-second cap on (RISK-96-5, slice 2).
+- Real-store trigger/`Corrupt` test is a slice 7 merge condition (SEC-96-3, RISK-96-9).
 
 ## Pre-live checklist: all new `[execution]` keys are UNVERIFIED (owner to confirm; no `source`/`verified_on` yet)
 `approval_ttl_secs`, `max_quote_drift_bps`, `max_orders_per_second`, `kill_switch_release_phrase`, `kill_allow_reduce_only`, `breaker_engages_kill_switch`, `paper_slippage_bps.*`, `paper_max_participation`, `paper_stale_after_secs`, `paper_mis_square_off_ist`, and the ceilings `hard_limits.max_approval_ttl_secs`, `hard_limits.max_quote_drift_bps` (SEC-96-4).
 
 ## Deferred
 - Owner to confirm defaults (RISK-96-11): 300 s approval TTL, 50 bps drift, `breaker_engages_kill_switch = false`. All stay UNVERIFIED.
-- `kill_allow_reduce_only` must be read by both the pipeline and `GuardedExecutor` (slice 1).
+- `GuardedExecutor` (slice 2) and the pipeline (slice 3) must both call `KillSwitch::admits`.
+- Defer RISK-96-8 to slice 3; RISK-96-5 to slice 2; SEC-96-2 anchor of latest (seq, hash) to slice 8; CR-96-5 to slice 5.
 - Bound `paper_mis_square_off_ist` against the session calendar (CR-96-5); slice sizes for later F10 slices <= 400 lines (CR-96-6).
 - Rows-only chain cannot detect tail truncation (see ADR).

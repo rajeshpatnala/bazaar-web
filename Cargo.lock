@@ -307,8 +307,10 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "rust_decimal",
+ "serde_json",
  "sha2",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
