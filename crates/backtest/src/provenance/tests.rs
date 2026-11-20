@@ -174,7 +174,6 @@ fn walk_forward_gate_evidence_comes_from_the_result() {
     let params = WfParams {
         capital: Decimal::ONE_THOUSAND,
         sets: &sets,
-        regimes: 1,
         cost: CostModel::new(
             &charges,
             HistoryPolicy::Strict,
