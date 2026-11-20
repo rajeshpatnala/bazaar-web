@@ -1,0 +1,18 @@
+{
+  "source": "Zerodha brokerage calculator, pasted by owner 2026-11-20 (.agents/owner-input/F2-charges-calculator.md)",
+  "verified_on": "2026-11-20",
+  "tolerance_per_line": "0.05",
+  "note": "Quantity 1 for futures and options (owner found no lot option). DP is not part of delivery totals. All amounts are rupee strings.",
+  "samples": [
+    {"id": 1, "case": "equity intraday NSE", "exchange": "NSE", "product": "intraday", "instrument": "cash", "buy": "500", "sell": "510", "qty": 100,
+     "brokerage": "30.3", "stt": "13", "exchange_txn": "3.1", "gst": "6.03", "sebi": "0.1", "stamp": "2", "total": "54.53"},
+    {"id": 2, "case": "equity delivery NSE", "exchange": "NSE", "product": "delivery", "instrument": "cash", "buy": "500", "sell": "510", "qty": 100,
+     "brokerage": "0", "stt": "101", "exchange_txn": "3.1", "gst": "0.58", "sebi": "0.1", "stamp": "8", "total": "112.78"},
+    {"id": 3, "case": "equity intraday BSE", "exchange": "BSE", "product": "intraday", "instrument": "cash", "buy": "500", "sell": "510", "qty": 100,
+     "brokerage": "30.3", "stt": "13", "exchange_txn": "3.79", "gst": "6.15", "sebi": "0.1", "stamp": "2", "total": "55.34"},
+    {"id": 4, "case": "futures NSE", "exchange": "NSE", "product": "carry", "instrument": "future", "buy": "24000", "sell": "24100", "qty": 1,
+     "brokerage": "14.43", "stt": "12", "exchange_txn": "0.88", "gst": "2.76", "sebi": "0.05", "stamp": "0", "total": "30.12"},
+    {"id": 5, "case": "options NSE", "exchange": "NSE", "product": "carry", "instrument": "option_call", "buy": "100", "sell": "120", "qty": 1,
+     "brokerage": "40", "stt": "0", "exchange_txn": "0.08", "gst": "7.21", "sebi": "0", "stamp": "0", "total": "47.29"}
+  ]
+}

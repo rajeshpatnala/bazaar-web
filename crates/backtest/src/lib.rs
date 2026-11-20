@@ -6,10 +6,12 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod config;
+pub mod cost;
 pub mod fill;
 pub mod types;
 
 pub use config::{BacktestConfig, BacktestConfigError};
+pub use cost::{CostModel, DpLedger};
 pub use types::{
     BacktestError, ChargeBreakdown, EquityPoint, EvidenceLabel, Fill, FillKind, HistoryPolicy, Leg,
     LegInstrument, LegSide, OptionRight, Product, Provenance, SlippageClass, Trade,
