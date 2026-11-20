@@ -54,6 +54,9 @@ pub struct ProvenanceInputs<'a> {
     /// parameter run still counts as one trial.
     pub parameter_sets: &'a [(String, String)],
     pub trials: &'a Trials,
+    /// The walk-forward `gate_evidence` text for a walk-forward run; `None` for a plain run. A
+    /// walk-forward result saved without it would hide that `walk_forward_pass` was assumed.
+    pub gate_evidence: Option<&'a str>,
 }
 
 /// Build the provenance. The universe is sorted and de-duplicated, hashes are ordered by file
@@ -68,6 +71,9 @@ pub fn build(i: &ProvenanceInputs<'_>) -> Result<Provenance, BacktestError> {
     }
     let (from, to) = charges_file_verified_range(i.charges)
         .ok_or_else(|| BacktestError::Invalid("charges file has no verified_on date".into()))?;
+    if i.gate_evidence.is_some_and(|g| g.trim().is_empty()) {
+        return Err(BacktestError::Invalid("gate evidence text is empty".into()));
+    }
     let mut seen = HashSet::new();
     let mut sets: Vec<String> = Vec::new();
     for (strategy, params) in i.parameter_sets {
@@ -97,6 +103,7 @@ pub fn build(i: &ProvenanceInputs<'_>) -> Result<Provenance, BacktestError> {
         parameter_sets: sets,
         trial_penalty_pf: i.trials.profit_factor_penalty(in_run),
         trials: i.trials.total_trials(in_run),
+        gate_evidence: i.gate_evidence.map(str::to_owned),
     })
 }
 

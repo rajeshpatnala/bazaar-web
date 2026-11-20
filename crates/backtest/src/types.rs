@@ -248,6 +248,9 @@ pub struct Provenance {
     /// Distinct (strategy id, parameter set) evaluated in-sample plus `prior_trials`
     /// (`Trials::total_trials`, saturating).
     pub trials: u32,
+    /// Walk-forward runs: how the gate's evidence was produced (`walk_forward_pass` is assumed
+    /// true in OOS windows; measurement context only). `None` for a plain run.
+    pub gate_evidence: Option<String>,
 }
 
 /// Errors of the backtest crate. Typed; never a silent default.

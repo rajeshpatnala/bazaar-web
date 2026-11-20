@@ -9,6 +9,7 @@ pub mod config;
 pub mod cost;
 pub mod engine;
 pub mod fill;
+pub mod foldvote;
 pub mod gate_policy;
 pub mod ledger;
 pub mod metrics;

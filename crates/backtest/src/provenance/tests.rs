@@ -77,7 +77,24 @@ fn inputs<'a>(
         universe: uni,
         parameter_sets: sets,
         trials: t,
+        gate_evidence: None,
     }
+}
+
+#[test]
+fn walk_forward_gate_evidence_is_recorded_and_blank_text_is_refused() {
+    let c = charges();
+    let t = trials();
+    let mut i = inputs(&[], &c, &[], &[], &t);
+    assert_eq!(build(&i).unwrap().gate_evidence, None);
+    i.gate_evidence = Some(crate::walkforward::GATE_EVIDENCE);
+    let p = build(&i).unwrap();
+    assert_eq!(
+        p.gate_evidence.as_deref(),
+        Some(crate::walkforward::GATE_EVIDENCE)
+    );
+    i.gate_evidence = Some("  ");
+    assert!(matches!(build(&i), Err(BacktestError::Invalid(_))));
 }
 
 #[test]
