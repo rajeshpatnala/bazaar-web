@@ -32,6 +32,15 @@ Slice 1 (cost model): `cost/mod.rs` `CostModel::new(cfg, policy, exchange)`; `ch
 Slice 2 (fill model, `crates/backtest/src/fill`): next-open entry with optional no-chase zone limit, gap-aware stop (`min`/`max` with open, then stop slippage), target fill only when traded through by `target_through_ticks`, stop wins a same-bar tie, time exit, adverse tick rounding of slippage and of stop/target levels, stop/target side validation, slippage multiplier (2x stress hook), lot floor. Target fills use entry-class slippage with no gap credit: a conservative choice per policy section 1 (decided, keep). Not in this slice (slice 4, engine): AC4 peeking-double and `lookahead_` property tests, limit-entry fills, the no-`Fill`-with-default-charges test (QUAN-84-6), wiring `stress_slippage_multiplier` into the stress re-run (QUAN-84-3 hook exists as `FillParams::slippage_multiplier`).
 Slice 3 (ledger): `ledger.rs` `Ledger::new(CostModel, capital)` owns one `DpLedger` (never share across runs); `apply(strategy_id, Fill, stop)` prices every fill via `charges_with_dp`, opens or fully closes a position (no pyramiding or partial exits; errors leave state untouched) and returns the `Trade` (gross after slippage, net after all charges, R to 4 dp, `None` when risk is 0); `square_off_intraday(date, exit_for)`; `mark` records net equity (capital + realised - open entry charges + unrealised); `max_drawdown` gives the largest rupee and percent fall.
 
+Slice 3 fix round (PR 86 review): conservative conventions the engine must respect.
+- Drawdown peak is seeded with starting capital (`max_drawdown(starting_equity, curve)`).
+- Open positions are valued at gross unrealised minus entry charges; exit charges are NOT reserved (QUAN-86-5), so an open ledger is slightly optimistic. The engine must force-close at run end or report net of estimated exit charges.
+- Marks carry forward per token over a missing bar; `mark` rejects time going backwards.
+- Trades with no stop have `r_multiple = None` (QUAN-86-6): metrics must exclude them from R statistics and count them separately; the engine should reject stop-less entries where a stop is required.
+- Opening validation: stop must be on the loss side; delivery is long only; an exit may not precede its entry; all arithmetic is checked.
+- `square_off_intraday` stops at the first error; positions closed before it stay closed (CR-86-5). The slice exceeds the 400-line cap (CR-86-6), flagged only.
+- New dev-dependency for the crate: `proptest` (workspace dep).
+
 ## Deferred
 Contract-note cross-check; QUAN-66-3 (delivery minimum); Monte Carlo (drawdown and stability are reported, not blocking).
 Slice 4 must call `charges_with_dp` (one `DpLedger` per run, never shared across rayon runs) and test `dp == 15.34` on a delivery round trip; `[option_exercise]` STT (0.15% of intrinsic on exercised long options, QUAN-85-5) is deferred to the expiry/engine slice; the charges `verified_on` range for provenance is not yet exposed by `CostModel` (slice 4/7).

@@ -313,8 +313,9 @@ fn same_side_partial_and_product_mismatch_are_invalid_and_leave_state_alone() {
 }
 
 #[test]
-fn a_costing_error_does_not_consume_the_dp_slot() {
-    // A sell dated before every rate set errors; the same-day retry afterwards still pays DP.
+fn a_failed_close_does_not_consume_the_dp_slot() {
+    // The sell is costed (DP booked) but the realised total overflows: the slot is released, so
+    // the retry on the same day still pays DP.
     let cfg = cfg();
     let mut l = ledger(&cfg);
     l.apply(
@@ -323,21 +324,162 @@ fn a_costing_error_does_not_consume_the_dp_slot() {
         None,
     )
     .unwrap();
-    let mut early = fill(1, Product::Delivery, LegSide::Sell, "100", 10, 1);
-    early.leg.trade_date = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+    l.realised = Decimal::MAX;
+    let sell = fill(1, Product::Delivery, LegSide::Sell, "110", 10, 1);
     assert!(matches!(
-        l.apply("s", early, None),
-        Err(BacktestError::NoRateSet(_))
+        l.apply("s", sell, None),
+        Err(BacktestError::Overflow(_))
     ));
+    assert!(l.open_position(1).is_some());
+    l.realised = Decimal::ZERO;
     let t = l
         .apply(
             "s",
-            fill(1, Product::Delivery, LegSide::Sell, "100", 10, 1),
+            fill(1, Product::Delivery, LegSide::Sell, "110", 10, 1),
             None,
         )
         .unwrap()
         .unwrap();
     assert_eq!(t.charges.dp, d("15.34"));
+}
+
+#[test]
+fn wrong_side_or_equal_stops_are_invalid() {
+    let cfg = cfg();
+    let mut l = ledger(&cfg);
+    for stop in ["100", "105"] {
+        let buy = fill(1, Product::Intraday, LegSide::Buy, "100", 10, 5);
+        assert!(matches!(
+            l.apply("s", buy, Some(px(stop))),
+            Err(BacktestError::Invalid(_))
+        ));
+    }
+    for stop in ["100", "95"] {
+        let sell = fill(1, Product::Intraday, LegSide::Sell, "100", 10, 5);
+        assert!(matches!(
+            l.apply("s", sell, Some(px(stop))),
+            Err(BacktestError::Invalid(_))
+        ));
+    }
+    assert!(l.open_position(1).is_none());
+}
+
+#[test]
+fn opening_delivery_sell_is_invalid() {
+    let cfg = cfg();
+    let mut l = ledger(&cfg);
+    let sell = fill(1, Product::Delivery, LegSide::Sell, "100", 10, 5);
+    assert!(matches!(
+        l.apply("s", sell, None),
+        Err(BacktestError::Invalid(_))
+    ));
+    assert!(l.open_position(1).is_none());
+}
+
+#[test]
+fn exit_before_entry_is_invalid() {
+    let cfg = cfg();
+    let mut l = ledger(&cfg);
+    l.apply(
+        "s",
+        fill(1, Product::Intraday, LegSide::Buy, "100", 10, 5),
+        None,
+    )
+    .unwrap();
+    let earlier_day = fill(1, Product::Intraday, LegSide::Sell, "100", 10, 4);
+    assert!(matches!(
+        l.apply("s", earlier_day, None),
+        Err(BacktestError::Invalid(_))
+    ));
+    let mut earlier_bar = fill(1, Product::Intraday, LegSide::Sell, "100", 10, 5);
+    earlier_bar.bar_time = Kolkata.with_ymd_and_hms(2026, 6, 5, 9, 0, 0).unwrap();
+    assert!(matches!(
+        l.apply("s", earlier_bar, None),
+        Err(BacktestError::Invalid(_))
+    ));
+    assert!(l.open_position(1).is_some());
+    assert_eq!(l.trades(), &[] as &[Trade]);
+}
+
+#[test]
+fn mark_rejects_time_going_backwards() {
+    let cfg = cfg();
+    let mut l = ledger(&cfg);
+    l.mark(at(2), &BTreeMap::new()).unwrap();
+    assert!(matches!(
+        l.mark(at(1), &BTreeMap::new()),
+        Err(BacktestError::Invalid(_))
+    ));
+    assert_eq!(l.equity_curve().len(), 1);
+}
+
+#[test]
+fn mark_overflow_is_an_error_and_leaves_state_alone() {
+    let cfg = cfg();
+    let mut l = Ledger::new(
+        CostModel::new(&cfg, HistoryPolicy::Strict, ChargeExchange::Nse),
+        Decimal::MAX,
+    );
+    l.apply(
+        "s",
+        fill(1, Product::Intraday, LegSide::Buy, "100", 10, 5),
+        None,
+    )
+    .unwrap();
+    let marks = BTreeMap::from([(1_u32, px("105"))]);
+    assert!(matches!(
+        l.mark(at(5), &marks),
+        Err(BacktestError::Overflow(_))
+    ));
+    assert_eq!(l.equity_curve(), &[] as &[EquityPoint]);
+    assert_eq!(l.open_position(1).unwrap().last_mark, px("100"));
+}
+
+#[test]
+fn drawdown_overflow_is_an_error() {
+    let c = vec![EquityPoint {
+        time: at(1),
+        equity: Decimal::MIN,
+    }];
+    assert!(matches!(
+        max_drawdown(Decimal::MAX, &c),
+        Err(BacktestError::Overflow(_))
+    ));
+}
+
+#[test]
+fn drawdown_is_measured_from_starting_capital() {
+    // Capital 100000, equity only ever falls: 98000 then 97000 -> fall 3000, 3%.
+    let dd = max_drawdown(d("100000"), &curve(&["98000", "97000"])).unwrap();
+    assert_eq!(dd.max_abs, d("3000"));
+    assert_eq!(dd.max_pct, d("0.03"));
+}
+
+#[test]
+fn non_positive_peak_skips_the_percent() {
+    let dd = max_drawdown(d("0"), &curve(&["-10"])).unwrap();
+    assert_eq!(dd.max_abs, d("10"));
+    assert_eq!(dd.max_pct, d("0"));
+}
+
+proptest::proptest! {
+    #[test]
+    fn flat_equity_equals_capital_plus_realised(
+        trips in proptest::collection::vec((1_u32..500, 1_u32..500, 1_u32..20, proptest::bool::ANY), 1..4)
+    ) {
+        let cfg = cfg();
+        let mut l = ledger(&cfg);
+        for (entry, exit, qty, long) in trips {
+            let (open, close) = if long { (LegSide::Buy, LegSide::Sell) } else { (LegSide::Sell, LegSide::Buy) };
+            l.apply("s", fill(1, Product::Intraday, open, &entry.to_string(), qty, 5), None).unwrap();
+            l.apply("s", fill(1, Product::Intraday, close, &exit.to_string(), qty, 5), None).unwrap();
+            let eq = l.mark(at(5), &BTreeMap::new()).unwrap();
+            proptest::prop_assert_eq!(eq, d("100000") + l.realised_net());
+        }
+        let dd = l.drawdown().unwrap();
+        proptest::prop_assert!(dd.max_abs >= Decimal::ZERO);
+        proptest::prop_assert!(dd.max_pct >= Decimal::ZERO && dd.max_pct <= Decimal::ONE);
+    }
 }
 
 #[test]
@@ -353,8 +495,8 @@ fn equity_includes_open_entry_charges_and_unrealised_gross() {
     .unwrap();
     let marks = BTreeMap::from([(1_u32, px("505"))]);
     assert_eq!(l.mark(at(1), &marks).unwrap(), d("100450"));
-    // No mark: valued at entry, only the 50 of charges shows.
-    assert_eq!(l.mark(at(2), &BTreeMap::new()).unwrap(), d("99950"));
+    // No mark: the last mark (505) is carried forward.
+    assert_eq!(l.mark(at(2), &BTreeMap::new()).unwrap(), d("100450"));
     // A short marked down gains.
     l.apply(
         "s",
@@ -382,7 +524,7 @@ fn curve(values: &[&str]) -> Vec<EquityPoint> {
 #[test]
 fn drawdown_on_a_known_curve() {
     // Peaks 100 -> 110 -> 120. Falls: 11 (110 -> 99), 20 (110 -> 90, 20/110 = 0.181818).
-    let dd = max_drawdown(&curve(&["100", "110", "99", "105", "90", "120"])).unwrap();
+    let dd = max_drawdown(d("100"), &curve(&["100", "110", "99", "105", "90", "120"])).unwrap();
     assert_eq!(dd.max_abs, d("20"));
     assert_eq!(dd.max_pct, d("0.181818"));
 }
@@ -390,10 +532,10 @@ fn drawdown_on_a_known_curve() {
 #[test]
 fn drawdown_abs_and_pct_can_peak_at_different_points() {
     // 1000 -> 60 is a fall of 940 (94%); 200 -> 180 is 20 (10%).
-    let dd = max_drawdown(&curve(&["1000", "900", "100", "60"])).unwrap();
+    let dd = max_drawdown(d("1000"), &curve(&["1000", "900", "100", "60"])).unwrap();
     assert_eq!(dd.max_abs, d("940"));
     assert_eq!(dd.max_pct, d("0.94"));
-    let dd = max_drawdown(&curve(&["100", "90", "200", "180"])).unwrap();
+    let dd = max_drawdown(d("100"), &curve(&["100", "90", "200", "180"])).unwrap();
     assert_eq!(dd.max_abs, d("20"));
     assert_eq!(dd.max_pct, d("0.1"));
 }
@@ -404,8 +546,11 @@ fn drawdown_of_empty_or_rising_curve_is_zero() {
         max_abs: d("0"),
         max_pct: d("0"),
     };
-    assert_eq!(max_drawdown(&[]).unwrap(), zero);
-    assert_eq!(max_drawdown(&curve(&["1", "2", "3"])).unwrap(), zero);
+    assert_eq!(max_drawdown(d("100"), &[]).unwrap(), zero);
+    assert_eq!(
+        max_drawdown(d("1"), &curve(&["1", "2", "3"])).unwrap(),
+        zero
+    );
 }
 
 #[test]
