@@ -117,6 +117,10 @@ pub struct HardLimits {
     pub max_size_factor: Decimal,
     /// Smallest allowed `gate.evidence.min_oos_trades`.
     pub min_oos_trades: u32,
+    /// Ceiling for `execution.approval_ttl_secs`.
+    pub max_approval_ttl_secs: u32,
+    /// Ceiling for `execution.max_quote_drift_bps`.
+    pub max_quote_drift_bps: u32,
     /// Ceiling for `override.max_per_day`.
     pub max_override_per_day: u32,
     /// Ceiling for `override.max_per_week`.
@@ -235,6 +239,38 @@ pub struct OverrideSection {
 pub struct ExecutionSection {
     #[serde(deserialize_with = "super::decimal_str::deserialize")]
     pub paper_starting_cash_inr: Decimal,
+    /// Seconds an approval request stays open (F10). Unverified, owner to confirm.
+    pub approval_ttl_secs: u32,
+    /// Largest move of the fresh quote from the intent price, in bps, that an approval accepts.
+    pub max_quote_drift_bps: u32,
+    /// Own cap on orders per second (the minute and day caps live in `[limits]`).
+    pub max_orders_per_second: u32,
+    /// Phrase the user types to release the kill switch.
+    pub kill_switch_release_phrase: String,
+    /// While the kill switch is engaged an approved `reduce_only` exit may still be sent.
+    pub kill_allow_reduce_only: bool,
+    /// When true the daily-loss breaker also engages the kill switch.
+    pub breaker_engages_kill_switch: bool,
+    /// Paper slippage against the trader, in bps, per segment.
+    pub paper_slippage_bps: PaperSlippage,
+    /// Largest share of a bar's volume one paper order may take, in (0,1].
+    #[serde(deserialize_with = "super::decimal_str::deserialize")]
+    pub paper_max_participation: Decimal,
+    /// Paper quotes older than this many seconds are stale: no fill.
+    pub paper_stale_after_secs: u32,
+    /// IST `HH:MM` at which paper MIS positions are squared off.
+    #[serde(deserialize_with = "hhmm")]
+    pub paper_mis_square_off_ist: NaiveTime,
+}
+
+/// `[execution.paper_slippage_bps]`: one value per segment.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PaperSlippage {
+    pub equity: u32,
+    pub equity_derivatives: u32,
+    pub currency: u32,
+    pub commodity: u32,
 }
 
 /// `risk.toml`.
@@ -819,6 +855,69 @@ impl ConfigFile for RiskConfig {
                 "must be above 0",
             ));
         }
+        self.validate_execution_keys()
+    }
+}
+
+impl RiskConfig {
+    /// F10 `[execution]` keys: positive windows, caps within the `[hard_limits]` caps.
+    fn validate_execution_keys(&self) -> Result<(), ConfigError> {
+        let e = &self.execution;
+        let bad = |key: &str, why: &str| Err(ConfigError::invalid(Self::FILE, key, why));
+        for (key, v) in [
+            ("execution.approval_ttl_secs", e.approval_ttl_secs),
+            ("execution.max_quote_drift_bps", e.max_quote_drift_bps),
+            ("execution.max_orders_per_second", e.max_orders_per_second),
+            ("execution.paper_stale_after_secs", e.paper_stale_after_secs),
+            (
+                "execution.paper_slippage_bps.equity",
+                e.paper_slippage_bps.equity,
+            ),
+            (
+                "execution.paper_slippage_bps.equity_derivatives",
+                e.paper_slippage_bps.equity_derivatives,
+            ),
+            (
+                "execution.paper_slippage_bps.currency",
+                e.paper_slippage_bps.currency,
+            ),
+            (
+                "execution.paper_slippage_bps.commodity",
+                e.paper_slippage_bps.commodity,
+            ),
+        ] {
+            if v == 0 {
+                return bad(key, "must be above 0");
+            }
+        }
+        check_ceiling_u32(
+            "execution.approval_ttl_secs",
+            e.approval_ttl_secs,
+            self.hard_limits.max_approval_ttl_secs,
+        )?;
+        check_ceiling_u32(
+            "execution.max_quote_drift_bps",
+            e.max_quote_drift_bps,
+            self.hard_limits.max_quote_drift_bps,
+        )?;
+        // G15: paper must not fill on quotes the gate would refuse. The per-minute and per-day
+        // caps in [limits] always apply in addition to the per-second cap.
+        if e.paper_stale_after_secs > self.data.max_quote_age_secs {
+            return bad(
+                "execution.paper_stale_after_secs",
+                "must not exceed data.max_quote_age_secs (G15)",
+            );
+        }
+        if e.kill_switch_release_phrase.trim().len() < 8 {
+            return bad(
+                "execution.kill_switch_release_phrase",
+                "must be at least 8 characters",
+            );
+        }
+        let p = e.paper_max_participation;
+        if p <= Decimal::ZERO || p > Decimal::ONE {
+            return bad("execution.paper_max_participation", "must be in (0, 1]");
+        }
         Ok(())
     }
 }
@@ -848,6 +947,7 @@ mod tests {
         max_ban_list_age_hours = 24\nmax_quote_age_secs = 5\nmax_snapshot_age_secs = 10\n\
         latest_expiry_day_no_new_after_ist = \"13:30\"\nmin_confirm_delay_secs = 10\n\
         max_size_factor = \"0.5\"\nmin_oos_trades = 30\n\
+        max_approval_ttl_secs = 3600\nmax_quote_drift_bps = 500\n\
         [exposure]\nmax_sector_pct = \"30\"\nmax_correlated_positions = 2\n\
         correlation_threshold = \"0.7\"\ncorrelation_window_days = 60\n\
         [behaviour]\ncooloff_after_losses = 2\ncooloff_until = \"end_of_session\"\n\
@@ -855,6 +955,11 @@ mod tests {
         entry_zone_tolerance_bps = 0\nreentry_lockout_minutes = 60\n\
         max_new_entries_per_day = 3\n\
         [execution]\npaper_starting_cash_inr = \"100000\"\n\
+        approval_ttl_secs = 300\nmax_quote_drift_bps = 50\nmax_orders_per_second = 1\n\
+        kill_switch_release_phrase = \"RELEASE KILL SWITCH\"\nkill_allow_reduce_only = true\nbreaker_engages_kill_switch = false\n\
+        paper_max_participation = \"0.1\"\npaper_stale_after_secs = 5\n\
+        paper_mis_square_off_ist = \"15:15\"\n\
+        [execution.paper_slippage_bps]\nequity = 5\nequity_derivatives = 5\ncurrency = 2\ncommodity = 5\n\
         [options]\nallow_naked_short = false\n\
         [events]\nblock_ban_list = true\nban_list_max_age_hours = 24\n\
         block_results_days = true\nblock_policy_days = true\n\
@@ -1602,5 +1707,41 @@ mod tests {
         assert_eq!(cfg.hard_limits.max_open_positions, 3);
         assert_eq!(cfg.override_.max_per_day, 1);
         assert_eq!(cfg.verified_on, NaiveDate::from_ymd_opt(2026, 11, 18));
+    }
+
+    #[test]
+    fn f10_execution_keys_parse_and_are_validated() {
+        let cfg = parse_str::<RiskConfig>(OK).unwrap();
+        let e = &cfg.execution;
+        assert_eq!((e.approval_ttl_secs, e.max_quote_drift_bps), (300, 50));
+        assert_eq!(e.paper_slippage_bps.currency, 2);
+        assert_eq!(e.paper_mis_square_off_ist.to_string(), "15:15:00");
+        for (from, to) in [
+            ("approval_ttl_secs = 300", "approval_ttl_secs = 0"),
+            ("max_orders_per_second = 1", "max_orders_per_second = 0"),
+            ("approval_ttl_secs = 300", "approval_ttl_secs = 3601"),
+            (
+                "\nmax_quote_drift_bps = 50\n",
+                "\nmax_quote_drift_bps = 501\n",
+            ),
+            (
+                "\nmax_quote_drift_bps = 50\n",
+                "\nmax_quote_drift_bps = 0\n",
+            ),
+            ("equity = 5", "equity = 0"),
+            ("currency = 2", "currency = 0"),
+            ("paper_stale_after_secs = 5", "paper_stale_after_secs = 6"),
+            ("RELEASE KILL SWITCH", "short"),
+            (
+                "paper_max_participation = \"0.1\"",
+                "paper_max_participation = \"1.5\"",
+            ),
+            ("paper_stale_after_secs = 5", "paper_stale_after_secs = 0"),
+        ] {
+            assert!(
+                parse_str::<RiskConfig>(&OK.replace(from, to)).is_err(),
+                "{from}"
+            );
+        }
     }
 }

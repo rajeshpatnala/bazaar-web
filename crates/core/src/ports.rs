@@ -19,6 +19,9 @@ pub enum RepoError {
     /// A stored value could not be decoded.
     #[error("stored data is corrupt")]
     Corrupt,
+    /// A uniqueness or optimistic-version check failed (the stale writer loses).
+    #[error("store conflict")]
+    Conflict,
     /// Any other storage failure.
     #[error("store error")]
     Other,
@@ -32,6 +35,7 @@ impl RepoError {
             Self::Unavailable => "unavailable",
             Self::Schema => "schema",
             Self::Corrupt => "corrupt",
+            Self::Conflict => "conflict",
             Self::Other => "other",
         }
     }
@@ -89,6 +93,208 @@ pub trait InstrumentRepo: Send + Sync {
 
     /// Cheap liveness check of the store.
     fn ping(&self) -> impl Future<Output = Result<(), RepoError>> + Send;
+}
+
+// ---- F10 execution ports. Plain data only: core knows no execution or risk type. ----
+
+/// Injected id source (128-bit, time-ordered in production, a counter in tests).
+pub trait IdGen: Send + Sync {
+    /// Next unique id.
+    fn next_id(&self) -> u128;
+}
+
+/// One persisted order: opaque state label and payload, owned by `bazaar-execution`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderRecord {
+    pub intent_id: u128,
+    /// Optimistic-lock counter; starts at 0 and rises by one per `advance`.
+    pub version: u32,
+    pub state: String,
+    /// Canonical JSON of the order intent.
+    pub payload: String,
+}
+
+/// An audit entry before the store assigns `seq`, `prev_hash` and `hash`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditDraft {
+    pub ts_ist_rfc3339: String,
+    pub actor: String,
+    pub kind: String,
+    /// Canonical JSON (keys sorted, no whitespace).
+    pub payload: String,
+}
+
+/// A stored audit row. See `docs/adr/0001-audit-hash-chain.md`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditRow {
+    pub seq: u64,
+    pub draft: AuditDraft,
+    pub prev_hash: [u8; 32],
+    pub hash: [u8; 32],
+}
+
+/// Pure hash function the caller passes in, so the store never depends on `execution`:
+/// `(prev_hash, seq, draft) -> hash`.
+pub type ChainFn = fn(&[u8; 32], u64, &AuditDraft) -> [u8; 32];
+
+/// Append-only, hash-chained audit log. No update or delete path exists.
+pub trait AuditRepo: Send + Sync {
+    /// Append in one transaction; the store computes `hash` with `chain` against the last row.
+    fn append(
+        &self,
+        draft: AuditDraft,
+        chain: ChainFn,
+    ) -> impl Future<Output = Result<AuditRow, RepoError>> + Send;
+    /// All rows in `seq` order, for `verify_chain`.
+    fn read_all(&self) -> impl Future<Output = Result<Vec<AuditRow>, RepoError>> + Send;
+}
+
+/// Order store. `insert` and `advance` write state, event and audit row in one transaction.
+pub trait OrderRepo: Send + Sync {
+    /// Insert a new order at version 0; a duplicate id is `RepoError::Conflict`.
+    fn insert(
+        &self,
+        order: OrderRecord,
+        audit: AuditDraft,
+        chain: ChainFn,
+    ) -> impl Future<Output = Result<(), RepoError>> + Send;
+    /// One order by id.
+    fn get(
+        &self,
+        intent_id: u128,
+    ) -> impl Future<Output = Result<Option<OrderRecord>, RepoError>> + Send;
+    /// Move to `new_state` and record `event_kind`; `RepoError::Conflict` when `expected_version`
+    /// is stale (the stale writer loses). Returns the new version.
+    fn advance(
+        &self,
+        intent_id: u128,
+        expected_version: u32,
+        new_state: String,
+        event_kind: String,
+        audit: AuditDraft,
+        chain: ChainFn,
+    ) -> impl Future<Output = Result<u32, RepoError>> + Send;
+}
+
+/// A user's decision on an approval request: a closed set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalDecision {
+    Approve,
+    Decline,
+}
+
+impl ApprovalDecision {
+    /// Stable label stored in the database.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Approve => "approve",
+            Self::Decline => "decline",
+        }
+    }
+
+    /// Parse a stored label.
+    ///
+    /// # Errors
+    /// `RepoError::Corrupt` for any value outside the closed set; stores use this on read.
+    pub fn parse(s: &str) -> Result<Self, RepoError> {
+        match s {
+            "approve" => Ok(Self::Approve),
+            "decline" => Ok(Self::Decline),
+            _ => Err(RepoError::Corrupt),
+        }
+    }
+}
+
+/// Approval decisions, one per intent (first wins).
+pub trait ApprovalRepo: Send + Sync {
+    /// Record `decision` for the intent. Returns the decision that stands: `decision` when this
+    /// call was first, the earlier one otherwise. A stored value outside the closed set is
+    /// `RepoError::Corrupt`.
+    fn decide(
+        &self,
+        intent_id: u128,
+        decision: ApprovalDecision,
+        at_ist_rfc3339: String,
+    ) -> impl Future<Output = Result<ApprovalDecision, RepoError>> + Send;
+}
+
+/// Persistent kill switch. A read error must be treated as engaged by the caller.
+pub trait KillSwitchRepo: Send + Sync {
+    /// Current state.
+    fn is_engaged(&self) -> impl Future<Output = Result<bool, RepoError>> + Send;
+    /// Engage or release, with its audit row in the same transaction.
+    fn set(
+        &self,
+        engaged: bool,
+        audit: AuditDraft,
+        chain: ChainFn,
+    ) -> impl Future<Output = Result<(), RepoError>> + Send;
+}
+
+/// One append-only paper ledger line; balances are derived by replay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LedgerEntry {
+    pub epoch: u32,
+    pub kind: String,
+    /// Signed rupees (credit positive), exact decimal.
+    pub amount: rust_decimal::Decimal,
+    pub ref_id: Option<u128>,
+    pub ts_ist_rfc3339: String,
+}
+
+/// Paper account ledger. Reset starts a new epoch and keeps the old entries.
+pub trait PaperLedgerRepo: Send + Sync {
+    /// Append one entry.
+    fn append(&self, entry: LedgerEntry) -> impl Future<Output = Result<(), RepoError>> + Send;
+    /// Entries of the current epoch in order.
+    fn current_epoch(&self) -> impl Future<Output = Result<Vec<LedgerEntry>, RepoError>> + Send;
+    /// Start a new epoch with `opening`; returns its number.
+    fn new_epoch(
+        &self,
+        opening: LedgerEntry,
+    ) -> impl Future<Output = Result<u32, RepoError>> + Send;
+}
+
+/// Why a margin or quote source could not answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum SourceError {
+    /// No source is wired or it is down; callers block, never estimate.
+    #[error("source unavailable")]
+    Unavailable,
+}
+
+/// Required margin for an order, from the broker's own margin API (never hand-estimated).
+pub trait MarginSource: Send + Sync {
+    /// Margin in rupees.
+    fn required_margin(
+        &self,
+        symbol: &str,
+        qty: u32,
+        is_buy: bool,
+        product: &str,
+    ) -> impl Future<Output = Result<rust_decimal::Decimal, SourceError>> + Send;
+}
+
+/// A fresh quote for the approval-time re-gate and paper fills.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuoteSnapshot {
+    pub last: rust_decimal::Decimal,
+    /// Circuit limits, when known; paper never fills at a circuit.
+    pub lower_circuit: Option<rust_decimal::Decimal>,
+    pub upper_circuit: Option<rust_decimal::Decimal>,
+    /// Volume of the current bar, for `paper_max_participation`.
+    pub bar_volume: Option<u64>,
+    pub at_ist_rfc3339: String,
+}
+
+/// Quote supply.
+pub trait QuoteSource: Send + Sync {
+    /// Latest quote for `symbol`.
+    fn quote(
+        &self,
+        symbol: &str,
+    ) -> impl Future<Output = Result<QuoteSnapshot, SourceError>> + Send;
 }
 
 #[cfg(test)]
@@ -245,6 +451,18 @@ mod tests {
         assert!(block(repo.get(&Exchange::Nfo, "ABC1")).unwrap().is_some());
         assert!(block(repo.get(&Exchange::Nse, "ABC1")).unwrap().is_none());
         assert_eq!(block(repo.ping()), Ok(()));
+    }
+
+    #[test]
+    fn approval_decision_round_trips_and_rejects_unknown() {
+        for d in [ApprovalDecision::Approve, ApprovalDecision::Decline] {
+            assert_eq!(ApprovalDecision::parse(d.as_str()), Ok(d));
+        }
+        assert_eq!(
+            ApprovalDecision::parse("approve_all"),
+            Err(RepoError::Corrupt)
+        );
+        assert_eq!(ApprovalDecision::parse(""), Err(RepoError::Corrupt));
     }
 
     #[test]
