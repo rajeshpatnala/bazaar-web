@@ -23,6 +23,11 @@ Slice 0: `DataView`, `Signal` + `ExitPlan` + `validate`, `ExitAction`/`OpenPosit
 ## Deferred
 First evidence run (F9, owner-run F3 fetch); catalog rows and `bz-quant` skill-text amendments (manager); strategies, registry and cross-strategy tests (slices 1-5).
 
+Deferred from PR 77: QUAN-77-8 (stop fills are intraday with gap handling, `min(stop, open)`) to F9 and the tech lead; the `trend_pullback` `target_r` param style vs the `donchian_breakout` const is a tech-lead call (QUAN-77-5).
+
+## Review round 1 (PR 77, donchian_breakout)
+- `manage` needs no regime; it checks adjusted candles and the tick and returns `ExitError::Context` (never a silent Hold). `WHY_TEXT_LABEL` lives in `common.rs`. Added a `target_basis` fact. QUAN-77-9 disputed (no F&O flag in the instrument master; the const `SESSION_KIND` is documented).
+
 ## Review round 1 (PR 74)
 - `StrategyContext` now carries `calendar: &MarketCalendar`; `next_session_close` gives `valid_until` (no date arithmetic in strategies). `check_closed_bar` rejects a regime from a later or an earlier session.
 - Config tables gained `entry_zone_atr_frac` (0.25, a PROPOSAL: the spec names the key but gives no value; owner to confirm), `atr_period`, and the spec-fixed averages (`volume_sma_period`, `ema_pullback`, `ema_trend`). Strategy tests assert `Default == file`.

@@ -31,6 +31,10 @@ pub enum ExitAction {
 pub enum ExitError {
     #[error("a long stop may only move up: {new} is not above {current}")]
     StopNotRaised { current: Decimal, new: Decimal },
+    /// The view or instrument could not be used (unadjusted candles, bad tick, empty view). The
+    /// engine must treat it as a data fault, never as "hold".
+    #[error("cannot manage the position: {0}")]
+    Context(String),
 }
 
 impl ExitAction {

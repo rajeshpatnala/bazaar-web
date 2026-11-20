@@ -391,6 +391,7 @@ name = "bazaar-strategies"
 version = "0.1.0"
 dependencies = [
  "bazaar-core",
+ "bazaar-indicators",
  "bazaar-regime",
  "chrono",
  "chrono-tz",
@@ -399,6 +400,7 @@ dependencies = [
  "sha2",
  "thiserror",
  "toml",
+ "tracing",
 ]
 
 [[package]]

@@ -31,10 +31,14 @@ pub enum Reject {
     MarketGate(String),
     #[error("regime fit: {0}")]
     RegimeFit(String),
+    #[error("no setup: {0}")]
+    Setup(&'static str),
     #[error("tick size must be positive")]
     BadTick,
     #[error("a price or ratio is not a finite number")]
     NotFinite,
+    #[error("{0} is not a whole multiple of the instrument tick")]
+    OffTick(&'static str),
     #[error("stop is not below the entry zone")]
     WrongSideStop,
     #[error("stop is {distance} away, cap is {cap}")]
@@ -44,6 +48,11 @@ pub enum Reject {
     #[error("why-text contains the forbidden word {0:?}")]
     ForbiddenWord(&'static str),
 }
+
+/// Label of the `Signal` fact that carries the why-text. Strategies, the scanner and tests use this
+/// name, never the literal. The scanner rebuilds the text with whole-trade risk
+/// ([`RiskBasis::WholeTrade`], charges buffer included); the strategy's own text is per share.
+pub const WHY_TEXT_LABEL: &str = "why";
 
 /// Whole words a why-text must never carry (we never imply certainty or give a tip).
 const FORBIDDEN_WORDS: [&str; 9] = [
@@ -176,6 +185,43 @@ pub fn round_levels(ctx: &StrategyContext<'_>, raw: &Levels) -> Result<Levels, R
 pub fn on_tick(ctx: &StrategyContext<'_>, price: Decimal) -> Result<bool, Reject> {
     let t = tick_of(ctx)?;
     Ok(price.checked_rem(t) == Some(Decimal::ZERO))
+}
+
+/// Check that every level of a signal is a whole multiple of the instrument tick (the broker
+/// rejects anything else). Run on the rounded levels, as the last step before a signal is built.
+///
+/// # Errors
+/// `OffTick(name)` for the first level that is not on the tick; `BadTick`.
+pub fn verify_on_tick(ctx: &StrategyContext<'_>, l: &Levels) -> Result<(), Reject> {
+    for (name, price) in [
+        ("entry_low", l.entry_low),
+        ("entry_high", l.entry_high),
+        ("stop", l.stop),
+        ("target", l.target),
+    ] {
+        if !on_tick(ctx, price)? {
+            return Err(Reject::OffTick(name));
+        }
+    }
+    Ok(())
+}
+
+/// Finish a strategy's raw levels: [`round_levels`] then [`verify_on_tick`].
+///
+/// # Errors
+/// `BadTick` or `OffTick`.
+pub fn finish_levels(ctx: &StrategyContext<'_>, raw: &Levels) -> Result<Levels, Reject> {
+    let l = round_levels(ctx, raw)?;
+    verify_on_tick(ctx, &l)?;
+    Ok(l)
+}
+
+/// Round a stop DOWN to the tick (a lower stop never shrinks the risk).
+///
+/// # Errors
+/// `BadTick`.
+pub fn floor_to_tick(ctx: &StrategyContext<'_>, price: Decimal) -> Result<Decimal, Reject> {
+    snap(price, tick_of(ctx)?, Mode::Floor)
 }
 
 /// Entry zone `[close, close + frac x ATR]` (unrounded; pass it through [`round_levels`]).
@@ -427,6 +473,43 @@ mod tests {
         // Risk after rounding is never smaller than the raw risk.
         let raw = lv("100.02", "100.51", "94.97", "116.03");
         assert!(r.entry_high - r.stop >= raw.entry_high - raw.stop);
+    }
+
+    #[test]
+    fn finish_levels_rounds_then_proves_every_level_is_a_tick_multiple() {
+        let w = ok_world();
+        let f = finish_levels(&w.ctx(), &lv("100.02", "100.51", "94.97", "116.03")).unwrap();
+        assert_eq!(verify_on_tick(&w.ctx(), &f), Ok(()));
+        assert_eq!(floor_to_tick(&w.ctx(), d("97.99")).unwrap(), d("97.95"));
+    }
+
+    #[test]
+    fn verify_on_tick_names_the_first_off_tick_level() {
+        let w = ok_world(); // tick 0.05
+        let bad = |l: Levels| verify_on_tick(&w.ctx(), &l);
+        assert_eq!(bad(lv("100.00", "100.55", "94.95", "116.05")), Ok(()));
+        assert_eq!(
+            bad(lv("100.02", "100.55", "94.95", "116.05")),
+            Err(Reject::OffTick("entry_low"))
+        );
+        assert_eq!(
+            bad(lv("100.00", "100.52", "94.95", "116.05")),
+            Err(Reject::OffTick("entry_high"))
+        );
+        assert_eq!(
+            bad(lv("100.00", "100.55", "94.97", "116.05")),
+            Err(Reject::OffTick("stop"))
+        );
+        assert_eq!(
+            bad(lv("100.00", "100.55", "94.95", "116.03")),
+            Err(Reject::OffTick("target"))
+        );
+        let mut z = ok_world();
+        z.instrument.tick_size = Decimal::ZERO;
+        assert_eq!(
+            finish_levels(&z.ctx(), &lv("1", "2", "0.5", "3")),
+            Err(Reject::BadTick)
+        );
     }
 
     #[test]
