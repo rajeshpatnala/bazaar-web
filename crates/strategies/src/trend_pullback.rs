@@ -39,8 +39,8 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 
 use crate::common::{
-    Levels, Reject, RiskBasis, Why, check_rr, check_stop, entry_guards, entry_zone, need,
-    round_levels, to_decimal, valid_until, why_text,
+    Levels, Reject, RiskBasis, WHY_TEXT_LABEL, Why, check_rr, check_stop, entry_guards, entry_zone,
+    need, round_levels, to_decimal, valid_until, why_text,
 };
 use crate::context::StrategyContext;
 use crate::exit::{ExitAction, ExitError, OpenPosition};
@@ -51,8 +51,6 @@ use crate::strategy::{Strategy, StrategyMeta};
 
 /// Strategy id, the `[strategy.<id>]` key in `config/strategies.toml`.
 pub const ID: &str = "trend_pullback";
-/// Label of the fact that carries the why-text (a local const until `common.rs` owns it).
-pub const WHY_TEXT_LABEL: &str = "why_text";
 /// Bumped when the rules change (provenance).
 pub const VERSION: u32 = 1;
 
@@ -484,19 +482,23 @@ impl Strategy for TrendPullback {
                 p.max_hold_bars
             )));
         }
-        let (Some(last), Ok(series)) = (view.last(), ema_series(view.bars(), p.ema_trend)) else {
+        // Unusable data is a fault the engine must see, never a silent hold (as donchian does).
+        // The caller logs the returned error; nothing is logged here.
+        let fault = |why: String| ExitError::Context(why);
+        if view.bars().iter().any(|c| !c.adjusted()) {
+            return Err(fault("candles are not adjusted".into()));
+        }
+        let series = ema_series(view.bars(), p.ema_trend).map_err(|r| fault(r.to_string()))?;
+        let last = view
+            .last()
+            .ok_or_else(|| fault("the view has no bars".into()))?;
+        let close = Ohlcv::try_from(last)
+            .map_err(|_| fault("the last candle is not finite".into()))?
+            .c;
+        let Some(Some(avg)) = series.last() else {
             tracing::debug!(
                 strategy = ID,
-                "trend exit not evaluated: bars unusable, holding"
-            );
-            return Ok(ExitAction::Hold);
-        };
-        let (Some(Some(avg)), Some(close)) =
-            (series.last(), Ohlcv::try_from(last).ok().map(|o| o.c))
-        else {
-            tracing::debug!(
-                strategy = ID,
-                "trend exit not evaluated: average not ready, holding"
+                "trend exit not evaluated: average still warming up, holding"
             );
             return Ok(ExitAction::Hold);
         };
@@ -752,6 +754,17 @@ mod tests {
         assert_eq!(run(&mut s, 62, 14), ExitAction::Hold);
         // Too little history for the average: hold, the stop still protects.
         assert_eq!(run(&mut s, 10, 1), ExitAction::Hold);
+        // Unadjusted candles could fake a crash: a data fault, not a hold; the time stop still wins.
+        let raw = bars_dec(&load("entry"), false);
+        let view = DataView::ending_at(&raw, 66).unwrap();
+        assert!(matches!(
+            s.manage(&view, &w.ctx(), &pos(7)),
+            Err(ExitError::Context(_))
+        ));
+        assert!(matches!(
+            s.manage(&view, &w.ctx(), &pos(15)),
+            Ok(ExitAction::Exit(_))
+        ));
     }
 
     #[test]

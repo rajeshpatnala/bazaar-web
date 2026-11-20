@@ -1,4 +1,6 @@
 # strategies.toml: strategy-world config (owner: bz-quant). One file, one config hash in provenance.
+# DO NOT set enabled = true on any [strategy.*] before F8-rr lands (worst-case `reward_risk` in
+# `check_rr`, QUAN-79-1, QUAN-80-1): today's rr is measured from the bottom of the entry zone, so optimistic.
 # [regime] holds the F7 classifier definitions (docs/strategy/F7-regime-definitions.md, section 4).
 # Every value is a widely used convention, UNVERIFIED for this app. The owner accepted them on 2026-11-20.
 # They are classifier definitions, never tuned on strategy P&L. [strategy.<id>] tables are below (F8).
