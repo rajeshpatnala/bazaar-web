@@ -37,7 +37,7 @@ use crate::fill::trade_date;
 use crate::foldvote::{FoldVote, vote};
 use crate::gate_policy::{EventsFor, GateEnv};
 use crate::metrics::{Assessment, Metrics, RunFacts, assess};
-use crate::provenance::ChargesUsed;
+use crate::provenance::ChargesEvidence;
 use crate::types::{BacktestError, Trade};
 
 /// What the provenance records about the gate's evidence in a walk-forward run.
@@ -401,8 +401,8 @@ pub type GatedRun<'a> =
 
 /// [`walk_forward`] with the gate environments built here (via `window_env`) and the charged legs
 /// of EVERY run collected: IS runs of all candidates and the OOS runs. The returned
-/// [`ChargesUsed`] is the verified range over all of them, so a rate set only an IS run used still
-/// counts (QUAN-93-3). A run with no legs gives [`ChargesUsed::NoneLevied`].
+/// [`ChargesEvidence`] is the verified range (and the cost model's history policy) over all of them, so a rate set only an IS run used still
+/// counts (QUAN-93-3). A run with no legs says no charges were levied.
 ///
 /// # Errors
 /// As [`walk_forward`], plus a missing rate, GST or DP table for any leg.
@@ -413,7 +413,7 @@ pub fn walk_forward_gated(
     sector: &str,
     events: EventsFor<'_>,
     run: &mut GatedRun<'_>,
-) -> Result<(WalkForwardResult, ChargesUsed), BacktestError> {
+) -> Result<(WalkForwardResult, ChargesEvidence), BacktestError> {
     // Running range merged per run: no leg is kept (CR-94-2).
     let mut range: Option<(NaiveDate, NaiveDate)> = None;
     let result = walk_forward(cfg, bars, p, &mut |w, c, b, ev| {
@@ -425,7 +425,7 @@ pub fn walk_forward_gated(
         }
         Ok(out)
     })?;
-    let used = ChargesUsed::of(range);
+    let used = ChargesEvidence::from_range(&p.cost, range);
     Ok((result, used))
 }
 

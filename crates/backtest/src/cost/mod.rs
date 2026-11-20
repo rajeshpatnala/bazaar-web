@@ -71,6 +71,12 @@ impl<'a> CostModel<'a> {
         }
     }
 
+    /// The history policy this model charges under.
+    #[must_use]
+    pub const fn policy(&self) -> HistoryPolicy {
+        self.policy
+    }
+
     /// True when `latest_for_all` is in use: provenance must say `costs_approximate = true`.
     #[must_use]
     pub fn costs_approximate(&self) -> bool {

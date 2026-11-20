@@ -10,6 +10,7 @@ use chrono::{DateTime, Datelike, TimeZone, Weekday};
 use chrono_tz::Asia::Kolkata;
 
 use super::*;
+use crate::provenance::ChargesUsed;
 use crate::types::{
     ChargeBreakdown, EvidenceLabel, Fill, FillKind, HistoryPolicy, Leg, LegInstrument, LegSide,
     Product,
@@ -547,6 +548,8 @@ fn the_gated_runner_gives_in_sample_runs_selection_only_evidence() {
     };
     let (res, _) = walk_forward_gated(&cfg(), &bs, &params, "IT", &quiet, &mut run).unwrap();
     assert_eq!(res.folds.len(), 5);
+    // The check is not vacuous: in-sample runs happened.
+    assert!(seen.iter().any(|(w, _)| *w == Window::InSample));
     // IS runs got the selection-only evidence, never the OOS record.
     assert!(
         seen.iter()
@@ -590,7 +593,7 @@ fn one_sided(b: &[Candle], side: LegSide) -> RunOutput {
 
 /// Candidate 0 trades only buy legs (rate set 02-01, GST 03-01), candidate 1 only sell legs
 /// (rate set 04-01, GST 03-01, DP 03-15); both in sample only, OOS trades nothing.
-fn gated_range(with_sell_candidate: bool) -> ChargesUsed {
+fn gated_range(with_sell_candidate: bool) -> ChargesEvidence {
     let (bs, ch, ps) = (bars("100"), dated_charges(), sets(2));
     let mut params = params(&ch, &ps);
     params.cost = CostModel::new(&ch, HistoryPolicy::LatestForAll, ChargeExchange::Nse);
@@ -606,16 +609,21 @@ fn gated_range(with_sell_candidate: bool) -> ChargesUsed {
         .1
 }
 
+/// The expected evidence of the dated test: costed under `LatestForAll`.
+fn range_ev(from: NaiveDate, to: NaiveDate) -> ChargesEvidence {
+    ChargesEvidence::for_test(ChargesUsed::Range(from, to), HistoryPolicy::LatestForAll)
+}
+
 #[test]
 fn the_gated_runner_spans_rate_sets_used_only_in_sample() {
     assert_eq!(
         gated_range(true),
-        ChargesUsed::Range(day(2026, 2, 1), day(2026, 4, 1))
+        range_ev(day(2026, 2, 1), day(2026, 4, 1))
     );
     // Without the sell-only candidate the sell set and DP are not in the range.
     assert_eq!(
         gated_range(false),
-        ChargesUsed::Range(day(2026, 2, 1), day(2026, 3, 1))
+        range_ev(day(2026, 2, 1), day(2026, 3, 1))
     );
 }
 
@@ -625,5 +633,8 @@ fn a_gated_run_with_no_trades_levies_no_charges() {
     let mut run = |_: Window, _: usize, _: &[Candle], _: GateEnv<'_>| Ok(out(vec![]));
     let (_, used) =
         walk_forward_gated(&cfg(), &bs, &params(&ch, &ps), "IT", &quiet, &mut run).unwrap();
-    assert_eq!(used, ChargesUsed::NoneLevied);
+    assert_eq!(
+        used,
+        ChargesEvidence::for_test(ChargesUsed::NoneLevied, HistoryPolicy::Strict)
+    );
 }
