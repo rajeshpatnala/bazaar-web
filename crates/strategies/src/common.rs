@@ -279,9 +279,10 @@ pub fn check_stop(l: &Levels, atr: f64, max_stop_atr: f64) -> Result<Decimal, Re
     Ok(risk)
 }
 
-/// Worst-case reward:risk, `(target - entry_high) / (entry_high - stop)`: both sides are taken from
-/// the same, worst fill at the top of the entry zone (QUAN-79-1). Rejected when below `min_rr` (compared before
-/// rounding); returned to two places rounded down (within the `Signal` tolerance).
+/// Worst-case reward:risk, `(target - entry_high) / (entry_high - stop)`: both sides are taken
+/// from the same, worst fill at the top of the entry zone (QUAN-79-1). Rejected when below
+/// `min_rr` (compared before rounding); returned to two places rounded down (within the
+/// `Signal` tolerance).
 ///
 /// # Errors
 /// `WrongSideStop` for a non-positive risk, `RrTooLow`, `NotFinite`.
