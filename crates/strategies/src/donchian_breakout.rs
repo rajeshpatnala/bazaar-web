@@ -570,7 +570,7 @@ mod tests {
     fn fires_exactly_on_bar_30_with_hand_computed_levels() {
         // ATR(30) = (13 x 2 + 3) / 14 = 2.0714; zone top 102.5 + 0.25 x ATR = 103.0179 -> 103.05;
         // stop 103.0179 - 2.5 x ATR = 97.8393 -> 97.80; target 102.5 + 2 x 5.1786 = 112.857 -> 112.85;
-        // rr = 10.35 / 5.25 = 1.97.
+        // worst-case rr = (112.85 - 103.05) / 5.25 = 9.80 / 5.25 = 1.866 -> 1.86.
         let rows = csv("donchian_entry.csv");
         assert_eq!(firing_bars(&rows), vec![30]);
         let b = bars_dec(&rows, true);
@@ -580,7 +580,7 @@ mod tests {
         assert_eq!(s.stop, d("97.80"));
         assert_eq!(s.targets, vec![d("112.85")]);
         assert_eq!(s.risk_per_share, d("5.25"));
-        assert_eq!(s.reference_rr, d("1.97"));
+        assert_eq!(s.reference_rr, d("1.86"));
         assert_eq!(s.signal_bar_time, session_time(30));
         assert!(s.valid_until > s.signal_bar_time);
         assert_eq!((s.exit_plan.time_stop_bars, s.strategy_version), (60, 1));
@@ -666,12 +666,13 @@ mod tests {
         let mut w = world(30);
         w.instrument.tick_size = d("0.5");
         let s = fire(strat().as_mut(), &w, &b, 30).unwrap();
-        // zone top 103.0179 -> 103.5 (up); stop 97.8393 -> 97.5 (down); target 112.857 -> 113.0.
+        // zone top 103.0179 -> 103.5 (up); stop 97.8393 -> 97.5 (down); target 112.857 -> 113.0;
+        // risk 6.0; rr (113.0 - 103.5) / 6.0 = 1.583 -> 1.58.
         assert_eq!(
             (s.entry_low, s.entry_high, s.stop, s.targets[0]),
             (d("102.5"), d("103.5"), d("97.5"), d("113.0"))
         );
-        assert_eq!(s.reference_rr, d("1.75"));
+        assert_eq!(s.reference_rr, d("1.58"));
     }
 
     #[test]
@@ -732,7 +733,7 @@ mod tests {
         // Fewer than min_history_bars (21) closed bars.
         let b = bars_dec(&rows[..20], true);
         assert!(fire(strat().as_mut(), &world(19), &b, 19).is_none());
-        // rr 1.97 is below a floor of 2.0 (the top of the allowed range).
+        // rr 1.86 is below a floor of 2.0 (the top of the allowed range).
         let mut t = table();
         t["params"]
             .as_table_mut()

@@ -610,13 +610,13 @@ mod tests {
         let sig = at(&mut s, &b, K, &world(K)).unwrap();
         // Bar K: close 114.00, ATR(14) 2.6469, pullback low 109.00, 2 dip closes.
         // stop 109 - 0.5 x 2.6469 = 107.677 -> down to 107.65; zone top 114.6617 -> up to 114.70;
-        // target 114 + 2 x (114.6617 - 107.677) = 127.970 -> 127.95; risk 7.05; rr 13.95 / 7.05.
+        // target 114 + 2 x (114.6617 - 107.677) = 127.970 -> 127.95; risk 7.05; worst-case rr (127.95 - 114.70) / 7.05 = 13.25 / 7.05 = 1.879 -> 1.87.
         assert_eq!(sig.entry_low, d("114.00"));
         assert_eq!(sig.entry_high, d("114.70"));
         assert_eq!(sig.stop, d("107.65"));
         assert_eq!(sig.targets, vec![d("127.95")]);
         assert_eq!(sig.risk_per_share, d("7.05"));
-        assert_eq!(sig.reference_rr, d("1.97"));
+        assert_eq!(sig.reference_rr, d("1.87"));
         assert_eq!(sig.exit_plan.time_stop_bars, 15);
         assert_eq!(sig.signal_bar_time, session_time(K));
         assert!(sig.valid_until > sig.signal_bar_time);
@@ -770,7 +770,7 @@ mod tests {
     #[test]
     fn why_text_template_names_risk_first_regime_and_proven_wrong() {
         let setup = setup_text("ABC", 2, 20);
-        let closing = closing_text(d("127.95"), d("1.97"), 50);
+        let closing = closing_text(d("127.95"), d("1.87"), 50);
         let text = why_text(&Why {
             risk_rupees: d("7.05"),
             risk_basis: RiskBasis::PerShare,
@@ -782,7 +782,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             text,
-            "Risk first: you could lose about Rs 7.05 per share. Setup: ABC is in an uptrend and dipped for 2 day(s), then closed back above its 20-day average. Why now: today's close is above yesterday's high. Market today: market is rising. Proven wrong if: price falls to or below 107.65. Target: 127.95 (about 1.97 times the risk), or we leave if it falls under its 50-day average."
+            "Risk first: you could lose about Rs 7.05 per share. Setup: ABC is in an uptrend and dipped for 2 day(s), then closed back above its 20-day average. Why now: today's close is above yesterday's high. Market today: market is rising. Proven wrong if: price falls to or below 107.65. Target: 127.95 (about 1.87 times the risk), or we leave if it falls under its 50-day average."
         );
     }
 
@@ -852,7 +852,7 @@ mod tests {
     #[test]
     fn reward_to_risk_below_the_floor_and_missing_indicators_give_none() {
         let b = bars_dec(&load("entry"), true);
-        // rr at bar K is 1.97; a floor of 2.0 rejects it (built directly, validate() would refuse
+        // rr at bar K is 1.87; a floor of 2.0 rejects it (built directly, validate() would refuse
         // target_r 2.0 <= min_rr 2.0).
         let p = Params {
             min_rr: 2.0,

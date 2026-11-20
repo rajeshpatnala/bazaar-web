@@ -35,7 +35,7 @@ pub struct Signal {
     pub targets: Vec<Decimal>,
     /// `entry_high - stop`. Informational: the gate re-derives it and never trusts this.
     pub risk_per_share: Decimal,
-    /// `(targets[0] - entry_low) / risk_per_share`, computed, never a placeholder.
+    /// `(targets[0] - entry_high) / risk_per_share` (worst fill, top of the zone), computed, never a placeholder.
     pub reference_rr: Decimal,
     pub exit_plan: ExitPlan,
     pub facts: Vec<Fact>,
@@ -60,7 +60,7 @@ pub enum SignalError {
     NoTarget,
     #[error("the first target must be above entry_high")]
     TargetNotAboveEntry,
-    #[error("reference_rr does not match (targets[0] - entry_low) / risk_per_share")]
+    #[error("reference_rr does not match (targets[0] - entry_high) / risk_per_share")]
     RrMismatch,
     #[error("time_stop_bars must be positive")]
     NoTimeStop,
@@ -103,7 +103,7 @@ impl Signal {
             return Err(SignalError::TargetNotAboveEntry);
         }
         // `risk_per_share` is positive here: stop < entry_low <= entry_high.
-        let rr = (first - self.entry_low) / self.risk_per_share;
+        let rr = (first - self.entry_high) / self.risk_per_share;
         if (rr - self.reference_rr).abs() > RR_TOLERANCE {
             return Err(SignalError::RrMismatch);
         }
@@ -144,7 +144,7 @@ pub(crate) mod tests {
             stop,
             targets: vec![Decimal::from(116)],
             risk_per_share: risk_per_share(entry_high, stop),
-            reference_rr: Decimal::from(2),
+            reference_rr: Decimal::new(175, 2), // (116 - 102) / 8
             exit_plan: ExitPlan {
                 time_stop_bars: 10,
                 rule_text: "x".into(),
@@ -197,7 +197,7 @@ pub(crate) mod tests {
             assert_eq!(s.validate(), Err(want));
         }
         let mut s = good();
-        s.reference_rr = Decimal::new(201, 2);
+        s.reference_rr = Decimal::new(176, 2);
         assert_eq!(s.validate(), Ok(()), "within two-place rounding");
     }
 }
