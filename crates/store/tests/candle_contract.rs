@@ -1,7 +1,12 @@
 //! Shared contract suite for `CandleSource` + `CandleSink`. Every adapter (SQLite, Parquet/DuckDB)
 //! calls `run_contract` with a factory for a fresh empty store; the assertions are identical.
 //! Slice 0 runs it against an in-memory fake to prove the suite itself.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::missing_panics_doc,
+    clippy::too_many_lines
+)]
 
 use std::future::Future;
 use std::str::FromStr;
@@ -83,28 +88,27 @@ where
     assert_eq!(got.len(), 2);
 
     // unknown symbol, empty and inverted range: empty, not an error
-    assert!(
-        s.read_candles(&range("NOPE", at(9, 0), at(15, 30), false))
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        s.read_candles(&range("ABC", at(16, 0), at(17, 0), false))
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        s.read_candles(&range("ABC", at(15, 0), at(9, 0), false))
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    let empty = s
+        .read_candles(&range("NOPE", at(9, 0), at(15, 30), false))
+        .await
+        .unwrap();
+    assert_eq!(empty, Vec::<Candle>::new());
+    let empty = s
+        .read_candles(&range("ABC", at(16, 0), at(17, 0), false))
+        .await
+        .unwrap();
+    assert_eq!(empty, Vec::<Candle>::new());
+    let empty = s
+        .read_candles(&range("ABC", at(15, 0), at(9, 0), false))
+        .await
+        .unwrap();
+    assert_eq!(empty, Vec::<Candle>::new());
 
     // overlapping write: new row wins, no duplicate
     let newer = bar(at(9, 25), "100.50", 7777, false);
-    s.write_candles("ABC", &[newer.clone()]).await.unwrap();
+    s.write_candles("ABC", std::slice::from_ref(&newer))
+        .await
+        .unwrap();
     let got = s
         .read_candles(&range("ABC", at(9, 0), at(15, 30), false))
         .await
@@ -113,7 +117,7 @@ where
     assert_eq!(got[1], newer);
 
     // adjusted is part of the key: stored apart, never mixed in a read
-    s.write_candles("ABC", &[bar(at(9, 25), "50.25", 1, true)])
+    s.write_candles("ABC", &[bar(at(9, 25), "100.25", 1, true)])
         .await
         .unwrap();
     let adj = s
@@ -164,12 +168,11 @@ where
         s.write_candles("ABC", &mixed).await,
         Err(RepoError::Conflict)
     );
-    assert!(
-        s.read_candles(&range("ABC", at(9, 0), at(15, 30), false))
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    let empty = s
+        .read_candles(&range("ABC", at(9, 0), at(15, 30), false))
+        .await
+        .unwrap();
+    assert_eq!(empty, Vec::<Candle>::new());
     assert_eq!(
         s.last_candle_ts("ABC", Interval::Min5, false)
             .await
@@ -193,13 +196,13 @@ struct MemStore(Mutex<Vec<(String, Candle)>>);
 
 impl MemStore {
     fn put(&self, symbol: &str, candles: &[Candle]) -> Result<u64, RepoError> {
-        if let Some(first) = candles.first() {
-            if candles
+        let mixed = candles.first().is_some_and(|f| {
+            candles
                 .iter()
-                .any(|c| c.interval() != first.interval() || c.adjusted() != first.adjusted())
-            {
-                return Err(RepoError::Conflict);
-            }
+                .any(|c| c.interval() != f.interval() || c.adjusted() != f.adjusted())
+        });
+        if mixed {
+            return Err(RepoError::Conflict);
         }
         let mut rows = self.0.lock().map_err(|_| RepoError::Other)?;
         for c in candles {
