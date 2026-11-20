@@ -1,9 +1,8 @@
 //! The registry: the three strategy factories and the one call that builds the enabled ones from
 //! `config/strategies.toml`. A new strategy is added here and nowhere else.
 //!
-//! **Do not enable any strategy before F8-rr lands.** `check_rr` measures reward:risk from the
-//! bottom of the entry zone (optimistic against the `entry_high` the risk is based on); the
-//! worst-case fix is a separate PR before F11. Every strategy ships `enabled = false` until then.
+//! `check_rr` measures reward:risk at the worst fill, `(target - entry_high) / (entry_high - stop)`
+//! (QUAN-79-1). Every strategy still ships `enabled = false` until the owner turns one on.
 
 use bazaar_core::config::StrategiesConfig;
 

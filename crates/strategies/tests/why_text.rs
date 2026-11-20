@@ -21,7 +21,10 @@ fn every_strategys_why_text_follows_the_template() {
             .unwrap_or_else(|| panic!("{} has a why fact", c.id))
             .value
             .clone();
-        let prefix = format!("Risk first: you could lose about Rs {}", sig.risk_per_share);
+        let prefix = format!(
+            "Risk first: you could lose about Rs {:.2} per share.",
+            sig.risk_per_share
+        );
         assert!(text.starts_with(&prefix), "{}: {text}", c.id);
         let bars = candles(c.csv, true);
         let market = label(&World::for_case(c, &bars[c.k]).market);

@@ -43,7 +43,6 @@ Deferred from PR 77: QUAN-77-8 (stop fills are intraday with gap handling, `min(
 
 ## Deferred (later rounds)
 - Donchian stop fills: the F9 backtest must model intraday stop touches filled at min(stop, open), because a close-only model overstates the 10-day-low trail (QUAN-77-8).
-- Worst-case `reward_risk` convention in `check_rr` (QUAN-79-1) is a separate fix PR (F8-rr) before F11; reward_risk is currently measured from the bottom of the entry zone, so optimistic.
-- Worst-case reward_risk in check_rr (QUAN-79-1, QUAN-80-1) is a separate fix PR (F8-rr) before F11. No strategy may be enabled before it lands; the shipped config and registry doc say so.
+- Done in F8-rr: `check_rr` and `Signal::validate` use the worst fill, `(target - entry_high) / (entry_high - stop)` (QUAN-79-1, QUAN-80-1); fixture `reference_rr` values re-derived (bollinger 1.71, donchian 1.86, trend_pullback 1.87); `min_rr` ranges unchanged; all strategies still ship disabled (CR-80-9, CR-80-10 closed).
 - trend_pullback and bollinger: EMA/ATR/SMA are recomputed over the whole view on every bar (O(n) per bar); F9 should add streaming state inside the strategy (CR-76-3, QUAN-76-7).
 - Optional QUAN-76-8: round the f64-converted level to 4 dp before tick snapping (direction is already conservative).

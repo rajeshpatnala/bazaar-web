@@ -279,7 +279,8 @@ pub fn check_stop(l: &Levels, atr: f64, max_stop_atr: f64) -> Result<Decimal, Re
     Ok(risk)
 }
 
-/// `(target - entry_low) / (entry_high - stop)`, rejected when below `min_rr` (compared before
+/// Worst-case reward:risk, `(target - entry_high) / (entry_high - stop)`: both sides are taken from
+/// the same, worst fill at the top of the entry zone (QUAN-79-1). Rejected when below `min_rr` (compared before
 /// rounding); returned to two places rounded down (within the `Signal` tolerance).
 ///
 /// # Errors
@@ -289,7 +290,10 @@ pub fn check_rr(l: &Levels, min_rr: f64) -> Result<Decimal, Reject> {
     if risk <= Decimal::ZERO {
         return Err(Reject::WrongSideStop);
     }
-    let reward = l.target.checked_sub(l.entry_low).ok_or(Reject::NotFinite)?;
+    let reward = l
+        .target
+        .checked_sub(l.entry_high)
+        .ok_or(Reject::NotFinite)?;
     let exact = reward.checked_div(risk).ok_or(Reject::NotFinite)?;
     let floor = to_decimal(min_rr)?;
     // The floor is a hard gate: compare the unrounded ratio, then report it rounded DOWN.
@@ -556,16 +560,21 @@ mod tests {
 
     #[test]
     fn reward_risk_is_computed_and_floored() {
-        let l = lv("100", "102", "94", "116"); // (116-100)/8 = 2
+        let l = lv("100", "102", "94", "118"); // (118-102)/8 = 2
+        // Worst case: the entry_low of 100 does not matter, 118-100 would be 2.25.
         assert_eq!(check_rr(&l, 1.5), Ok(d("2")));
         assert_eq!(check_rr(&l, 2.0), Ok(d("2")));
         assert!(matches!(check_rr(&l, 2.1), Err(Reject::RrTooLow { .. })));
+        // (116 - 102) / 8 = 1.75, not (116 - 100) / 8 = 2.
+        let w = lv("100", "102", "94", "116");
+        assert_eq!(check_rr(&w, 1.5), Ok(d("1.75")));
+        assert!(matches!(check_rr(&w, 2.0), Err(Reject::RrTooLow { .. })));
         assert_eq!(
             check_rr(&lv("100", "102", "102", "116"), 1.0),
             Err(Reject::WrongSideStop)
         );
-        // True rr 7.48 / 5 = 1.496: the floor 1.5 compares before rounding, so this fails.
-        let near = lv("100", "105", "100", "107.48");
+        // True worst-case rr (112.48 - 105) / 5 = 1.496: the floor 1.5 compares before rounding, so this fails.
+        let near = lv("100", "105", "100", "112.48");
         assert!(matches!(check_rr(&near, 1.5), Err(Reject::RrTooLow { .. })));
         assert_eq!(check_rr(&near, 1.4), Ok(d("1.49")), "reported rounded down");
         // Overflow is an error, not a panic.

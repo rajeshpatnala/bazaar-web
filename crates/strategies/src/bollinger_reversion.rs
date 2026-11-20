@@ -10,8 +10,8 @@
 //! * **Stop:** `min(low[t], low[t-1]) - stop_buffer_atr x ATR`; dropped when `entry_high - stop`
 //!   exceeds `max_stop_atr` x ATR.
 //! * **Exit:** reference target is the average `SMA(bb_n)` at t; `reference_rr` must be at least
-//!   `min_rr` (many setups are dropped here, by design); it is measured from the bottom of the entry
-//!   zone, so it is optimistic (fact `rr_basis`). `manage` leaves at the next open when the
+//!   `min_rr` (many setups are dropped here, by design); it is the worst case, measured from the top of
+//!   the entry zone (fact `rr_basis`). `manage` leaves at the next open when the
 //!   stock's trend is confirmed Down, or after `max_hold_bars`. The stop is fixed at entry.
 //! * **Best regime:** stock Range with Low or Normal volatility, market Up or Range (declared in
 //!   `config/strategies.toml`, never in code). Suppressed in Range x High, Up, Down, Mixed, Unknown
@@ -297,7 +297,7 @@ impl BollingerReversion {
             closing: "Watch out: if the stock starts a real downtrend this idea loses; we leave if it does.",
         })?;
         let rule_text = format!(
-            "Leave at the next open if the stock's trend is confirmed down, or after {} bars. Reward:risk is measured from the bottom of the entry zone, so it is optimistic.",
+            "Leave at the next open if the stock's trend is confirmed down, or after {} bars. Reward:risk is the worst case, measured from the top of the entry zone.",
             p.max_hold_bars
         );
         let mut facts = band_facts(s, atr, p, &rule_text);
@@ -371,8 +371,8 @@ fn band_facts(s: &Setup, atr: f64, p: &BollingerParams, rule_text: &str) -> Vec<
         fact("exit_rule", rule_text, "How the idea ends."),
         fact(
             "rr_basis",
-            "from the bottom of the entry zone (optimistic)",
-            "A fill higher in the zone has a lower reward:risk.",
+            "worst case, from the top of the entry zone",
+            "A fill lower in the zone has a higher reward:risk.",
         ),
         fact(
             "time_stop_bars",
@@ -514,7 +514,7 @@ mod tests {
         // prev close 95.00 < 95.6832.
         // zone top 96.8 + 0.25 x ATR = 97.1959 -> 97.20; stop 94.8 - 0.25 x ATR = 94.4041 -> 94.40
         // (the low of t-1 is the lower of the two lows); target 101.99 -> 102.00 (nearest 0.05);
-        // risk 2.80; rr 5.20 / 2.80 = 1.857 -> 1.85.
+        // risk 2.80; worst-case rr (102.00 - 97.20) / 2.80 = 4.80 / 2.80 = 1.714 -> 1.71.
         let b = bars_dec(&rows(), true);
         let fired: Vec<usize> = (0..b.len())
             .filter(|&k| fire(&world(k), &b, k).is_some())
@@ -526,7 +526,7 @@ mod tests {
             (d("96.80"), d("97.20"), d("94.40"))
         );
         assert_eq!(s.targets, vec![d("102.00")]);
-        assert_eq!((s.risk_per_share, s.reference_rr), (d("2.80"), d("1.85")));
+        assert_eq!((s.risk_per_share, s.reference_rr), (d("2.80"), d("1.71")));
         assert_eq!((s.exit_plan.time_stop_bars, s.strategy_version), (8, 1));
         assert_eq!(s.signal_bar_time, session_time(K));
         assert!(s.valid_until > s.signal_bar_time);
@@ -545,8 +545,8 @@ mod tests {
             why,
             "Risk first: you could lose about Rs 2.80 per share. Setup: ABC has been moving sideways, fell below its usual range yesterday and closed back inside today. Why now: prices like this have tended to drift back to the average (102.00). Market today: Uptrend, normal swings. Proven wrong if: price falls to or below 94.40. Watch out: if the stock starts a real downtrend this idea loses; we leave if it does."
         );
-        assert!(fact("rr_basis").contains("bottom of the entry zone"));
-        assert!(s.exit_plan.rule_text.contains("bottom of the entry zone"));
+        assert!(fact("rr_basis").contains("top of the entry zone"));
+        assert!(s.exit_plan.rule_text.contains("top of the entry zone"));
         let lower = why.to_lowercase();
         assert!(
             ["sure", "safe", "guarantee"]
@@ -561,12 +561,12 @@ mod tests {
         let mut w = world(K);
         w.instrument.tick_size = d("0.25");
         let s = fire(&w, &b, K).unwrap();
-        // 96.8 -> 96.75; 97.1959 up -> 97.25; 94.4041 down -> 94.25; 101.99 -> 102.00; risk 3.00.
+        // 96.8 -> 96.75; 97.1959 up -> 97.25; 94.4041 down -> 94.25; 101.99 -> 102.00; risk 3.00; rr (102.00 - 97.25) / 3.00 = 1.583 -> 1.58.
         assert_eq!(
             (s.entry_low, s.entry_high, s.stop, s.targets[0]),
             (d("96.75"), d("97.25"), d("94.25"), d("102.00"))
         );
-        assert_eq!((s.risk_per_share, s.reference_rr), (d("3.00"), d("1.75")));
+        assert_eq!((s.risk_per_share, s.reference_rr), (d("3.00"), d("1.58")));
     }
 
     #[test]
