@@ -98,7 +98,8 @@ impl<'a> CostModel<'a> {
     /// is exact whenever a delivery sell is present). `None` for no legs.
     ///
     /// Not included: `[option_exercise]`. Exercise STT is not charged yet; when it is, this must
-    /// add that table's `verified_on` or the range silently narrows.
+    /// add that table's `verified_on` or the range silently narrows (tracked as QUAN-94-5 in the
+    /// F9 record's Deferred list).
     ///
     /// # Errors
     /// As [`Self::charges_excl_dp`] for a missing rate set, GST table or DP table.

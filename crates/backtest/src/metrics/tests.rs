@@ -199,6 +199,13 @@ fn prior_trials_crossing_the_cap_lower_the_label_in_assess() {
     let r = trusted(&c);
     assert_eq!(r.label, EvidenceLabel::Provisional);
     assert_eq!(r.required_profit_factor, d("1.5"));
+    // The cap lowers the label only: PF 1.5 equals the bar, so the pooled verdict stays true.
+    assert!(r.meets_pooled_bar);
+    // 9 prior + 1 = 10 is at the cap, not above it: still Trusted, bar 1.4.
+    c.trials.prior_trials = 9;
+    let r = assess(&c, &m(100, "1.4", "0.1"), &facts(4, 2, 1)).unwrap();
+    assert_eq!(r.label, EvidenceLabel::Trusted);
+    assert_eq!(r.required_profit_factor, d("1.4"));
 }
 
 #[test]

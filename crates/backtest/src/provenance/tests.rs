@@ -77,6 +77,39 @@ fn the_option_exercise_table_moves_the_file_range_at_either_end() {
 }
 
 #[test]
+fn every_dated_source_moves_the_file_range_at_both_ends() {
+    type Set = fn(&mut ChargesConfig, NaiveDate);
+    use bazaar_core::config::OptionExercise;
+    let early = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+    let late = NaiveDate::from_ymd_opt(2027, 1, 1).unwrap();
+    // The fixture's own range is (01-05, 07-01), so each source starts inside it.
+    let sources: [(&str, Set); 6] = [
+        ("file", |c, d| c.verified_on = Some(d)),
+        ("gst", |c, d| c.gst.as_mut().unwrap().verified_on = d),
+        ("dp", |c, d| c.dp.as_mut().unwrap().verified_on = d),
+        ("option_exercise", |c, d| {
+            c.option_exercise = Some(OptionExercise {
+                stt_pct: Decimal::ONE,
+                verified_on: d,
+                source: "test".into(),
+            });
+        }),
+        ("rate_set buy", |c, d| c.rate_set[0].verified_on = d),
+        ("rate_set sell", |c, d| c.rate_set[1].verified_on = d),
+    ];
+    for (name, set) in sources {
+        let (mut lo, mut hi) = (charges(), charges());
+        set(&mut lo, early);
+        set(&mut hi, late);
+        let lo_range = charges_file_verified_range(&lo);
+        let hi_range = charges_file_verified_range(&hi);
+        // Moving a source to an extreme date must put that date at that end of the range.
+        assert_eq!(lo_range.map(|r| r.0), Some(early), "{name}: low end");
+        assert_eq!(hi_range.map(|r| r.1), Some(late), "{name}: high end");
+    }
+}
+
+#[test]
 fn undated_charges_have_no_range() {
     let c = parse_str("schema_version = 1\nplaceholder = true\nsource = \"none\"\n").unwrap();
     assert_eq!(charges_file_verified_range(&c), None);

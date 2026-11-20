@@ -532,25 +532,20 @@ fn the_result_vote_counts_skipped_folds_as_failures() {
 }
 
 #[test]
-fn the_gated_runner_counts_in_sample_legs_in_the_charges_range() {
+fn the_gated_runner_gives_in_sample_runs_selection_only_evidence() {
     let (bs, ch, ps) = (bars("100"), charges(), sets(2));
     // 2024 bars predate the shipped rate sets, so the cost model uses latest-for-all.
     let mut params = params(&ch, &ps);
     params.cost = CostModel::new(&ch, HistoryPolicy::LatestForAll, ChargeExchange::Nse);
-    // Only IS runs trade (every candidate), so the range can come from IS legs alone.
-    let (mut seen, mut legs) = (Vec::new(), Vec::new());
+    let mut seen = Vec::new();
     let mut run = |win: Window, _: usize, slice: &[Candle], env: GateEnv<'_>| {
         seen.push((win, env.evidence.oos_trades));
-        let res = match win {
+        Ok(match win {
             Window::InSample => wl(slice, ("10", "0.1"), ("-5", "-0.05")),
             Window::OutOfSample => out(vec![]),
-        };
-        for tr in &res.trades {
-            legs.extend([tr.entry.leg.clone(), tr.exit.leg.clone()]);
-        }
-        Ok(res)
+        })
     };
-    let (res, used) = walk_forward_gated(&cfg(), &bs, &params, "IT", &quiet, &mut run).unwrap();
+    let (res, _) = walk_forward_gated(&cfg(), &bs, &params, "IT", &quiet, &mut run).unwrap();
     assert_eq!(res.folds.len(), 5);
     // IS runs got the selection-only evidence, never the OOS record.
     assert!(
@@ -558,8 +553,70 @@ fn the_gated_runner_counts_in_sample_legs_in_the_charges_range() {
             .filter(|(win, _)| *win == Window::InSample)
             .all(|(_, n)| *n == Tri::Known(u32::MAX))
     );
-    let direct = params.cost.used_verified_range(&legs).unwrap().unwrap();
-    assert_eq!(used, ChargesUsed::Range(direct.0, direct.1));
+}
+
+/// Delivery charges with a different `verified_on` for every table.
+fn dated_charges() -> ChargesConfig {
+    let row = |side: &str, v: &str| {
+        format!(
+            "[[rate_set]]\nexchange = \"NSE\"\nsegment = \"equity_delivery\"\nside = \"{side}\"\n\
+             effective_from = \"2026-01-01\"\nverified_on = \"{v}\"\nsource = \"test\"\n\
+             turnover_basis = \"notional\"\nbrokerage = {{ kind = \"zero\" }}\n\
+             stt_ctt_pct = \"0\"\nexchange_txn_pct = \"0\"\nsebi_per_crore = \"0\"\n\
+             ipft_pct = \"0\"\nstamp_pct = \"0\"\n\n"
+        )
+    };
+    let mut t = String::from(
+        "schema_version = 1\nverified_on = \"2026-03-10\"\nsource = \"test\"\n\n\
+         [meta]\nbroker = \"t\"\ncurrency = \"INR\"\nmax_age_days = 90\n\
+         history_policy = \"effective_dated\"\n\n\
+         [gst]\nrate_pct = \"18\"\nverified_on = \"2026-03-01\"\nsource = \"test\"\n\n\
+         [dp]\nper_scrip_total = \"15.34\"\nincludes_gst = true\nverified_on = \"2026-03-15\"\n\
+         source = \"test\"\n\n",
+    );
+    t += &row("buy", "2026-02-01");
+    t += &row("sell", "2026-04-01");
+    config::parse_str(&t).unwrap()
+}
+
+/// A one-trade run whose entry and exit legs both have `side`.
+fn one_sided(b: &[Candle], side: LegSide) -> RunOutput {
+    let at = b.last().unwrap().close_time();
+    let mut t = trade(at, "10", "0.1");
+    t.entry.leg.side = side;
+    t.exit.leg.side = side;
+    out(vec![t])
+}
+
+/// Candidate 0 trades only buy legs (rate set 02-01, GST 03-01), candidate 1 only sell legs
+/// (rate set 04-01, GST 03-01, DP 03-15); both in sample only, OOS trades nothing.
+fn gated_range(with_sell_candidate: bool) -> ChargesUsed {
+    let (bs, ch, ps) = (bars("100"), dated_charges(), sets(2));
+    let mut params = params(&ch, &ps);
+    params.cost = CostModel::new(&ch, HistoryPolicy::LatestForAll, ChargeExchange::Nse);
+    let mut run = |win: Window, i: usize, slice: &[Candle], _: GateEnv<'_>| {
+        Ok(match (win, i) {
+            (Window::InSample, 0) => one_sided(slice, LegSide::Buy),
+            (Window::InSample, 1) if with_sell_candidate => one_sided(slice, LegSide::Sell),
+            _ => out(vec![]),
+        })
+    };
+    walk_forward_gated(&cfg(), &bs, &params, "IT", &quiet, &mut run)
+        .unwrap()
+        .1
+}
+
+#[test]
+fn the_gated_runner_spans_rate_sets_used_only_in_sample() {
+    assert_eq!(
+        gated_range(true),
+        ChargesUsed::Range(day(2026, 2, 1), day(2026, 4, 1))
+    );
+    // Without the sell-only candidate the sell set and DP are not in the range.
+    assert_eq!(
+        gated_range(false),
+        ChargesUsed::Range(day(2026, 2, 1), day(2026, 3, 1))
+    );
 }
 
 #[test]

@@ -38,7 +38,7 @@ use crate::foldvote::{FoldVote, vote};
 use crate::gate_policy::{EventsFor, GateEnv};
 use crate::metrics::{Assessment, Metrics, RunFacts, assess};
 use crate::provenance::ChargesUsed;
-use crate::types::{BacktestError, Leg, Trade};
+use crate::types::{BacktestError, Trade};
 
 /// What the provenance records about the gate's evidence in a walk-forward run.
 pub const GATE_EVIDENCE: &str = "chosen-candidate IS window; walk_forward_pass assumed true \
@@ -414,17 +414,18 @@ pub fn walk_forward_gated(
     events: EventsFor<'_>,
     run: &mut GatedRun<'_>,
 ) -> Result<(WalkForwardResult, ChargesUsed), BacktestError> {
-    let mut legs: Vec<Leg> = Vec::new();
+    // Running range merged per run: no leg is kept (CR-94-2).
+    let mut range: Option<(NaiveDate, NaiveDate)> = None;
     let result = walk_forward(cfg, bars, p, &mut |w, c, b, ev| {
         let env = window_env(w, ev, sector.to_owned(), events)?;
         let out = run(w, c, b, env)?;
-        for t in &out.trades {
-            legs.push(t.entry.leg.clone());
-            legs.push(t.exit.leg.clone());
+        let legs = out.trades.iter().flat_map(|t| [&t.entry.leg, &t.exit.leg]);
+        if let Some((lo, hi)) = p.cost.used_verified_range(legs)? {
+            range = Some(range.map_or((lo, hi), |(l, h)| (l.min(lo), h.max(hi))));
         }
         Ok(out)
     })?;
-    let used = ChargesUsed::of(p.cost.used_verified_range(&legs)?);
+    let used = ChargesUsed::of(range);
     Ok((result, used))
 }
 
