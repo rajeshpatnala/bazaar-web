@@ -301,6 +301,15 @@ dependencies = [
 [[package]]
 name = "bazaar-execution"
 version = "0.1.0"
+dependencies = [
+ "bazaar-core",
+ "bazaar-risk",
+ "chrono",
+ "chrono-tz",
+ "rust_decimal",
+ "sha2",
+ "thiserror",
+]
 
 [[package]]
 name = "bazaar-indicators"
