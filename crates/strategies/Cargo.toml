@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 bazaar-core = { path = "../core" }
+bazaar-indicators = { path = "../indicators" }
 bazaar-regime = { path = "../regime" }
 chrono.workspace = true
 chrono-tz.workspace = true
