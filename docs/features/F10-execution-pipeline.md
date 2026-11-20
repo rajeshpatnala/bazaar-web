@@ -27,6 +27,10 @@ TTL check, fresh-quote re-gate and drift check happen while the order is still `
 `approval_ttl_secs`, `max_quote_drift_bps`, `max_orders_per_second`, `kill_switch_release_phrase`, `kill_allow_reduce_only`, `breaker_engages_kill_switch`, `paper_slippage_bps.*`, `paper_max_participation`, `paper_stale_after_secs`, `paper_mis_square_off_ist`, and the ceilings `hard_limits.max_approval_ttl_secs`, `hard_limits.max_quote_drift_bps` (SEC-96-4).
 
 ## Deferred
+- defer: slice 8 audit anchor (hard readiness condition: no paper day counts until it merges).
+- Real-SQLite proof lives in slices 6 (AC3), 7 (AC4 triggers, chain verify on reopen) and 8 (AC4 on real chain, AC8 composition); T2 tester checks these on a temp DB.
+- Kill-switch in-process latch (set on every `engage`, cleared by a successful `release`) is lost on restart; only the persisted state survives.
+- RISK-100-2: slices 2/3 derive `reduce_only` from the `ApprovedOrder`, not request data, with a test that a non-exit intent is refused when engaged. SEC-100-4: cap `actor`/`reason` length at the route (later slice). SEC-100-5: slice 3 runs the gate in `spawn_blocking` and tests it.
 - Owner to confirm defaults (RISK-96-11): 300 s approval TTL, 50 bps drift, `breaker_engages_kill_switch = false`. All stay UNVERIFIED.
 - `GuardedExecutor` (slice 2) and the pipeline (slice 3) must both call `KillSwitch::admits`.
 - Defer RISK-96-8 to slice 3; RISK-96-5 to slice 2; SEC-96-2 anchor of latest (seq, hash) to slice 8; CR-96-5 to slice 5.

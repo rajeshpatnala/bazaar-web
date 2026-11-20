@@ -7,6 +7,7 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bazaar_core::clock::Clock;
 use bazaar_core::ports::{AuditDraft, KillSwitchRepo, RepoError};
@@ -25,12 +26,23 @@ pub enum ReleaseError {
     Storage,
 }
 
-/// Kill switch over a persistent repo.
+/// Shortest release phrase accepted; mirrors the config validation in `core::config::risk`.
+const MIN_PHRASE_LEN: usize = 8;
+
+/// The configured release phrase is too short to be a real confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("kill switch release phrase is too short")]
+pub struct PhraseTooShort;
+
+/// Kill switch over a persistent repo. An in-process latch is set by every `engage` call before
+/// the repo write and cleared only by a successful `release`, so a failed engage write still
+/// refuses orders. The latch is lost on restart (the persisted state is what survives).
 pub struct KillSwitch<R: KillSwitchRepo> {
     repo: R,
     clock: Arc<dyn Clock>,
     release_phrase: String,
     allow_reduce_only: bool,
+    latch: AtomicBool,
 }
 
 // The phrase is secret-like: never printed.
@@ -44,18 +56,25 @@ impl<R: KillSwitchRepo> fmt::Debug for KillSwitch<R> {
 
 impl<R: KillSwitchRepo> KillSwitch<R> {
     /// `release_phrase` and `allow_reduce_only` come from the typed `[execution]` risk config.
+    ///
+    /// # Errors
+    /// `PhraseTooShort` when the phrase (trimmed) is shorter than the config minimum.
     pub fn new(
         repo: R,
         clock: Arc<dyn Clock>,
         release_phrase: String,
         allow_reduce_only: bool,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, PhraseTooShort> {
+        if release_phrase.trim().len() < MIN_PHRASE_LEN {
+            return Err(PhraseTooShort);
+        }
+        Ok(Self {
             repo,
             clock,
             release_phrase,
             allow_reduce_only,
-        }
+            latch: AtomicBool::new(false),
+        })
     }
 
     async fn read(&self) -> Result<bool, RepoError> {
@@ -64,7 +83,7 @@ impl<R: KillSwitchRepo> KillSwitch<R> {
 
     /// True when engaged or when the state cannot be read (fail closed).
     pub async fn is_engaged(&self) -> bool {
-        self.read().await.unwrap_or(true)
+        self.latch.load(Ordering::SeqCst) || self.read().await.unwrap_or(true)
     }
 
     /// `Ok` when an order may be sent. Engaged: only a reduce-only order, and only when the
@@ -73,10 +92,11 @@ impl<R: KillSwitchRepo> KillSwitch<R> {
     /// # Errors
     /// `ExecError::KillSwitch` when engaged (and not exempt) or the state is unreadable.
     pub async fn admits(&self, reduce_only: bool) -> Result<(), ExecError> {
+        let latched = self.latch.load(Ordering::SeqCst);
         match self.read().await {
-            Ok(false) => Ok(()),
-            Ok(true) if reduce_only && self.allow_reduce_only => Ok(()),
-            Ok(true) | Err(_) => Err(ExecError::KillSwitch),
+            Ok(false) if !latched => Ok(()),
+            Ok(_) if reduce_only && self.allow_reduce_only => Ok(()),
+            Ok(_) | Err(_) => Err(ExecError::KillSwitch),
         }
     }
 
@@ -90,11 +110,16 @@ impl<R: KillSwitchRepo> KillSwitch<R> {
         }
     }
 
-    /// Engage; state and audit row are written together, and a failure changes nothing.
+    /// Engage; state and audit row are written together. The latch is set first, so a failed
+    /// write still leaves orders refused. Already engaged: no second row.
     ///
     /// # Errors
-    /// `ExecError::Storage` when the write fails.
+    /// `ExecError::Storage` when the write fails (the latch stays set).
     pub async fn engage(&self, actor: &str, reason: &str) -> Result<(), ExecError> {
+        self.latch.store(true, Ordering::SeqCst);
+        if matches!(self.read().await, Ok(true)) {
+            return Ok(());
+        }
         let d = self.draft(actor, "kill_switch_engaged", reason);
         self.repo
             .set(true, d, chain_hash)
@@ -110,11 +135,18 @@ impl<R: KillSwitchRepo> KillSwitch<R> {
         if typed != self.release_phrase {
             return Err(ReleaseError::WrongPhrase);
         }
+        // Unreadable state: do not release (fail closed). Already released: no row.
+        if !self.read().await.map_err(|_| ReleaseError::Storage)? {
+            self.latch.store(false, Ordering::SeqCst);
+            return Ok(());
+        }
         let d = self.draft(actor, "kill_switch_released", "");
         self.repo
             .set(false, d, chain_hash)
             .await
-            .map_err(|_| ReleaseError::Storage)
+            .map_err(|_| ReleaseError::Storage)?;
+        self.latch.store(false, Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -216,7 +248,7 @@ mod tests {
     const PHRASE: &str = "RELEASE KILL SWITCH";
 
     fn ks(r: &Arc<MemRepo>, reduce: bool) -> KillSwitch<Shared> {
-        KillSwitch::new(Shared(r.clone()), Arc::new(At), PHRASE.into(), reduce)
+        KillSwitch::new(Shared(r.clone()), Arc::new(At), PHRASE.into(), reduce).unwrap()
     }
 
     #[tokio::test]
@@ -284,9 +316,43 @@ mod tests {
         r.fail_write.store(true, SeqCst);
         assert_eq!(k.release(PHRASE, "user").await, Err(ReleaseError::Storage));
         assert!(k.is_engaged().await);
-        r.engaged.store(false, SeqCst);
+    }
+
+    #[tokio::test]
+    async fn failed_engage_write_still_refuses_until_a_real_release() {
+        let r = Arc::new(MemRepo::default());
+        let k = ks(&r, false);
+        r.fail_write.store(true, SeqCst);
         assert_eq!(k.engage("user", "y").await, Err(ExecError::Storage));
         assert!(!r.engaged.load(SeqCst));
+        assert_eq!(k.admits(false).await, Err(ExecError::KillSwitch));
+        assert!(k.is_engaged().await);
+        r.fail_write.store(false, SeqCst);
+        k.release(PHRASE, "user").await.unwrap();
+        assert_eq!(k.admits(false).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn engage_and_release_are_idempotent_and_unreadable_blocks_release() {
+        let r = Arc::new(MemRepo::default());
+        let k = ks(&r, true);
+        k.release(PHRASE, "user").await.unwrap();
+        assert_eq!(r.rows.lock().unwrap().len(), 0);
+        k.engage("user", "x").await.unwrap();
+        k.engage("user", "x").await.unwrap();
+        assert_eq!(r.rows.lock().unwrap().len(), 1);
+        r.fail_read.store(true, SeqCst);
+        assert_eq!(k.release(PHRASE, "user").await, Err(ReleaseError::Storage));
+        assert!(k.is_engaged().await);
+    }
+
+    #[test]
+    fn short_or_empty_phrase_is_rejected() {
+        let r = Arc::new(MemRepo::default());
+        for p in ["", "   ", "short"] {
+            let k = KillSwitch::new(Shared(r.clone()), Arc::new(At), p.into(), true);
+            assert_eq!(k.err(), Some(PhraseTooShort));
+        }
     }
 
     #[test]
