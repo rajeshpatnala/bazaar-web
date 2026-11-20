@@ -6,8 +6,11 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod audit;
+pub mod breaker;
 pub mod executor;
+pub mod guarded;
 pub mod killswitch;
+pub mod ratelimit;
 pub mod sink;
 pub mod state;
 pub mod types;

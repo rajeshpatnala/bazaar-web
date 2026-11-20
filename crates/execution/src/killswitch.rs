@@ -78,7 +78,11 @@ impl<R: KillSwitchRepo> KillSwitch<R> {
     }
 
     async fn read(&self) -> Result<bool, RepoError> {
-        self.repo.is_engaged().await
+        let r = self.repo.is_engaged().await;
+        if let Err(e) = &r {
+            tracing::warn!(category = e.safe_reason(), "kill switch state unreadable");
+        }
+        r
     }
 
     /// True when engaged or when the state cannot be read (fail closed).
@@ -121,10 +125,13 @@ impl<R: KillSwitchRepo> KillSwitch<R> {
             return Ok(());
         }
         let d = self.draft(actor, "kill_switch_engaged", reason);
-        self.repo
-            .set(true, d, chain_hash)
-            .await
-            .map_err(|_| ExecError::Storage)
+        self.repo.set(true, d, chain_hash).await.map_err(|e| {
+            tracing::warn!(
+                category = e.safe_reason(),
+                "kill switch engage not persisted"
+            );
+            ExecError::Storage
+        })
     }
 
     /// Release with the exact typed phrase.
@@ -137,14 +144,28 @@ impl<R: KillSwitchRepo> KillSwitch<R> {
         }
         // Unreadable state: do not release (fail closed). Already released: no row.
         if !self.read().await.map_err(|_| ReleaseError::Storage)? {
+            // Latched but never persisted: record that, so the log shows why orders were refused.
+            if self.latch.load(Ordering::SeqCst) {
+                let d = self.draft(actor, "kill_switch_released", "engage_never_persisted");
+                self.repo.set(false, d, chain_hash).await.map_err(|e| {
+                    tracing::warn!(
+                        category = e.safe_reason(),
+                        "kill switch release not persisted"
+                    );
+                    ReleaseError::Storage
+                })?;
+            }
             self.latch.store(false, Ordering::SeqCst);
             return Ok(());
         }
         let d = self.draft(actor, "kill_switch_released", "");
-        self.repo
-            .set(false, d, chain_hash)
-            .await
-            .map_err(|_| ReleaseError::Storage)?;
+        self.repo.set(false, d, chain_hash).await.map_err(|e| {
+            tracing::warn!(
+                category = e.safe_reason(),
+                "kill switch release not persisted"
+            );
+            ReleaseError::Storage
+        })?;
         self.latch.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -176,6 +197,7 @@ pub(crate) mod fakes {
         pub fail_read: AtomicBool,
         pub fail_write: AtomicBool,
         pub bad_hash: AtomicBool,
+        pub fail_state_write: AtomicBool,
         pub delay_ms: AtomicU64,
     }
 
@@ -231,6 +253,9 @@ pub(crate) mod fakes {
         }
         async fn set(&self, e: bool, a: AuditDraft, c: ChainFn) -> Result<(), RepoError> {
             self.0.push(a, c)?; // write-ahead: a failed audit leaves the state unchanged
+            if self.0.fail_state_write.load(Ordering::SeqCst) {
+                return Err(RepoError::Other); // row appended, state unchanged
+            }
             self.0.engaged.store(e, Ordering::SeqCst);
             Ok(())
         }
@@ -344,6 +369,34 @@ mod tests {
         r.fail_read.store(true, SeqCst);
         assert_eq!(k.release(PHRASE, "user").await, Err(ReleaseError::Storage));
         assert!(k.is_engaged().await);
+    }
+
+    #[tokio::test]
+    async fn releasing_a_never_persisted_engage_is_recorded() {
+        let r = Arc::new(MemRepo::default());
+        let k = ks(&r, true);
+        r.fail_write.store(true, SeqCst);
+        assert!(k.engage("user", "y").await.is_err());
+        r.fail_write.store(false, SeqCst);
+        k.release(PHRASE, "user").await.unwrap();
+        {
+            let rows = r.rows.lock().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0].draft.payload.contains("engage_never_persisted"));
+        }
+        assert_eq!(k.admits(false).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn state_write_failure_after_the_row_still_refuses_and_exempt_flag_matters() {
+        let r = Arc::new(MemRepo::default());
+        let k = ks(&r, false);
+        assert_eq!(k.admits(true).await, Ok(())); // not engaged: reduce-only needs no exemption
+        r.fail_state_write.store(true, SeqCst);
+        assert!(k.engage("user", "y").await.is_err());
+        assert_eq!(r.rows.lock().unwrap().len(), 1);
+        assert!(!r.engaged.load(SeqCst));
+        assert_eq!(k.admits(true).await, Err(ExecError::KillSwitch));
     }
 
     #[test]

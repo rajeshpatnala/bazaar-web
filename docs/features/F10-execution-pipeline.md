@@ -18,15 +18,20 @@ TTL check, fresh-quote re-gate and drift check happen while the order is still `
 - `execution::sink`: `ChainAuditSink` (`risk::AuditSink`) over `AuditRepo` via a writer task and bounded `recv_timeout`; needs a multi-thread runtime or `spawn_blocking`, else it fails closed by timeout.
 - Fake-repo chain test: sink + kill-switch rows verify with `verify_chain`; wrong hash fails closed (SEC-96-3, fake part).
 
+## Slice 2 (guards)
+- `ratelimit::RateLimiter` (per-second, per-minute, per-IST-day; all caps always apply, RISK-96-5), `breaker::DailyLossBreaker` (`PnlSource`, latched to the next trading day, fail closed), `guarded::{SafetyGuard, GuardedExecutor}` (kill switch, breaker, rate limit; second layer before `inner.place`).
+- Kill switch: release of a latched-never-persisted engage writes a row (RISK-100-10); repo error category logged (CR-100-5); fake `fail_state_write` (TS-100-3).
+
 ## Open acceptance items (from PR 96 review)
 - `ApprovedOrder` minted only inside the pipeline module with a gate-pass token (RISK-96-8, slice 3).
-- Minute cap still blocks the 5th order with the per-second cap on (RISK-96-5, slice 2).
 - Real-store trigger/`Corrupt` test is a slice 7 merge condition (SEC-96-3, RISK-96-9).
 
 ## Pre-live checklist: all new `[execution]` keys are UNVERIFIED (owner to confirm; no `source`/`verified_on` yet)
 `approval_ttl_secs`, `max_quote_drift_bps`, `max_orders_per_second`, `kill_switch_release_phrase`, `kill_allow_reduce_only`, `breaker_engages_kill_switch`, `paper_slippage_bps.*`, `paper_max_participation`, `paper_stale_after_secs`, `paper_mis_square_off_ist`, and the ceilings `hard_limits.max_approval_ttl_secs`, `hard_limits.max_quote_drift_bps` (SEC-96-4).
 
 ## Deferred
+- RISK-100-10 fixed in slice 2. SEC-100-4: cap `actor`/`reason` at 500 chars at the `PipelineHandle` SetKillSwitch edge (slice 3). SEC-100-5, CR-100-2: gate called via `spawn_blocking` (slice 3). TS-100-3 fixed in slice 2.
+- Breaker latch is in-process (lost on restart); breaker uses `Segment::Equity` for the trading-day calendar.
 - defer: slice 8 audit anchor (hard readiness condition: no paper day counts until it merges).
 - Real-SQLite proof lives in slices 6 (AC3), 7 (AC4 triggers, chain verify on reopen) and 8 (AC4 on real chain, AC8 composition); T2 tester checks these on a temp DB.
 - Kill-switch in-process latch (set on every `engage`, cleared by a successful `release`) is lost on restart; only the persisted state survives.
