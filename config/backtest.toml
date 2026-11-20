@@ -66,8 +66,8 @@ provisional_min_trades = 30
 trusted_min_trades = 100
 trusted_min_regimes = 2
 # A regime counts toward trusted_min_regimes only with this many pooled OOS trades tagged with it
-# (one lucky trade is not a regime). source: planner proposal, UNVERIFIED; verified_on: not yet
-# (the owner confirms the number later; the section's `unverified = true` covers it).
+# (one lucky trade is not a regime). source: planner proposal, approved by the owner as 10 on
+# 2026-11-21 (owner approval; no external source, so the section's `unverified = true` stays).
 min_trades_per_regime = 10
 max_drawdown_pct = "10"      # reported, not blocking until a Monte Carlo exists
 

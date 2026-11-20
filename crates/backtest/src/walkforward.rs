@@ -342,8 +342,9 @@ fn window<'a>(
 
 /// Distinct market-trend tags with at least `min_per_regime` trades each (config
 /// `evidence.min_trades_per_regime`: one trade does not make a regime). Derived from the
-/// engine's per-trade tags (the trend on the entry decision's bar), so the caller cannot raise
-/// the label by input; trades without a settled trend add nothing.
+/// engine's per-trade tags (the trend on the entry decision's bar), not from a caller-supplied
+/// count; the tags are only as trustworthy as the closure that ran the engine (as `Trade.regime`
+/// says). Trades without a settled trend add nothing.
 #[must_use]
 pub fn regimes_covered(trades: &[Trade], min_per_regime: u32) -> u32 {
     let mut counts: std::collections::BTreeMap<&str, u32> = std::collections::BTreeMap::new();
@@ -471,8 +472,8 @@ pub type GatedRun<'a> =
 /// # Errors
 /// As [`walk_forward`], plus a missing rate, GST or DP table for any leg, and `Invalid` when a
 /// trade's recorded charges differ from what `p.cost` charges that leg (the closure's engine was
-/// built from another cost model: QUAN-99-3). The depository charge is stateful per run, so the
-/// check compares every other component.
+/// built from another cost model: QUAN-99-3). The depository charge is stateful per run, so it is NOT
+/// rechecked: a closure engine built from a cost model with a different `[dp]` table passes.
 pub fn walk_forward_gated(
     cfg: &BacktestConfig,
     bars: &[Candle],
