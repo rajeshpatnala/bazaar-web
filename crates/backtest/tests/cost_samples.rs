@@ -1,7 +1,7 @@
 //! The five owner calculator samples against the real `config/charges.toml` (AC 1).
 //! A sample is a buy leg plus a sell leg; lines are summed and compared within the stated tolerance.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::Path;
 use std::str::FromStr;
@@ -40,17 +40,20 @@ fn calculator_samples_match_within_tolerance() {
     for s in samples {
         let exchange = match s["exchange"].as_str().unwrap() {
             "NSE" => ChargeExchange::Nse,
-            _ => ChargeExchange::Bse,
+            "BSE" => ChargeExchange::Bse,
+            other => panic!("unknown exchange {other}"),
         };
         let instrument = match s["instrument"].as_str().unwrap() {
             "cash" => LegInstrument::Cash,
             "future" => LegInstrument::Future,
-            _ => LegInstrument::Option(OptionRight::Call),
+            "option_call" => LegInstrument::Option(OptionRight::Call),
+            other => panic!("unknown instrument {other}"),
         };
         let product = match s["product"].as_str().unwrap() {
             "delivery" => Product::Delivery,
             "intraday" => Product::Intraday,
-            _ => Product::Carry,
+            "carry" => Product::Carry,
+            other => panic!("unknown product {other}"),
         };
         let mk = |side, key| Leg {
             instrument_token: 1,
@@ -67,9 +70,9 @@ fn calculator_samples_match_within_tolerance() {
             price: Price::snap_to_tick(dec(s, key), Decimal::new(5, 2)).unwrap(),
             trade_date: on,
         };
-        let model = CostModel::new(&cfg, HistoryPolicy::Strict).with_exchange(exchange);
-        let b = model.charges(&mk(LegSide::Buy, "buy")).unwrap();
-        let sl = model.charges(&mk(LegSide::Sell, "sell")).unwrap();
+        let model = CostModel::new(&cfg, HistoryPolicy::Strict, exchange);
+        let b = model.charges_excl_dp(&mk(LegSide::Buy, "buy")).unwrap();
+        let sl = model.charges_excl_dp(&mk(LegSide::Sell, "sell")).unwrap();
         let sum = b.checked_add(&sl).unwrap();
         let id = s["id"].as_u64().unwrap();
         let lines = [
@@ -90,6 +93,10 @@ fn calculator_samples_match_within_tolerance() {
         let total = sum.total().unwrap();
         let want_total = dec(s, "total");
         let total_tol = tol * Decimal::from(lines.len());
+        assert!(
+            (total - want_total).abs() <= tol,
+            "sample {id} total beyond one line tolerance: got {total}, calculator {want_total}"
+        );
         assert!(
             (total - want_total).abs() <= total_tol,
             "sample {id} total: got {total}, calculator {want_total}"

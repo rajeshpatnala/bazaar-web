@@ -1,14 +1,17 @@
 //! Cost model: Indian charges per leg, driven only by the typed `config/charges.toml`.
 //!
-//! Rounding (verified against the owner's calculator samples): STT and stamp to whole rupees,
-//! brokerage, exchange transaction, SEBI and GST to 2 dp, all half-up and only after the full
-//! multiplication. GST = `gst.rate_pct` x (brokerage + exchange txn + SEBI); STT, stamp, IPFT
-//! and DP are outside the base. IPFT (an exchange levy) is folded into the `exchange_txn` line.
+//! Rounding reproduces the owner's calculator samples within Rs 0.05 per line (SEBI rounding is
+//! UNVERIFIED; hypothesis: nearest 0.05): STT and stamp to whole rupees, brokerage, exchange
+//! transaction, SEBI and GST to 2 dp, all half-up and only after the full multiplication.
+//! GST = `gst.rate_pct` x (brokerage + exchange txn + SEBI); STT, stamp, IPFT and DP are outside
+//! the base. IPFT (from `ipft_pct`, an exchange levy) is folded into the `exchange_txn` line.
+//! The engine entry is [`CostModel::charges_with_dp`]; the leg's venue is an explicit argument.
 
 use std::collections::HashSet;
 
 use bazaar_core::config::{
     Brokerage, ChargeExchange, ChargeSegment, ChargeSide, ChargesConfig, DpCharge, RateSet,
+    TurnoverBasis,
 };
 use bazaar_core::segment::Segment;
 use chrono::NaiveDate;
@@ -43,21 +46,18 @@ pub struct CostModel<'a> {
 }
 
 impl<'a> CostModel<'a> {
-    /// A model on NSE (the default venue of the backtest).
+    /// A model for one venue. `Leg` carries no exchange, so it is explicit (no silent NSE default).
     #[must_use]
-    pub const fn new(cfg: &'a ChargesConfig, policy: HistoryPolicy) -> Self {
+    pub const fn new(
+        cfg: &'a ChargesConfig,
+        policy: HistoryPolicy,
+        exchange: ChargeExchange,
+    ) -> Self {
         Self {
             cfg,
             policy,
-            exchange: ChargeExchange::Nse,
+            exchange,
         }
-    }
-
-    /// Same model on another exchange (`Leg` carries no venue).
-    #[must_use]
-    pub const fn with_exchange(mut self, exchange: ChargeExchange) -> Self {
-        self.exchange = exchange;
-        self
     }
 
     /// True when `latest_for_all` is in use: provenance must say `costs_approximate = true`.
@@ -66,13 +66,48 @@ impl<'a> CostModel<'a> {
         self.policy == HistoryPolicy::LatestForAll
     }
 
-    /// Charges on one leg, DP excluded (stateless; see [`Self::charges_with_dp`]).
+    /// True when this leg's cost used a rate set other than the one in force on its trade date
+    /// (only under `latest_for_all`); slice 4 counts these for provenance.
     ///
     /// # Errors
-    /// `NoRateSet` (strict policy, no set in force on the trade date), `Invalid` for an
-    /// impossible segment/product/instrument mix, `Overflow` on arithmetic overflow.
-    pub fn charges(&self, leg: &Leg) -> Result<ChargeBreakdown, BacktestError> {
+    /// As [`Self::charges_excl_dp`] for a missing segment/side row.
+    pub fn leg_is_approximate(&self, leg: &Leg) -> Result<bool, BacktestError> {
+        if self.policy == HistoryPolicy::Strict {
+            return Ok(false);
+        }
+        let latest = self.lookup(leg, NaiveDate::MAX)?;
+        Ok(self
+            .lookup(leg, leg.trade_date)
+            .map_or(true, |s| s.effective_from != latest.effective_from))
+    }
+
+    /// Charges on one leg with the DEPOSITORY CHARGE OMITTED (`dp` is always 0): a delivery sell
+    /// booked through this is Rs 15.34-class too cheap. The engine must call
+    /// [`Self::charges_with_dp`]; this stateless form is for tests and per-line checks.
+    ///
+    /// # Errors
+    /// `NoRateSet` (strict policy, no set in force on the trade date), `Invalid` for a zero
+    /// quantity or price, an impossible segment/product/instrument mix, a rate row whose
+    /// turnover basis does not match the instrument, or a missing row; `Overflow` on overflow.
+    pub fn charges_excl_dp(&self, leg: &Leg) -> Result<ChargeBreakdown, BacktestError> {
+        if leg.qty.0 == 0 {
+            return Err(BacktestError::Invalid("zero quantity".into()));
+        }
+        if leg.price.value().is_zero() {
+            return Err(BacktestError::Invalid("zero price".into()));
+        }
         let set = self.rate_set(leg)?;
+        let want = if matches!(leg.instrument, LegInstrument::Option(_)) {
+            TurnoverBasis::Premium
+        } else {
+            TurnoverBasis::Notional
+        };
+        if set.turnover_basis != want {
+            return Err(BacktestError::Invalid(format!(
+                "{}: rate row turnover basis {:?} does not match the instrument ({want:?})",
+                leg.symbol, set.turnover_basis
+            )));
+        }
         let gst_rate = self.gst_rate()?;
         let turnover = leg.turnover().ok_or(BacktestError::Overflow("turnover"))?;
         let pct = |rate: Decimal| mul_div(turnover, rate, Decimal::ONE_HUNDRED);
@@ -105,17 +140,17 @@ impl<'a> CostModel<'a> {
         })
     }
 
-    /// As [`Self::charges`], plus the depository charge on the first delivery sell of a scrip
+    /// The engine entry: [`Self::charges_excl_dp`] plus the depository charge on the first delivery sell of a scrip
     /// on an IST day (once per scrip per day, never on a buy).
     ///
     /// # Errors
-    /// As [`Self::charges`]; `Invalid` if `[dp]` is missing.
+    /// As [`Self::charges_excl_dp`]; `Invalid` if `[dp]` is missing.
     pub fn charges_with_dp(
         &self,
         ledger: &mut DpLedger,
         leg: &Leg,
     ) -> Result<ChargeBreakdown, BacktestError> {
-        let mut c = self.charges(leg)?;
+        let mut c = self.charges_excl_dp(leg)?;
         if leg.product == Product::Delivery
             && leg.side == LegSide::Sell
             && !ledger
@@ -154,19 +189,36 @@ impl<'a> CostModel<'a> {
     }
 
     fn rate_set(&self, leg: &Leg) -> Result<&'a RateSet, BacktestError> {
+        // Latest-for-all means the newest set in the file for this row, whatever its date (a
+        // future-dated set included: there is no clock here); strict uses the trade date.
+        let date = match self.policy {
+            HistoryPolicy::Strict => leg.trade_date,
+            HistoryPolicy::LatestForAll => NaiveDate::MAX,
+        };
+        self.lookup(leg, date)
+    }
+
+    fn lookup(&self, leg: &Leg, date: NaiveDate) -> Result<&'a RateSet, BacktestError> {
         let segment = charge_segment(leg)?;
         let side = match leg.side {
             LegSide::Buy => ChargeSide::Buy,
             LegSide::Sell => ChargeSide::Sell,
         };
-        // Latest-for-all asks for the newest set whatever the date; strict uses the trade date.
-        let date = match self.policy {
-            HistoryPolicy::Strict => leg.trade_date,
-            HistoryPolicy::LatestForAll => NaiveDate::MAX,
-        };
         self.cfg
             .rate_set_for(self.exchange, segment, side, date)
-            .map_err(|_| BacktestError::NoRateSet(leg.trade_date))
+            .map_err(|e| {
+                // NoRateSet only when some set exists for the row but none was in force yet;
+                // a row missing from the file altogether is a config gap, not a date problem.
+                let row_exists =
+                    self.cfg.rate_set.iter().any(|r| {
+                        r.exchange == self.exchange && r.segment == segment && r.side == side
+                    });
+                if row_exists {
+                    BacktestError::NoRateSet(leg.trade_date)
+                } else {
+                    BacktestError::Invalid(e.to_string())
+                }
+            })
     }
 }
 
