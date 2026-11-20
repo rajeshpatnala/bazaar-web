@@ -3,7 +3,7 @@
 //! F1 slice 9 (workspace checks). Never paraphrase.
 
 /// Exact wording from the `bz-india-markets` compliance reference.
-pub const DISCLAIMER: &str = "For education and personal analysis. Not investment advice. Past performance does not guarantee future results.";
+pub const DISCLAIMER: &str = "For education and personal analysis. Not investment advice; not SEBI registered; markets carry risk. Past performance does not guarantee future results.";
 
 /// Appends the disclaimer to an export or notification body on its own line.
 #[must_use]
@@ -19,7 +19,7 @@ mod tests {
     fn exact_text() {
         assert_eq!(
             DISCLAIMER,
-            "For education and personal analysis. Not investment advice. Past performance does not guarantee future results."
+            "For education and personal analysis. Not investment advice; not SEBI registered; markets carry risk. Past performance does not guarantee future results."
         );
     }
 

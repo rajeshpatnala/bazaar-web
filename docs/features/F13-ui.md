@@ -15,9 +15,12 @@ Owner area: `web/` (nothing in `crates/`). Plan: `.agents/plans/F13-ui-slice1.md
 ## What was built
 - Slice 0: `web/src/styles/tokens.css` (CSS variables from preview B), `styles.css`, `app/AppShell.tsx`, `app/ModeBadge.tsx` (badge, read-only live note, server time in IST), `shared/ui/Disclaimer.tsx` (fixed footer), `formatIstIso`, aggregate `mocks/handlers.ts` with empty `ideas`/`orders`/`account` stubs, placeholder `/ideas` route.
 
+## Disclaimer wording
+- Owner approved 2026-11-21: "For education and personal analysis. Not investment advice; not SEBI registered; markets carry risk. Past performance does not guarantee future results." Applied in `crates/core/src/disclaimer.rs`, `web/src/shared/disclaimer.ts`, README, the compliance skill reference and the regime doc comment; byte-equality pinned by `rust_and_ts_disclaimers_are_byte_equal`.
+
 ## Decisions
 - Preview B, system/Georgia fonts only, no webfonts, no new dependency.
-- Disclaimer "not SEBI registered" wording is wanted (manager decision, 2026-11-21) but NOT applied: `crates/cli/tests/workspace.rs` requires the TS constant to be byte-equal to `bazaar_core::disclaimer::DISCLAIMER`, so it needs a lockstep crates/core change (see Deferred).
+- Disclaimer "not SEBI registered" wording was applied in PR 103 on 2026-11-21 with owner approval, in lockstep in `crates/core/src/disclaimer.rs` and `web/src/shared/disclaimer.ts` (byte-equality test in `crates/cli/tests/workspace.rs`).
 - The preview's disabled Live toggle becomes a read-only note: live is chosen on the server, never in the UI.
 - Time shown comes from `status.server_time`, never `Date.now()`.
 - Types for ideas, order preview and account are provisional (`// PROVISIONAL`) until F13 server slices publish OpenAPI.
@@ -26,7 +29,7 @@ Owner area: `web/` (nothing in `crates/`). Plan: `.agents/plans/F13-ui-slice1.md
 - Mock data only; no real recommendations; no server routes, WS, charts, dark theme or live-mode UI.
 
 ## Deferred
-- Add "not SEBI registered" to the disclaimer in `crates/core/src/disclaimer.rs` and `web/src/shared/disclaimer.ts` together (needs a crates change; out of F13 slice 0 scope).
+- DONE (PR 103): add "not SEBI registered" to the disclaimer in `crates/core/src/disclaimer.rs` and `web/src/shared/disclaimer.ts` together.
 - Swap provisional types for generated schema types (F13 server slice).
 - WebSocket events replacing polling mocks (F13 server slice).
 - Owner to confirm the disclaimer wording, the read-only live note and the "Ideas to consider today" copy.

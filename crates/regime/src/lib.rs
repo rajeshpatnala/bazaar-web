@@ -1,7 +1,7 @@
 //! Market regime detection (trend/range and volatility state).
 //!
-//! Spec: `docs/strategy/F7-regime-definitions.md`. Not investment advice: a label describes recent
-//! behaviour, it does not predict the next bar. Step 1 holds the types and the config; the
+//! Spec: `docs/strategy/F7-regime-definitions.md`. Not investment advice; not SEBI registered; markets
+//! carry risk. A label describes recent behaviour, it does not predict the next bar. Step 1 holds the types and the config; the
 //! classifier follows.
 
 #![deny(
