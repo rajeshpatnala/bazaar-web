@@ -28,5 +28,7 @@ Calculator estimate, not a contract note; no delivery minimum; per-unit futures/
 ## What was built
 Slice 0: `types.rs` (`Leg`, `ChargeBreakdown`, `Fill`, `Trade`, `EquityPoint`, `Provenance`, `HistoryPolicy`, `EvidenceLabel`, `BacktestError`), `config.rs` (`BacktestConfig::load`, validation with `BacktestConfigError`, trial penalty helper), `config/backtest.toml`.
 
+Slice 2 (fill model, `crates/backtest/src/fill`): next-open entry with optional no-chase zone limit, gap-aware stop (`min`/`max` with open, then stop slippage), target fill only when traded through by `target_through_ticks`, stop wins a same-bar tie, time exit, adverse tick rounding of slippage and of stop/target levels, stop/target side validation, slippage multiplier (2x stress hook), lot floor. Target fills use entry-class slippage with no gap credit: a conservative choice per policy section 1 (decided, keep). Not in this slice (slice 4, engine): AC4 peeking-double and `lookahead_` property tests, limit-entry fills, the no-`Fill`-with-default-charges test (QUAN-84-6), wiring `stress_slippage_multiplier` into the stress re-run (QUAN-84-3 hook exists as `FillParams::slippage_multiplier`).
+
 ## Deferred
 Contract-note cross-check; QUAN-66-3 (delivery minimum); Monte Carlo (drawdown and stability are reported, not blocking).
