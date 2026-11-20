@@ -1,5 +1,5 @@
 //! Rules must not depend on the absolute price level: scaling every fixture price by +-20% (and
-//! rounding to the 0.05 tick) keeps each strategy firing on bar `k` only, with tick-multiple
+//! rounding to the fixture instrument's tick) keeps each strategy firing on bar `k` only, with tick-multiple
 //! levels and a valid signal (`validate()` plus `risk_per_share == entry_high - stop`). Also covers
 //! a Downtrend stock regime on the firing bar (no signal). Unknown/Mixed stock regimes and market
 //! `Breakdown`/`Down` are covered in `regime_fit.rs`.
@@ -20,8 +20,7 @@ fn tick() -> Decimal {
         .tick_size
 }
 
-fn scaled(bars: &[Candle], num: i64, den: i64) -> Vec<Candle> {
-    let t = tick();
+fn scaled(bars: &[Candle], num: i64, den: i64, t: Decimal) -> Vec<Candle> {
     let f = |d: Decimal| (d * Decimal::from(num) / Decimal::from(den) / t).round() * t;
     bars.iter()
         .map(|c| {
@@ -33,9 +32,10 @@ fn scaled(bars: &[Candle], num: i64, den: i64) -> Vec<Candle> {
 
 #[test]
 fn rules_fire_on_the_same_bar_at_plus_and_minus_20_percent_prices() {
+    let t = tick();
     for c in &CASES {
         for (num, den) in [(4, 5), (1, 1), (6, 5)] {
-            let bars = scaled(&candles(c.csv, true), num, den);
+            let bars = scaled(&candles(c.csv, true), num, den, t);
             let mut s = strategy(c.id);
             for end in 0..bars.len() {
                 let w = World::for_case(c, &bars[end]);
@@ -43,7 +43,7 @@ fn rules_fire_on_the_same_bar_at_plus_and_minus_20_percent_prices() {
                 assert_eq!(got.is_some(), end == c.k, "{} x{num}/{den} bar {end}", c.id);
                 if let Some(sig) = got {
                     for p in [sig.entry_low, sig.entry_high, sig.stop] {
-                        assert_eq!(p % tick(), Decimal::ZERO, "{} tick {p}", c.id);
+                        assert_eq!(p % t, Decimal::ZERO, "{} tick {p}", c.id);
                     }
                     assert!(sig.stop < sig.entry_low, "{} stop below entry", c.id);
                     assert!(sig.entry_low <= sig.entry_high, "{} entry zone", c.id);
