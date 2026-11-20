@@ -26,10 +26,12 @@ use crate::types::{BacktestError, EquityPoint, Product, SlippageClass, Trade};
 
 mod sizing;
 mod state;
+mod stress;
 
 pub(crate) use sizing::round_trip_cost;
 use state::Engine;
 pub(crate) use state::{invalid, snap};
+pub use stress::{RunParts, StressedRun, run_with_stress};
 
 /// A verdict on one sized entry. There is no default implementation outside tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
