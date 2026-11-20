@@ -8,6 +8,7 @@
 pub mod config;
 pub mod cost;
 pub mod fill;
+pub mod ledger;
 pub mod types;
 
 pub use config::{BacktestConfig, BacktestConfigError};
