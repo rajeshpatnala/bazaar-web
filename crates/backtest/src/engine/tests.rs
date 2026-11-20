@@ -25,7 +25,8 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
 use super::*;
-use crate::types::{FillKind, HistoryPolicy};
+use crate::provenance::ChargesEvidence;
+use crate::types::{FillKind, HistoryPolicy, Leg};
 
 fn d(s: &str) -> Decimal {
     Decimal::from_str(s).unwrap()
@@ -718,4 +719,160 @@ fn a_non_cash_equity_instrument_is_refused() {
     e.inst.instrument_type = InstrumentType::parse("FUT");
     let r = approve(&e, &[FLAT, FLAT, FLAT, FLAT], &mut fake(1, None));
     assert!(matches!(r, Err(BacktestError::Invalid(_))));
+}
+
+fn stressed(
+    e: &Env,
+    rows: &[[&str; 4]],
+    at: usize,
+    mult: Decimal,
+) -> Result<StressedRun, BacktestError> {
+    let bars = bars_from(&e.cal, e.start, rows);
+    let spec = RunSpec {
+        bars: &bars,
+        instrument: &e.inst,
+        calendar: &e.cal,
+        config: &e.cfg,
+        cost: CostModel::new(&e.charges, HistoryPolicy::LatestForAll, ChargeExchange::Nse),
+        limits: &e.limits,
+        product: Product::Delivery,
+        capital: e.capital,
+        slippage_multiplier: mult,
+    };
+    let mut make = || RunParts {
+        strategy: Box::new(fake(at, None)),
+        regimes: Box::new(regimes(&bars)),
+        policy: Box::new(Fixed(EntryVerdict::Approve)),
+    };
+    run_with_stress(&spec, &mut make)
+}
+
+#[test]
+fn the_stress_run_costs_more_and_the_evidence_covers_every_leg_of_both_runs() {
+    let e = env();
+    let rows = [
+        FLAT,
+        FLAT,
+        ["100", "103", "99.5", "102"],
+        ["102", "106", "101", "105"],
+    ];
+    let r = stressed(&e, &rows, 1, Decimal::ONE).unwrap();
+    assert_eq!((r.base.trades.len(), r.stress.trades.len()), (1, 1));
+    // Adverse slippage at 2x entry price is higher than at 1x.
+    assert!(r.stress.trades[0].entry.leg.price.value() > r.base.trades[0].entry.leg.price.value());
+    assert!(r.stress_pnl_change().unwrap() < Decimal::ZERO);
+    // Pin the exact multipliers: each run equals a direct engine run at that multiplier (QUAN-95-1).
+    assert_eq!(e.cfg.stress_multiplier(), d("2"));
+    let direct = |m: &str| {
+        go(
+            &e,
+            &rows,
+            Product::Delivery,
+            m,
+            EntryVerdict::Approve,
+            &mut fake(1, None),
+        )
+        .unwrap()
+    };
+    assert_eq!(r.base, direct("1"));
+    assert_eq!(r.stress, direct("2"));
+    // QUAN-94-8: the evidence is the one `from_legs` gives for ALL legs, under the model's policy.
+    let cost = CostModel::new(&e.charges, HistoryPolicy::LatestForAll, ChargeExchange::Nse);
+    let legs: Vec<&Leg> = r
+        .base
+        .trades
+        .iter()
+        .chain(&r.stress.trades)
+        .flat_map(|t| [&t.entry.leg, &t.exit.leg])
+        .collect();
+    assert_eq!(legs.len(), 4);
+    let expect = ChargesEvidence::from_legs(&cost, legs).unwrap();
+    assert_eq!(r.charges, expect);
+    assert_ne!(r.charges, ChargesEvidence::from_legs(&cost, []).unwrap());
+    assert_eq!(r.charges.policy(), HistoryPolicy::LatestForAll);
+}
+
+#[test]
+fn a_stress_run_with_no_trades_levies_no_charges() {
+    let e = env();
+    // The strategy fires on a bar index that never exists, so nothing trades.
+    let r = stressed(&e, &[FLAT, FLAT, FLAT], 99, Decimal::ONE).unwrap();
+    assert!(r.base.trades.is_empty() && r.stress.trades.is_empty());
+    assert_eq!(
+        r.charges,
+        ChargesEvidence::from_legs(
+            &CostModel::new(&e.charges, HistoryPolicy::LatestForAll, ChargeExchange::Nse),
+            []
+        )
+        .unwrap()
+    );
+    assert_eq!(r.stress_pnl_change().unwrap(), Decimal::ZERO);
+}
+
+#[test]
+fn a_caller_multiplier_is_refused_not_discarded() {
+    let e = env();
+    let r = stressed(&e, &[FLAT, FLAT, FLAT], 1, d("5"));
+    assert!(matches!(r, Err(BacktestError::Invalid(_))));
+}
+
+#[test]
+fn stress_pnl_change_reports_overflow() {
+    let e = env();
+    let rows = [
+        FLAT,
+        FLAT,
+        ["100", "103", "99.5", "102"],
+        ["102", "106", "101", "105"],
+    ];
+    let template = stressed(&e, &rows, 1, Decimal::ONE).unwrap().base.trades[0].clone();
+    let run_of = |net: Decimal| {
+        let mut t = template.clone();
+        t.net_pnl = net;
+        RunOutput {
+            trades: vec![t],
+            equity: vec![],
+            skipped: 0,
+        }
+    };
+    let s = |base: Decimal, stress: Decimal| StressedRun {
+        base: run_of(base),
+        stress: run_of(stress),
+        charges: ChargesEvidence::from_legs(
+            &CostModel::new(&charges(), HistoryPolicy::Strict, ChargeExchange::Nse),
+            [],
+        )
+        .unwrap(),
+    };
+    assert_eq!(s(d("-5"), d("-7")).stress_pnl_change().unwrap(), d("-2"));
+    // Stress minus base overflows at the difference.
+    let diff = s(Decimal::MIN, Decimal::MAX).stress_pnl_change();
+    assert!(matches!(diff, Err(BacktestError::Overflow(_))));
+}
+
+#[test]
+fn stress_pnl_change_reports_a_sum_overflow() {
+    let e = env();
+    let rows = [
+        FLAT,
+        FLAT,
+        ["100", "103", "99.5", "102"],
+        ["102", "106", "101", "105"],
+    ];
+    let base = stressed(&e, &rows, 1, Decimal::ONE).unwrap();
+    let mut t = base.base.trades[0].clone();
+    t.net_pnl = Decimal::MAX;
+    let two = RunOutput {
+        trades: vec![t.clone(), t],
+        equity: vec![],
+        skipped: 0,
+    };
+    let r = StressedRun {
+        stress: two,
+        ..base
+    };
+    assert!(matches!(
+        r.stress_pnl_change(),
+        Err(BacktestError::Overflow("net pnl sum"))
+    ));
 }
