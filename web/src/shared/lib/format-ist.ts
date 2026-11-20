@@ -12,6 +12,7 @@ export const formatIst = (epochSeconds: number): string => `${IST.format(epochSe
 
 /** ISO-8601 timestamp with offset (e.g. the server's `server_time`) -> IST display string. */
 export function formatIstIso(iso: string): string {
+  if (!/(Z|[+-]\d{2}:\d{2})$/.test(iso)) throw new Error(`timestamp needs Z or an offset: ${iso}`);
   const ms = Date.parse(iso);
   if (Number.isNaN(ms)) throw new Error(`bad timestamp: ${iso}`);
   return formatIst(Math.floor(ms / 1000));

@@ -43,7 +43,7 @@ body {
   max-width: 760px;
   margin: 0 auto;
   overflow-x: auto;
-  padding: 0 1.5rem 110px; /* room for the fixed disclaimer */
+  padding: 0 1.5rem 10rem; /* room for the fixed disclaimer, which wraps on narrow screens */
 }
 .shell-main h2 {
   font-weight: 400;

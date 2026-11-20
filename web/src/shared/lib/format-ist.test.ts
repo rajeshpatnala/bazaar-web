@@ -24,6 +24,9 @@ describe("formatIstIso", () => {
     expect(formatIstIso("2026-11-19T10:00:00+05:30")).toBe("19 Nov, 10:00 IST");
     expect(formatIstIso("2026-11-19T04:30:00Z")).toBe("19 Nov, 10:00 IST");
   });
+  it("rejects a timestamp with no offset (it would be read in browser time)", () => {
+    expect(() => formatIstIso("2026-11-19T10:00:00")).toThrow();
+  });
   it("rejects garbage", () => {
     expect(() => formatIstIso("nope")).toThrow();
   });
