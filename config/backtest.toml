@@ -1,0 +1,78 @@
+# backtest.toml: backtest policy (owner: bz-quant). Strategist decisions of 2026-11-20,
+# docs/strategy/F9-backtest-policy.md. Every value is an owner-policy CONVENTION, UNVERIFIED for this
+# app, not a market fact; the owner confirms or changes them. Tightening is always allowed; loosening
+# needs a DECISIONS.md entry and the owner. A backtest is evidence, not a promise.
+# Every value below is also a floor: a looser value fails to load, a tighter one loads.
+# Money-like numbers are strings (never TOML floats). Unknown keys and out-of-range values fail to load.
+schema_version = 1
+source = "owner policy: docs/strategy/F9-backtest-policy.md (strategist, 2026-11-20)"
+policy_date = "2026-11-20"   # when the owner policy was written; NOT a source check: every value stays an UNVERIFIED convention
+
+[run]
+history_policy = "strict"    # the file must say strict; "latest_for_all" is a per-run opt-in (stamps costs_approximate = true, exploratory only)
+
+# Slippage is adverse to the trader, then rounded against the trader to the tick (policy section 1).
+# *_pct is a percent of price (0.05 = 0.05%). The wider of the percent figure and the tick floor applies.
+[slippage.equity]            # liquid watchlist
+source = "owner policy"
+unverified = true
+entry_pct = "0.05"           # entry, target and time-exit
+entry_min_ticks = 1
+stop_pct = "0.10"            # stops fill as market orders in a fast move
+stop_min_ticks = 1
+
+[slippage.index_futures]
+source = "owner policy"
+unverified = true
+entry_pct = "0"
+entry_min_ticks = 1
+stop_pct = "0"
+stop_min_ticks = 2
+
+[slippage.index_options]     # bought, defined risk
+source = "owner policy"
+unverified = true
+entry_pct = "0.5"
+entry_min_ticks = 2
+stop_pct = "1"
+stop_min_ticks = 3
+
+[fills]
+source = "owner policy"
+unverified = true
+target_through_ticks = 1     # a target fills only if the bar trades through it by this many ticks
+stress_slippage_multiplier = "2"   # the evidence bar is re-run at this multiple of slippage
+
+[walk_forward]
+source = "owner policy: rolling, F8 strategies are daily swing systems (policy section 3)"
+unverified = true
+in_sample_months = 24
+out_of_sample_months = 6
+step_months = 6              # never below out_of_sample_months: OOS windows must not overlap
+# Folds: a position open at the in-sample end is force-closed or discarded, never carried into OOS; indicator state is rebuilt per window.
+warmup_bars = 250            # indicator warm-up, excluded from in-sample
+min_folds = 4                # fewer = "low evidence", never "pass"
+min_pooled_oos_trades = 30   # pooled across folds and instruments; equals risk.toml [gate.evidence], hard floor
+thin_fold_trades = 5         # a fold with fewer trades is "thin": shown, excluded from the profitable-folds vote
+
+[evidence]                   # all after costs and slippage
+source = "owner policy; profit factor and expectancy equal risk.toml [gate.evidence]"
+unverified = true
+min_profit_factor = "1.3"
+min_expectancy_r = "0.1"
+min_oos_is_ratio = "0.5"
+min_profitable_fold_pct = "60"
+provisional_min_trades = 30
+trusted_min_trades = 100
+trusted_min_regimes = 2
+max_drawdown_pct = "10"      # reported, not blocking until a Monte Carlo exists
+
+[trials]
+source = "owner policy: trial counting (policy section 4)"
+unverified = true
+prior_trials = 0             # cumulative trials the owner declares for this strategy's OOS data
+tier1_max_trials = 10        # 2..=tier1_max: profit factor bar + tier1_pf_add
+tier1_pf_add = "0.1"
+tier2_max_trials = 50        # above tier1_max..=tier2_max: + tier2_pf_add, label capped at Provisional
+tier2_pf_add = "0.2"
+tier3_pf_add = "0.3"         # above tier2_max: label capped at Provisional

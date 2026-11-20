@@ -40,7 +40,7 @@ fn server_and_web_versions_are_equal() {
 }
 
 #[test]
-fn config_holds_exactly_the_eight_files() {
+fn config_holds_exactly_the_nine_files() {
     let mut names: Vec<String> = std::fs::read_dir(root().join("config"))
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
@@ -49,6 +49,7 @@ fn config_holds_exactly_the_eight_files() {
     assert_eq!(
         names,
         [
+            "backtest.toml",
             "calendar.toml",
             "charges.toml",
             "compliance.toml",
