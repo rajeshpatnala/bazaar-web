@@ -25,8 +25,10 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
 use super::*;
+use crate::gate_policy::GateEnv;
 use crate::provenance::ChargesEvidence;
 use crate::types::{FillKind, HistoryPolicy, Leg};
+use crate::walkforward::{ParamSet, WfParams, Window, WindowBars, walk_forward_gated};
 
 fn d(s: &str) -> Decimal {
     Decimal::from_str(s).unwrap()
@@ -37,9 +39,13 @@ fn config_dir() -> std::path::PathBuf {
 }
 
 fn row(seg: &str, side: &str, brokerage: &str, stt: &str) -> String {
+    row_at(seg, side, brokerage, stt, "2026-01-01", "2026-01-01")
+}
+
+fn row_at(seg: &str, side: &str, brokerage: &str, stt: &str, from: &str, verified: &str) -> String {
     format!(
         "[[rate_set]]\nexchange = \"NSE\"\nsegment = \"{seg}\"\nside = \"{side}\"\n\
-         effective_from = \"2026-01-01\"\nverified_on = \"2026-01-01\"\nsource = \"test\"\n\
+         effective_from = \"{from}\"\nverified_on = \"{verified}\"\nsource = \"test\"\n\
          turnover_basis = \"notional\"\nbrokerage = {brokerage}\nstt_ctt_pct = \"{stt}\"\n\
          exchange_txn_pct = \"0\"\nsebi_per_crore = \"0\"\nipft_pct = \"0\"\nstamp_pct = \"0\"\n\n"
     )
@@ -47,18 +53,27 @@ fn row(seg: &str, side: &str, brokerage: &str, stt: &str) -> String {
 
 /// Test-owned rates: delivery STT 0.1%, intraday flat 20; DP 15.34 incl. GST.
 fn charges() -> ChargesConfig {
+    charges_text(&[
+        ("buy", "2026-01-01", "2026-01-01"),
+        ("sell", "2026-01-01", "2026-01-01"),
+    ])
+}
+
+/// As [`charges`], with the delivery rate sets given as `(side, effective_from, verified_on)`.
+fn charges_text(delivery: &[(&str, &str, &str)]) -> ChargesConfig {
     let zero = "{ kind = \"zero\" }";
     let flat = "{ kind = \"flat\", flat = \"20\" }";
     let mut t = String::from(
         "schema_version = 1\nverified_on = \"2026-06-01\"\nsource = \"test\"\n\n\
          [meta]\nbroker = \"t\"\ncurrency = \"INR\"\nmax_age_days = 90\n\
          history_policy = \"effective_dated\"\n\n\
-         [gst]\nrate_pct = \"18\"\nverified_on = \"2026-06-01\"\nsource = \"test\"\n\n\
-         [dp]\nper_scrip_total = \"15.34\"\nincludes_gst = true\nverified_on = \"2026-06-01\"\n\
+         [gst]\nrate_pct = \"18\"\nverified_on = \"2026-02-01\"\nsource = \"test\"\n\n\
+         [dp]\nper_scrip_total = \"15.34\"\nincludes_gst = true\nverified_on = \"2026-02-01\"\n\
          source = \"test\"\n\n",
     );
-    t += &row("equity_delivery", "buy", zero, "0.1");
-    t += &row("equity_delivery", "sell", zero, "0.1");
+    for (side, from, verified) in delivery {
+        t += &row_at("equity_delivery", side, zero, "0.1", from, verified);
+    }
     t += &row("equity_intraday", "buy", flat, "0");
     t += &row("equity_intraday", "sell", flat, "0.025");
     parse_str(&t).unwrap()
@@ -269,6 +284,7 @@ struct Env {
     start: NaiveDate,
     interval: Interval,
     odd: (usize, bool),
+    warmup: usize,
 }
 
 fn env() -> Env {
@@ -286,6 +302,7 @@ fn env() -> Env {
         start: NaiveDate::from_ymd_opt(2026, 3, 9).unwrap(),
         interval: Interval::Day,
         odd: (usize::MAX, false),
+        warmup: 0,
     }
 }
 
@@ -314,6 +331,7 @@ fn go(
         product,
         capital: e.capital,
         slippage_multiplier: d(mult),
+        warmup: e.warmup,
     };
     let reg = Odd {
         inner: regimes(&bars),
@@ -513,6 +531,7 @@ fn unsorted_bars_are_refused() {
         product: Product::Delivery,
         capital: d("100000"),
         slippage_multiplier: d("1"),
+        warmup: 0,
     };
     let r = run(
         &spec,
@@ -557,6 +576,7 @@ fn the_policy_observes_closed_trades_at_every_decision_bar() {
         product: Product::Delivery,
         capital: e.capital,
         slippage_multiplier: d("1"),
+        warmup: 0,
     };
     let reg = regimes(&bars);
     let mut rec = Recorder(Vec::new(), None);
@@ -738,6 +758,7 @@ fn stressed(
         product: Product::Delivery,
         capital: e.capital,
         slippage_multiplier: mult,
+        warmup: 0,
     };
     let mut make = || RunParts {
         strategy: Box::new(fake(at, None)),
@@ -875,4 +896,277 @@ fn stress_pnl_change_reports_a_sum_overflow() {
         r.stress_pnl_change(),
         Err(BacktestError::Overflow("net pnl sum"))
     ));
+}
+#[test]
+fn warmup_bars_are_history_only() {
+    let mut e = env();
+    let rows = [
+        FLAT,
+        FLAT,
+        FLAT,
+        FLAT,
+        ["100", "103", "99.5", "102"],
+        ["102", "106", "101", "105"],
+    ];
+    e.warmup = 3;
+    // A signal on a history bar is never decided: nothing trades, nothing is marked.
+    let mut early = fake(1, None);
+    let none = approve(&e, &rows, &mut early).unwrap();
+    assert_eq!(none.trades, []);
+    assert_eq!(none.equity.len(), rows.len() - 3);
+    // The strategy still sees the history: its first view already holds the warm-up bars.
+    assert_eq!(early.seen.borrow().first(), Some(&4));
+    // A signal on the first window bar trades, and no fill is dated before the window.
+    let first = bars(&e.cal, &rows)[3].close_time();
+    let out = approve(&e, &rows, &mut fake(3, None)).unwrap();
+    assert_eq!(out.trades.len(), 1);
+    assert!(out.trades[0].entry.bar_time > first);
+}
+
+#[test]
+fn a_warmup_longer_than_the_bars_is_refused() {
+    let mut e = env();
+    e.warmup = 9;
+    let r = approve(&e, &[FLAT, FLAT, FLAT], &mut fake(1, None));
+    assert!(matches!(r, Err(BacktestError::Invalid(_))));
+}
+
+fn trending(bars: &[Candle], trend: bazaar_regime::Trend) -> PerBar {
+    let mut r = regimes(bars);
+    for s in &mut r.0 {
+        s.trend = trend;
+    }
+    r
+}
+
+/// A trend read from the closes up to each bar (history included): up/down/range against the
+/// previous close, unknown on the first bar. A closure that reads the history reads this.
+fn close_trend(bars: &[Candle]) -> PerBar {
+    let mut r = regimes(bars);
+    for i in 1..bars.len() {
+        r.0[i].trend = match bars[i].close().cmp(&bars[i - 1].close()) {
+            std::cmp::Ordering::Greater => bazaar_regime::Trend::Up,
+            std::cmp::Ordering::Less => bazaar_regime::Trend::Down,
+            std::cmp::Ordering::Equal => bazaar_regime::Trend::Range,
+        };
+    }
+    r
+}
+
+fn tagged_run(e: &Env, trend: bazaar_regime::Trend) -> RunOutput {
+    let rows = [
+        FLAT,
+        FLAT,
+        ["100", "103", "99.5", "102"],
+        ["102", "106", "101", "105"],
+    ];
+    let bs = bars(&e.cal, &rows);
+    let spec = RunSpec {
+        bars: &bs,
+        instrument: &e.inst,
+        calendar: &e.cal,
+        config: &e.cfg,
+        cost: CostModel::new(&e.charges, HistoryPolicy::Strict, ChargeExchange::Nse),
+        limits: &e.limits,
+        product: Product::Delivery,
+        capital: e.capital,
+        slippage_multiplier: d("1"),
+        warmup: 0,
+    };
+    let reg = trending(&bs, trend);
+    run(
+        &spec,
+        &mut fake(1, None),
+        &reg,
+        &mut Fixed(EntryVerdict::Approve),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_trade_is_tagged_with_the_settled_market_trend_of_its_entry_decision() {
+    use bazaar_regime::Trend;
+    let e = env();
+    for (trend, tag) in [
+        (Trend::Up, "up"),
+        (Trend::Down, "down"),
+        (Trend::Range, "range"),
+    ] {
+        let out = tagged_run(&e, trend);
+        assert_eq!(out.trades.len(), 1);
+        assert_eq!(out.trades[0].regime.as_deref(), Some(tag));
+    }
+    // Mixed and Unknown are no regime: the trade is untagged and counts for nothing.
+    for trend in [Trend::Mixed, Trend::Unknown] {
+        let out = tagged_run(&e, trend);
+        assert_eq!(out.trades.len(), 1);
+        assert_eq!(out.trades[0].regime, None);
+    }
+}
+
+fn quiet_events(_: NaiveDate) -> bazaar_risk::rules::inputs::EventFlags {
+    use bazaar_risk::types::Tri;
+    bazaar_risk::rules::inputs::EventFlags {
+        results_window: Tri::Known(false),
+        policy_day: Tri::Known(false),
+        option_on_own_expiry: Tri::Known(false),
+    }
+}
+
+/// Everything a real-engine walk-forward closure saw, per window run.
+struct WfCapture {
+    result: crate::walkforward::WalkForwardResult,
+    charges: ChargesEvidence,
+    /// `(window, candidate, first window bar close, trades)` in call order.
+    runs: Vec<(Window, usize, chrono::DateTime<chrono_tz::Tz>, Vec<Trade>)>,
+    cost: CostModel<'static>,
+}
+
+/// The walk-forward closure caller as it must be written (QUAN-94-8): the engine is built from
+/// the runner's own `CostModel`, history goes in as `warmup`, the regimes are as of each bar.
+fn wf_with_engine(e: &'static Env, rows: &[[&'static str; 4]]) -> WfCapture {
+    let all = bars(&e.cal, rows);
+    let sets = vec![ParamSet {
+        id: "fake".into(),
+        params: "p=0".into(),
+    }];
+    let cost = CostModel::new(&e.charges, HistoryPolicy::Strict, ChargeExchange::Nse);
+    let p = WfParams {
+        capital: e.capital,
+        sets: &sets,
+        cost,
+    };
+    let runs = RefCell::new(Vec::new());
+    let mut closure = |w: Window, c: usize, b: &WindowBars<'_>, _env: GateEnv<'_>| {
+        let spec = RunSpec {
+            bars: b.with_history(),
+            instrument: &e.inst,
+            calendar: &e.cal,
+            config: &e.cfg,
+            cost: p.cost,
+            limits: &e.limits,
+            product: Product::Delivery,
+            capital: p.capital,
+            slippage_multiplier: Decimal::ONE,
+            warmup: b.warmup(),
+        };
+        let reg = close_trend(b.with_history());
+        let out = run(
+            &spec,
+            &mut fake(b.warmup(), None),
+            &reg,
+            &mut Fixed(EntryVerdict::Approve),
+        )?;
+        runs.borrow_mut()
+            .push((w, c, b[0].close_time(), out.trades.clone()));
+        Ok(out)
+    };
+    let (result, charges) =
+        walk_forward_gated(&e.cfg, &all, &p, "IT", &quiet_events, &mut closure).unwrap();
+    WfCapture {
+        result,
+        charges,
+        runs: runs.into_inner(),
+        cost,
+    }
+}
+
+fn wf_env() -> &'static Env {
+    let mut e = env();
+    e.cfg.walk_forward.in_sample_months = 2;
+    e.cfg.walk_forward.out_of_sample_months = 1;
+    e.cfg.walk_forward.step_months = 1;
+    e.cfg.walk_forward.warmup_bars = 20;
+    // Dated rate sets so the evidence range depends on WHICH legs were charged (QUAN-99-1):
+    // A (buy 01-01, sell 02-01) charges the first window's entry only, B (03-01, 04-01) the middle
+    // legs, C (05-01, 06-01) the last window's exit only; GST and DP are 02-01.
+    e.charges = charges_text(&[
+        ("buy", "2026-01-01", "2026-01-01"),
+        ("sell", "2026-01-01", "2026-02-01"),
+        ("buy", "2026-05-01", "2026-03-01"),
+        ("sell", "2026-05-01", "2026-04-01"),
+        ("buy", "2026-10-15", "2026-05-01"),
+        ("sell", "2026-10-15", "2026-06-01"),
+    ]);
+    Box::leak(Box::new(e))
+}
+
+#[test]
+fn the_walk_forward_caller_charges_every_leg_of_every_window_under_its_own_cost_model() {
+    let e = wf_env();
+    let rows = vec![FLAT; 190];
+    let cap = wf_with_engine(e, &rows);
+    assert_ne!(cap.runs.len(), 0);
+    let trades: Vec<&Trade> = cap.runs.iter().flat_map(|r| &r.3).collect();
+    assert_ne!(trades.len(), 0);
+    // QUAN-94-8: ALL legs (entry and exit) of ALL windows, under the same cost model.
+    let legs: Vec<&Leg> = trades
+        .iter()
+        .flat_map(|t| [&t.entry.leg, &t.exit.leg])
+        .collect();
+    assert_eq!(legs.len(), 2 * trades.len());
+    let expect = ChargesEvidence::from_legs(&cap.cost, legs).unwrap();
+    assert_eq!(cap.charges, expect);
+    // The range is not vacuous: dropping the exit legs, the entry legs, the first window or the
+    // last window changes it, so each of them is in the evidence.
+    let of = |runs: &[&(Window, usize, chrono::DateTime<chrono_tz::Tz>, Vec<Trade>)],
+              entries: bool,
+              exits: bool| {
+        let mut legs: Vec<&Leg> = Vec::new();
+        for t in runs.iter().flat_map(|r| &r.3) {
+            if entries {
+                legs.push(&t.entry.leg);
+            }
+            if exits {
+                legs.push(&t.exit.leg);
+            }
+        }
+        ChargesEvidence::from_legs(&cap.cost, legs).unwrap()
+    };
+    let all_runs: Vec<_> = cap.runs.iter().collect();
+    assert_eq!(of(&all_runs, true, true), expect);
+    assert_ne!(of(&all_runs, true, false), expect);
+    assert_ne!(of(&all_runs, false, true), expect);
+    assert_ne!(of(&all_runs[1..], true, true), expect);
+    assert_ne!(of(&all_runs[..all_runs.len() - 1], true, true), expect);
+    // Warm-up is history-only: every trade of a window is booked on or after its first bar.
+    for (_, _, first, ts) in &cap.runs {
+        assert!(ts.iter().all(|t| t.entry.bar_time >= *first));
+    }
+    // The tags come from the closure's regimes, read from the history: flat closes are "range".
+    assert!(trades.iter().all(|t| t.regime.as_deref() == Some("range")));
+}
+
+#[test]
+fn rewriting_the_oos_bars_leaves_the_real_engine_in_sample_result_identical() {
+    let e = wf_env();
+    let flat = vec![FLAT; 190];
+    let base = wf_with_engine(e, &flat);
+    let all = bars(&e.cal, &flat);
+    let folds = crate::walkforward::split(&all, &e.cfg).unwrap();
+    assert_ne!(folds.len(), 0);
+    // Rewrite every bar from fold 0's OOS start on (prices far from the entry zone).
+    let mut rewritten = flat.clone();
+    for r in rewritten.iter_mut().skip(folds[0].oos.start) {
+        *r = ["300", "320", "290", "310"];
+    }
+    let leak = wf_with_engine(e, &rewritten);
+    let (a, b) = (&base.runs[0], &leak.runs[0]);
+    assert_eq!((a.0, a.1), (Window::InSample, 0));
+    assert_eq!(a.3, b.3);
+    assert_eq!(base.result.folds[0].is, leak.result.folds[0].is);
+    // Every in-sample run before the first out-of-sample bar is identical, tags included.
+    for (x, y) in base
+        .runs
+        .iter()
+        .zip(&leak.runs)
+        .take_while(|(x, _)| x.0 == Window::InSample)
+    {
+        let first_oos = all[folds[0].oos.start].close_time();
+        if x.3.iter().all(|t| t.exit.bar_time < first_oos) {
+            assert_eq!(x.3, y.3);
+        }
+    }
+    // The check is not vacuous: later windows do see the rewritten bars.
+    assert!(base.runs.iter().zip(&leak.runs).any(|(x, y)| x.3 != y.3));
 }

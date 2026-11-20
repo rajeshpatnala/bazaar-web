@@ -76,6 +76,10 @@ pub struct RunSpec<'a> {
     pub capital: Decimal,
     /// `>= 1`: 1 normally, `fills.stress_slippage_multiplier` for the stress run (QUAN-84-8).
     pub slippage_multiplier: Decimal,
+    /// The first `warmup` bars are history only: strategies and indicators see them, but nothing
+    /// is decided, traded or marked on them (walk-forward gives each window its past bars).
+    /// At most `bars.len()`; 0 for a plain run.
+    pub warmup: usize,
 }
 
 /// What a run produced.
@@ -90,6 +94,9 @@ pub struct RunOutput {
 fn validate(spec: &RunSpec<'_>) -> Result<(), BacktestError> {
     if spec.slippage_multiplier < Decimal::ONE {
         return Err(invalid("slippage multiplier must be at least 1"));
+    }
+    if spec.warmup > spec.bars.len() {
+        return Err(invalid("warm-up is longer than the bars"));
     }
     let inst = spec.instrument;
     let cash_equity = inst.instrument_type == InstrumentType::Equity
@@ -151,7 +158,7 @@ pub fn run(
         exit_next: false,
         skipped: 0,
     };
-    for (i, bar) in spec.bars.iter().enumerate() {
+    for (i, bar) in spec.bars.iter().enumerate().skip(spec.warmup) {
         if e.pending.is_some() {
             e.enter(bar)?;
         } else {

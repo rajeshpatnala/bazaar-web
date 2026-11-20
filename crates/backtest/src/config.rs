@@ -134,6 +134,8 @@ pub struct Evidence {
     pub provisional_min_trades: u32,
     pub trusted_min_trades: u32,
     pub trusted_min_regimes: u32,
+    /// A regime counts toward `trusted_min_regimes` only with this many pooled OOS trades in it.
+    pub min_trades_per_regime: u32,
     #[serde(with = "dec")]
     pub max_drawdown_pct: Decimal,
 }
@@ -222,6 +224,7 @@ mod floor {
     pub(super) const THIN_FOLD_TRADES: u32 = 5;
     pub(super) const TRUSTED_TRADES: u32 = 100;
     pub(super) const TRUSTED_REGIMES: u32 = 2;
+    pub(super) const MIN_TRADES_PER_REGIME: u32 = 10;
     pub(super) const TIER1_MAX: u32 = 10;
     pub(super) const TIER2_MAX: u32 = 50;
     pub(super) const TIER1_ADD: Decimal = Decimal::from_parts(1, 0, 0, false, 1);
@@ -421,6 +424,11 @@ impl BacktestConfig {
             "evidence.trusted_min_regimes",
             e.trusted_min_regimes,
             floor::TRUSTED_REGIMES,
+        )?;
+        at_least(
+            "evidence.min_trades_per_regime",
+            e.min_trades_per_regime,
+            floor::MIN_TRADES_PER_REGIME,
         )
     }
 
@@ -718,6 +726,7 @@ mod tests {
             ("min_profitable_fold_pct", s("1")),
             ("trusted_min_trades", i(31)),
             ("trusted_min_regimes", i(1)),
+            ("min_trades_per_regime", i(9)),
             ("max_drawdown_pct", s("11")),
             ("provisional_min_trades", i(10)),
         ];
