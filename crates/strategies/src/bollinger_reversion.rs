@@ -10,7 +10,8 @@
 //! * **Stop:** `min(low[t], low[t-1]) - stop_buffer_atr x ATR`; dropped when `entry_high - stop`
 //!   exceeds `max_stop_atr` x ATR.
 //! * **Exit:** reference target is the average `SMA(bb_n)` at t; `reference_rr` must be at least
-//!   `min_rr` (many setups are dropped here, by design). `manage` leaves at the next open when the
+//!   `min_rr` (many setups are dropped here, by design); it is measured from the bottom of the entry
+//!   zone, so it is optimistic (fact `rr_basis`). `manage` leaves at the next open when the
 //!   stock's trend is confirmed Down, or after `max_hold_bars`. The stop is fixed at entry.
 //! * **Best regime:** stock Range with Low or Normal volatility, market Up or Range (declared in
 //!   `config/strategies.toml`, never in code). Suppressed in Range x High, Up, Down, Mixed, Unknown
@@ -22,7 +23,8 @@
 //! **Low evidence:** Range x Normal is rare, so signals are few and nothing here is backtested; the
 //! signal carries a fact saying so. Every default is UNVERIFIED and never tuned on strategy P&L.
 //! A signal is not advice. Only closed bars are used. The ATR is Wilder-recursive over the whole
-//! view, so callers (scanner, backtest) must pass views of one fixed lookback.
+//! view, so callers (scanner, backtest) must pass views of one fixed lookback (the same in both, at
+//! least 100 bars) or the stop-cap decision can differ between them.
 //!
 //! `manage` needs the stock regime (the Down exit), so a regime dated for another bar is an
 //! `ExitError::Context`, never a silent hold; unadjusted candles are refused the same way.
@@ -93,9 +95,9 @@ fn bad(id: &str, key: &'static str, reason: &'static str) -> ParamError {
 }
 
 impl ParamSet for BollingerParams {
-    /// Ranges are the spec's. They also guarantee the strategy can fire: the smallest possible
-    /// stop distance is `(entry_zone_atr_frac + stop_buffer_atr)` ATR, at most 1.0, below the
-    /// smallest `max_stop_atr` (1.5); a test pins that arithmetic.
+    /// Ranges are the spec's. No accepted combination is provably empty (the zone and buffer
+    /// together use at most 1.0 ATR of the smallest cap, 1.5), but narrow combinations fire rarely:
+    /// the candle's own range must fit in what is left of the cap. A test probes the range ends.
     fn validate(&self, id: &str) -> Result<(), ParamError> {
         let f = |v: f64, lo: f64, hi: f64| v.is_finite() && (lo..=hi).contains(&v);
         if !f(self.entry_zone_atr_frac, 0.1, 0.5) {
@@ -295,7 +297,7 @@ impl BollingerReversion {
             closing: "Watch out: if the stock starts a real downtrend this idea loses; we leave if it does.",
         })?;
         let rule_text = format!(
-            "Leave at the next open if the stock's trend is confirmed down, or after {} bars.",
+            "Leave at the next open if the stock's trend is confirmed down, or after {} bars. Reward:risk is measured from the bottom of the entry zone, so it is optimistic.",
             p.max_hold_bars
         );
         let mut facts = band_facts(s, atr, p, &rule_text);
@@ -368,6 +370,11 @@ fn band_facts(s: &Setup, atr: f64, p: &BollingerParams, rule_text: &str) -> Vec<
         ),
         fact("exit_rule", rule_text, "How the idea ends."),
         fact(
+            "rr_basis",
+            "from the bottom of the entry zone (optimistic)",
+            "A fill higher in the zone has a lower reward:risk.",
+        ),
+        fact(
             "time_stop_bars",
             p.max_hold_bars.to_string(),
             "Longest hold in bars.",
@@ -407,15 +414,16 @@ impl Strategy for BollingerReversion {
         if view.is_empty() {
             return Err(context_fault(Reject::Indicator("bars")));
         }
-        if !view.bars().iter().all(Candle::adjusted) {
-            return Err(context_fault(Reject::Unadjusted));
-        }
         let p = &self.params;
+        // The time stop needs only `bars_held`, so it comes before any data-quality check.
         if position.bars_held >= p.max_hold_bars {
             return Ok(ExitAction::Exit(format!(
                 "time stop: held {} days",
                 position.bars_held
             )));
+        }
+        if !view.bars().iter().all(Candle::adjusted) {
+            return Err(context_fault(Reject::Unadjusted));
         }
         ctx.check_closed_bar(view).map_err(context_fault)?;
         if ctx.stock_regime.trend == Trend::Down {
@@ -533,9 +541,12 @@ mod tests {
         assert_eq!(fact("atr"), "1.58");
         assert!(fact("evidence").starts_with("low evidence"));
         let why = fact(WHY_TEXT_LABEL);
-        assert!(why.starts_with("Risk first: you could lose about Rs 2.80 per share."));
-        assert!(why.contains("drift back to the average (102.00)"));
-        assert!(why.contains("Proven wrong if: price falls to or below 94.40."));
+        assert_eq!(
+            why,
+            "Risk first: you could lose about Rs 2.80 per share. Setup: ABC has been moving sideways, fell below its usual range yesterday and closed back inside today. Why now: prices like this have tended to drift back to the average (102.00). Market today: Uptrend, normal swings. Proven wrong if: price falls to or below 94.40. Watch out: if the stock starts a real downtrend this idea loses; we leave if it does."
+        );
+        assert!(fact("rr_basis").contains("bottom of the entry zone"));
+        assert!(s.exit_plan.rule_text.contains("bottom of the entry zone"));
         let lower = why.to_lowercase();
         assert!(
             ["sure", "safe", "guarantee"]
@@ -586,9 +597,12 @@ mod tests {
                 "{mt:?} {st:?} {sv:?}"
             );
         }
-        let mut stress = mk(T::Up, T::Range, V::Normal);
-        stress.market.breakdown = bazaar_regime::Tri::True;
-        assert!(fire(&stress, &b, K).is_none());
+        for tri in [bazaar_regime::Tri::True, bazaar_regime::Tri::Unknown] {
+            let mut stress = mk(T::Up, T::Range, V::Normal);
+            stress.market.breakdown = tri;
+            assert!(fire(&stress, &b, K).is_none(), "breakdown {tri:?}");
+        }
+        assert!(fire(&mk(T::Unknown, T::Range, V::Normal), &b, K).is_none());
     }
 
     #[test]
@@ -645,12 +659,24 @@ mod tests {
         for k in 0..b.len() {
             let w = world(k);
             let prefix = &b[..=k];
+            // Same bars up to k, wild values after k: the output must not change.
+            let mut r = rows();
+            for row in r.iter_mut().skip(k + 1) {
+                *row = ([d("500"), d("900"), d("1"), d("700")], 9);
+            }
+            let mutated = bars_dec(&r, true);
             assert_eq!(fire(&w, &b, k), fire(&w, prefix, k), "on_bar {k}");
+            assert_eq!(fire(&w, &b, k), fire(&w, &mutated, k), "on_bar mutated {k}");
             for held in [1, 8] {
                 assert_eq!(
                     manage(&b, k, &w, held),
                     manage(prefix, k, &w, held),
                     "manage {k}"
+                );
+                assert_eq!(
+                    manage(&b, k, &w, held),
+                    manage(&mutated, k, &w, held),
+                    "manage mutated {k}"
                 );
             }
         }
@@ -699,6 +725,11 @@ mod tests {
             manage(&raw, K, &world(K), 1),
             Err(ExitError::Context(_))
         ));
+        // A due time stop needs no data-quality check: it fires on unadjusted bars too.
+        assert!(matches!(
+            manage(&raw, K, &world(K), 8),
+            Ok(ExitAction::Exit(_))
+        ));
     }
 
     #[test]
@@ -726,14 +757,49 @@ mod tests {
     }
 
     #[test]
-    fn the_ranges_always_leave_room_for_a_stop_so_the_strategy_can_fire() {
-        // Smallest stop distance is (zone frac + buffer) ATR; at the top of both ranges that is
-        // 1.0, below the cap's lowest allowed value (1.5): no valid params make every signal too
-        // wide.
-        let mut p = BollingerParams::default();
-        (p.entry_zone_atr_frac, p.stop_buffer_atr, p.max_stop_atr) = (0.5, 0.5, 1.5);
-        assert_eq!(p.validate(ID), Ok(()));
-        assert!(p.entry_zone_atr_frac + p.stop_buffer_atr < p.max_stop_atr);
+    fn validate_accepts_the_range_ends_and_rejects_just_outside() {
+        let ok = |edit: &dyn Fn(&mut BollingerParams)| {
+            let mut p = BollingerParams::default();
+            edit(&mut p);
+            p.validate(ID).is_ok()
+        };
+        assert!(ok(&|p| p.entry_zone_atr_frac = 0.1));
+        assert!(ok(&|p| p.entry_zone_atr_frac = 0.5));
+        assert!(!ok(&|p| p.entry_zone_atr_frac = 0.51));
+        assert!(!ok(&|p| p.entry_zone_atr_frac = 0.09));
+        assert!(ok(&|p| p.stop_buffer_atr = 0.5));
+        assert!(!ok(&|p| p.stop_buffer_atr = 0.51));
+        assert!(ok(&|p| p.max_stop_atr = 1.5));
+        assert!(!ok(&|p| p.max_stop_atr = 1.49));
+        assert!(ok(&|p| p.max_stop_atr = 2.5));
+        assert!(!ok(&|p| p.max_stop_atr = 2.51));
+        assert!(ok(&|p| p.min_rr = 1.2));
+        assert!(!ok(&|p| p.min_rr = 1.19));
+        // The widest zone + buffer at the narrowest cap is accepted (it just fires rarely).
+        assert!(ok(&|p| (
+            p.entry_zone_atr_frac,
+            p.stop_buffer_atr,
+            p.max_stop_atr
+        ) = (0.5, 0.5, 1.5)));
+        assert!(!ok(&|p| p.bb_k = f64::NAN));
+    }
+
+    #[test]
+    fn a_target_below_the_entry_or_missing_bands_give_a_reject_not_a_signal() {
+        // Today's close (103.0) is above the middle band (about 102): the target is on the wrong
+        // side of the entry, so reward:risk fails.
+        let mut r = rows();
+        r[K] = ([d("95.3"), d("103.5"), d("95"), d("103")], 1000);
+        assert!(fire(&world(K), &bars_dec(&r, true), K).is_none());
+        // Fewer than bb_n + 1 closes: no band at t-1, so `detect` reports the indicator.
+        let s = BollingerReversion {
+            meta: strat().meta().clone(),
+            params: BollingerParams::default(),
+            params_hash: String::new(),
+        };
+        let b = bars_dec(&rows()[2..], true);
+        let view = DataView::ending_at(&b, b.len() - 1).unwrap();
+        assert!(matches!(s.detect(&view), Err(Reject::Indicator("bands"))));
     }
 
     #[test]
