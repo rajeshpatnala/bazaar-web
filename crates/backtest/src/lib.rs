@@ -7,6 +7,7 @@
 
 pub mod config;
 pub mod cost;
+pub mod engine;
 pub mod fill;
 pub mod ledger;
 pub mod metrics;

@@ -53,6 +53,7 @@ fn allowed(name: &str) -> Option<&'static [&'static str]> {
             "bazaar-core",
             "bazaar-strategies",
             "bazaar-risk",
+            "bazaar-regime",
             "bazaar-indicators",
         ],
         "bazaar-scanner" => &[
