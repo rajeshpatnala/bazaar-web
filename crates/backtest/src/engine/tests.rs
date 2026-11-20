@@ -758,7 +758,7 @@ fn the_stress_run_costs_more_and_the_evidence_covers_every_leg_of_both_runs() {
     ];
     let r = stressed(&e, &rows, 1, Decimal::ONE).unwrap();
     assert_eq!((r.base.trades.len(), r.stress.trades.len()), (1, 1));
-    // Adverse slippage at 2x entry price is higher than at 1x .
+    // Adverse slippage at 2x entry price is higher than at 1x.
     assert!(r.stress.trades[0].entry.leg.price.value() > r.base.trades[0].entry.leg.price.value());
     assert!(r.stress_pnl_change().unwrap() < Decimal::ZERO);
     // Pin the exact multipliers: each run equals a direct engine run at that multiplier (QUAN-95-1).
@@ -845,7 +845,34 @@ fn stress_pnl_change_reports_overflow() {
         .unwrap(),
     };
     assert_eq!(s(d("-5"), d("-7")).stress_pnl_change().unwrap(), d("-2"));
-    // Stress minus base overflows at the difference ...
+    // Stress minus base overflows at the difference.
     let diff = s(Decimal::MIN, Decimal::MAX).stress_pnl_change();
     assert!(matches!(diff, Err(BacktestError::Overflow(_))));
+}
+
+#[test]
+fn stress_pnl_change_reports_a_sum_overflow() {
+    let e = env();
+    let rows = [
+        FLAT,
+        FLAT,
+        ["100", "103", "99.5", "102"],
+        ["102", "106", "101", "105"],
+    ];
+    let base = stressed(&e, &rows, 1, Decimal::ONE).unwrap();
+    let mut t = base.base.trades[0].clone();
+    t.net_pnl = Decimal::MAX;
+    let two = RunOutput {
+        trades: vec![t.clone(), t],
+        equity: vec![],
+        skipped: 0,
+    };
+    let r = StressedRun {
+        stress: two,
+        ..base
+    };
+    assert!(matches!(
+        r.stress_pnl_change(),
+        Err(BacktestError::Overflow("net pnl sum"))
+    ));
 }

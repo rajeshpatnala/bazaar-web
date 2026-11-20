@@ -29,8 +29,8 @@ pub struct StressedRun {
 }
 
 impl StressedRun {
-    /// Net P&L of the stress run minus the base run (not above zero: stress only costs more, because config validation requires
-    /// `fills.stress_slippage_multiplier` above 1).
+    /// Net P&L of the stress run minus the base run. Normally negative, not guaranteed: higher
+    /// slippage also changes sizing, stop fills and policy verdicts, so the trades can differ.
     ///
     /// # Errors
     /// `Overflow` on the sums or the difference.
