@@ -253,6 +253,11 @@ pub struct LedgerEntry {
 pub trait PaperLedgerRepo: Send + Sync {
     /// Append one entry.
     fn append(&self, entry: LedgerEntry) -> impl Future<Output = Result<(), RepoError>> + Send;
+    /// Append all `entries` in order, all-or-nothing: on error none of them is stored.
+    fn append_many(
+        &self,
+        entries: Vec<LedgerEntry>,
+    ) -> impl Future<Output = Result<(), RepoError>> + Send;
     /// Entries of the current epoch in order.
     fn current_epoch(&self) -> impl Future<Output = Result<Vec<LedgerEntry>, RepoError>> + Send;
     /// Start a new epoch with `opening`; returns its number.
