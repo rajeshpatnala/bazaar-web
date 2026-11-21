@@ -57,7 +57,7 @@ async fn check_fresh_after_import_then_stale_a_week_later() {
     let c = clock(2026, 1, 6);
     import(tmp.path(), &good(), &c).await.unwrap();
     let r = check_connections(&config_dir(), tmp.path(), &c).await;
-    assert_eq!(r.lines, ["OK sqlite", "OK instruments"]);
+    assert_eq!(r.lines, ["OK sqlite", "OK duckdb", "OK instruments"]);
     assert!(r.ok);
     let later = check_connections(&config_dir(), tmp.path(), &clock(2026, 1, 20)).await;
     assert_eq!(later.lines, ["OK sqlite", "FAILED instruments stale"]);
@@ -85,7 +85,11 @@ async fn placeholder_calendar_is_never_fresh() {
     let r = check_connections(cfg.path(), tmp.path(), &c).await;
     assert_eq!(
         r.lines,
-        ["OK sqlite", "FAILED instruments calendar_placeholder"]
+        [
+            "OK sqlite",
+            "OK duckdb",
+            "FAILED instruments calendar_placeholder"
+        ]
     );
 }
 
@@ -96,9 +100,9 @@ async fn missing_calendar_and_uncovered_year_fail_with_categories() {
     let c = clock(2026, 1, 6);
     import(tmp.path(), &good(), &c).await.unwrap();
     let r = check_connections(empty_cfg.path(), tmp.path(), &c).await;
-    assert_eq!(r.lines[1], "FAILED instruments calendar_unreadable");
+    assert_eq!(r.lines[2], "FAILED instruments calendar_unreadable");
     let r = check_connections(&config_dir(), tmp.path(), &clock(2031, 6, 2)).await;
-    assert_eq!(r.lines[1], "FAILED instruments calendar_out_of_range");
+    assert_eq!(r.lines[2], "FAILED instruments calendar_out_of_range");
 }
 
 #[tokio::test]
