@@ -31,6 +31,7 @@ TTL check, fresh-quote re-gate and drift check happen while the order is still `
 `approval_ttl_secs`, `max_quote_drift_bps`, `max_orders_per_second`, `kill_switch_release_phrase`, `kill_allow_reduce_only`, `breaker_engages_kill_switch`, `paper_slippage_bps.*`, `paper_max_participation`, `paper_stale_after_secs`, `paper_mis_square_off_ist`, and the ceilings `hard_limits.max_approval_ttl_secs`, `hard_limits.max_quote_drift_bps` (SEC-96-4).
 
 ## Deferred
+- Slice 3 pipeline gate is a local `GatePort` (Pass / Block / Drifted). Slice 8 (AC8) owns the real-`Gate` adapter: building `PortfolioSnapshot` and `GateInputs`, mapping `execution::OrderIntent` to `risk::OrderIntent`, and the drift check. `expire_stale` covers the in-memory queue only; reloading pending intents after a restart needs an `OrderRepo` list method (slice 6/8). The guard `peek` and `GuardedExecutor::place` both read the kill switch, breaker and limiter, so a guard flip between them is refused by the second layer (outcome `ExecFailed`).
 - RISK-100-10 fixed in slice 2. SEC-100-4: cap `actor`/`reason` at 500 chars at the `PipelineHandle` SetKillSwitch edge (slice 3). SEC-100-5, CR-100-2: gate called via `spawn_blocking` (slice 3). TS-100-3 fixed in slice 2.
 - Breaker uses `Segment::Equity` for the trading-day calendar (limit, RISK-105-7). The latch restart-loss is closed (RISK-105-1).
 - TS-105-6 deferred to slice 3: AC1 property test and the pipeline-layer guard tests (both-layers rule), including pipeline `peek` then guarded place counting one slot at pipeline level.

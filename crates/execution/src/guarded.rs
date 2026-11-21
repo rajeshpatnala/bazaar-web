@@ -47,6 +47,11 @@ impl<R: KillSwitchRepo, P: PnlSource, A: AuditRepo> SafetyGuard<R, P, A> {
         }
     }
 
+    /// The kill switch the guard checks (the pipeline engages and releases it here).
+    pub const fn kill(&self) -> &KillSwitch<R> {
+        &self.kill
+    }
+
     /// Pipeline pre-check: the same refusals as `place` but no rate slot is consumed.
     ///
     /// # Errors
@@ -114,6 +119,11 @@ impl<E: Executor, R: KillSwitchRepo, P: PnlSource, A: AuditRepo> GuardedExecutor
             guard,
             clock,
         }
+    }
+
+    /// The guard, for the pipeline's non-consuming pre-check and kill-switch commands.
+    pub const fn guard(&self) -> &SafetyGuard<R, P, A> {
+        &self.guard
     }
 }
 
@@ -325,6 +335,17 @@ mod tests {
             .filter(|x| x.draft.kind == "kill_switch_engaged")
             .count();
         assert_eq!(n, 2);
+        assert_eq!(r.calls.load(SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn accessors_expose_the_same_guard_and_kill_switch() {
+        let r = rig(100, 1, false, true).await;
+        r.ex.guard().kill().engage("t", "x").await.unwrap();
+        assert_eq!(
+            r.ex.guard().peek(&intent(false), At.now_ist()).await,
+            Err(ExecError::KillSwitch)
+        );
         assert_eq!(r.calls.load(SeqCst), 0);
     }
 }
