@@ -293,7 +293,7 @@ impl FillSimulator {
                 o.stale_flagged = true;
                 continue;
             }
-            if !tick.session_open || self.at_circuit(o.side, tick) {
+            if !tick.session_open || Self::at_circuit(o.side, tick) {
                 continue;
             }
             let (price, reason) = match o.kind {
@@ -330,7 +330,7 @@ impl FillSimulator {
         out
     }
 
-    fn at_circuit(&self, side: Side, t: &Tick) -> bool {
+    fn at_circuit(side: Side, t: &Tick) -> bool {
         match side {
             Side::Buy => t.upper_circuit.is_some_and(|u| t.price >= u),
             Side::Sell => t.lower_circuit.is_some_and(|l| t.price <= l),
@@ -357,15 +357,15 @@ pub(crate) mod tests {
     use chrono::TimeZone;
     use chrono_tz::Asia::Kolkata;
 
-    pub fn d(s: &str) -> Decimal {
+    pub(crate) fn d(s: &str) -> Decimal {
         s.parse().unwrap()
     }
 
-    pub fn at(h: u32, m: u32, s: u32) -> DateTime<Tz> {
+    pub(crate) fn at(h: u32, m: u32, s: u32) -> DateTime<Tz> {
         Kolkata.with_ymd_and_hms(2026, 1, 5, h, m, s).unwrap()
     }
 
-    pub fn cfg() -> SimConfig {
+    pub(crate) fn cfg() -> SimConfig {
         SimConfig {
             slippage_equity_bps: 10,
             slippage_equity_derivatives_bps: 20,
@@ -377,7 +377,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub fn spec() -> InstrumentSpec {
+    pub(crate) fn spec() -> InstrumentSpec {
         InstrumentSpec {
             segment: Segment::Equity,
             kind: InstrumentKind::CashNonFno,
@@ -387,7 +387,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub fn order(id: u128, side: Side, qty: u32, kind: OrderKind) -> WorkingOrder {
+    pub(crate) fn order(id: u128, side: Side, qty: u32, kind: OrderKind) -> WorkingOrder {
         WorkingOrder {
             id: IntentId(id),
             symbol: "ABC".into(),
@@ -403,7 +403,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub fn tick(price: &str, volume: u64, s: u32) -> Tick {
+    pub(crate) fn tick(price: &str, volume: u64, s: u32) -> Tick {
         Tick {
             symbol: "ABC".into(),
             price: d(price),
@@ -429,7 +429,7 @@ pub(crate) mod tests {
     #[test]
     fn market_fills_on_next_tick_not_the_acceptance_instant() {
         let mut b = book_with(order(1, Side::Buy, 5, OrderKind::Market));
-        assert!(run(&mut b, &tick("100", 1000, 0)).is_empty());
+        assert_eq!(run(&mut b, &tick("100", 1000, 0)).len(), 0);
         let f = run(&mut b, &tick("100", 1000, 1));
         assert_eq!((f.len(), f[0].qty), (1, 5));
     }
@@ -453,17 +453,17 @@ pub(crate) mod tests {
         let f = run(&mut b, &tick("99.95", 1000, 2));
         assert_eq!(f[0].price, d("100"));
         let mut b = book_with(order(2, Side::Sell, 5, OrderKind::Limit(d("100"))));
-        assert!(run(&mut b, &tick("100", 1000, 1)).is_empty());
+        assert_eq!(run(&mut b, &tick("100", 1000, 1)).len(), 0);
         assert_eq!(run(&mut b, &tick("100.05", 1000, 2))[0].price, d("100"));
     }
 
     #[test]
     fn no_fill_at_circuit_for_the_blocked_side_only() {
         let mut b = book_with(order(1, Side::Buy, 5, OrderKind::Market));
-        assert!(run(&mut b, &tick("110", 1000, 1)).is_empty());
+        assert_eq!(run(&mut b, &tick("110", 1000, 1)).len(), 0);
         assert_eq!(b.orders.len(), 1, "stays working");
         let mut b = book_with(order(2, Side::Sell, 5, OrderKind::Market));
-        assert!(run(&mut b, &tick("90", 1000, 1)).is_empty());
+        assert_eq!(run(&mut b, &tick("90", 1000, 1)).len(), 0);
         let mut b = book_with(order(3, Side::Sell, 5, OrderKind::Market));
         assert_eq!(run(&mut b, &tick("110", 1000, 1)).len(), 1);
     }
@@ -480,17 +480,12 @@ pub(crate) mod tests {
         let mut b = book_with(order(1, Side::Buy, 5, OrderKind::Market));
         let t = tick("100", 1000, 1);
         let late = t.at + chrono::Duration::seconds(6);
-        assert!(
-            FillSimulator::new(cfg())
-                .on_tick(&t, late, &mut b)
-                .is_empty()
-        );
+        assert_eq!(FillSimulator::new(cfg()).on_tick(&t, late, &mut b).len(), 0);
         assert!(b.orders[0].stale_flagged);
         let early = t.at - chrono::Duration::seconds(1);
-        assert!(
-            FillSimulator::new(cfg())
-                .on_tick(&t, early, &mut b)
-                .is_empty()
+        assert_eq!(
+            FillSimulator::new(cfg()).on_tick(&t, early, &mut b).len(),
+            0
         );
         // exactly at the bound still fills
         let edge = t.at + chrono::Duration::seconds(5);
@@ -502,7 +497,7 @@ pub(crate) mod tests {
         let mut b = book_with(order(1, Side::Buy, 5, OrderKind::Market));
         let mut t = tick("100", 1000, 1);
         t.session_open = false;
-        assert!(run(&mut b, &t).is_empty());
+        assert_eq!(run(&mut b, &t).len(), 0);
     }
 
     #[test]
@@ -522,13 +517,13 @@ pub(crate) mod tests {
         }
         assert_eq!(total, 10);
         assert!(parts >= 3);
-        assert!(b.orders.is_empty());
+        assert_eq!(b.orders.len(), 0);
     }
 
     #[test]
     fn zero_volume_never_fills() {
         let mut b = book_with(order(1, Side::Buy, 5, OrderKind::Market));
-        assert!(run(&mut b, &tick("100", 0, 1)).is_empty());
+        assert_eq!(run(&mut b, &tick("100", 0, 1)).len(), 0);
         assert!(
             run(&mut b, &tick("100", 9, 2)).is_empty(),
             "cap floors to 0"
@@ -558,10 +553,10 @@ pub(crate) mod tests {
     fn day_orders_expire_on_a_later_date() {
         let mut b = book_with(order(1, Side::Buy, 5, OrderKind::Market));
         let mut sim = FillSimulator::new(cfg());
-        assert!(sim.on_clock(at(15, 0, 0), &mut b).is_empty());
+        assert_eq!(sim.on_clock(at(15, 0, 0), &mut b).len(), 0);
         let next = Kolkata.with_ymd_and_hms(2026, 1, 6, 9, 0, 0).unwrap();
         assert_eq!(sim.on_clock(next, &mut b), vec![IntentId(1)]);
-        assert!(b.orders.is_empty());
+        assert_eq!(b.orders.len(), 0);
     }
 
     #[test]

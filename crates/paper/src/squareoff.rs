@@ -78,15 +78,18 @@ impl SquareOff {
             return SquareOffRun::default();
         }
         self.done_on = Some(today);
-        let mut run = SquareOffRun::default();
-        run.cancelled = book
-            .orders
-            .iter()
-            .filter(|o| o.product == Product::Mis && !o.square_off)
-            .map(|o| o.id)
-            .collect();
-        book.orders
-            .retain(|o| !(o.product == Product::Mis && !o.square_off));
+        let is_working_mis =
+            |o: &crate::fill::WorkingOrder| o.product == Product::Mis && !o.square_off;
+        let mut run = SquareOffRun {
+            cancelled: book
+                .orders
+                .iter()
+                .filter(|o| is_working_mis(o))
+                .map(|o| o.id)
+                .collect(),
+            ..SquareOffRun::default()
+        };
+        book.orders.retain(|o| !is_working_mis(o));
         for (symbol, net) in book.open_positions(Product::Mis) {
             let Some(spec) = book.specs.get(&symbol).cloned() else {
                 continue;

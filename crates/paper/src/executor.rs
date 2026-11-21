@@ -160,7 +160,7 @@ impl<R: PaperLedgerRepo, C: ChargeSource, A: AuditRepo, S: SpecSource> PaperExec
 
     /// Broker-style rejects; returns the reference price for the funds estimate.
     fn validate(&self, i: &OrderIntent, spec: &InstrumentSpec) -> Result<Decimal, ExecError> {
-        if i.qty == 0 || spec.lot_size == 0 || i.qty % spec.lot_size != 0 {
+        if i.qty == 0 || spec.lot_size == 0 || !i.qty.is_multiple_of(spec.lot_size) {
             return Err(ExecError::InvalidInput("lot size"));
         }
         if spec.freeze_qty.is_some_and(|f| i.qty > f) {
@@ -625,7 +625,7 @@ mod tests {
             .unwrap();
         let t = tick("100", 1000, 1);
         r.clock.set(t.at + chrono::Duration::seconds(10));
-        assert!(r.ex.on_tick(&t).await.fills.is_empty());
+        assert_eq!(r.ex.on_tick(&t).await.fills.len(), 0);
         assert_eq!(r.ex.working_count(), 1);
     }
 
