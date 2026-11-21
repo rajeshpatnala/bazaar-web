@@ -15,7 +15,7 @@ for f in libduckdb.dylib libduckdb.so duckdb.dll; do
   if [ -f "$lib_dir/$f" ]; then lib="$lib_dir/$f"; break; fi
 done
 if [ -z "$lib" ]; then
-  echo "FAIL: no DuckDB library in $lib_dir. macOS: brew install duckdb. Linux/Windows: unzip the libduckdb release v$want and set DUCKDB_LIB_DIR (docs/duckdb-setup.md)."
+  echo "FAIL: no DuckDB library in $lib_dir. macOS: brew install duckdb. Linux/Windows: extract the duckdb-shared-libs release v$want and set DUCKDB_LIB_DIR (docs/duckdb-setup.md)."
   exit 1
 fi
 if [ ! -f "$inc_dir/duckdb.h" ]; then
