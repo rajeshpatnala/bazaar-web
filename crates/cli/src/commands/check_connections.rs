@@ -4,7 +4,7 @@ use std::path::Path;
 
 use bazaar_core::calendar::MarketCalendar;
 use bazaar_core::clock::Clock;
-use bazaar_core::config::{self, CalendarConfig};
+use bazaar_core::config::{self, CalendarConfig, DataConfig};
 use bazaar_core::ports::InstrumentRepo;
 use bazaar_core::segment::Segment;
 use bazaar_store::{DuckStore, SqliteStore};
@@ -63,8 +63,24 @@ pub async fn check_connections(
         Ok(()) => "OK instruments".to_owned(),
         Err(cat) => format!("FAILED instruments {cat}"),
     });
+    if let Some(line) = unverified_line(config_dir) {
+        lines.push(line);
+    }
     let ok = lines.iter().all(|l| l.starts_with("OK"));
     CheckReport { lines, ok }
+}
+
+/// `data.toml: UNVERIFIED keys: ...` while the file lists keys not yet checked against the
+/// provider docs (key names only). Not an `OK` line, so the run is not reported as all OK.
+fn unverified_line(config_dir: &Path) -> Option<String> {
+    let cfg: DataConfig = config::load(config_dir).ok()?;
+    if cfg.unverified.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "data.toml: UNVERIFIED keys: {}",
+        cfg.unverified.join(", ")
+    ))
 }
 
 fn error_label(e: CommandError) -> &'static str {
@@ -97,5 +113,32 @@ async fn instruments_state(
         None => Err("empty"),
         Some(fetched) if fetched >= last_trading => Ok(()),
         Some(_) => Err("stale"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dir_with(data: &str) -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("data.toml"), data).unwrap();
+        d
+    }
+
+    #[test]
+    fn unverified_keys_are_listed_by_name() {
+        let d = dir_with(
+            "schema_version = 1\nplaceholder = true\nsource = \"x\"\nunverified = [\"kite.api_base\", \"nse\"]\n",
+        );
+        let line = unverified_line(d.path()).unwrap();
+        assert!(line.starts_with("data.toml: UNVERIFIED keys: "), "{line}");
+        assert_eq!(line, "data.toml: UNVERIFIED keys: kite.api_base, nse");
+    }
+
+    #[test]
+    fn no_line_when_nothing_is_unverified() {
+        let d = dir_with("schema_version = 1\nplaceholder = true\nsource = \"x\"\n");
+        assert!(unverified_line(d.path()).is_none());
     }
 }
