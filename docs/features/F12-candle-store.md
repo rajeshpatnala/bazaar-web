@@ -17,6 +17,13 @@ Plan: `.agents/plans/F12-candle-store.md`. Status: in progress.
 
 - Review fixes: symbol (1..=64 bytes), batch (<= 100000) and read (<= 1000000 rows) are capped with new `RepoError::TooLarge`; write count is rows upserted.
 
+## Slice 2 (Parquet writer)
+- `store/src/parquet.rs`: `ParquetStore` implements `CandleSink` (write only; reader and `last_candle_ts` are slice 3). Layout `<root>/<symbol>/<interval>_<raw|adj>.parquet`, one file per `(symbol, interval, adjusted)`; prices as decimal text.
+- Write merges into the existing file (new row wins), writes `*.parquet.tmp`, fsyncs, renames, fsyncs the directory. Readers open only the exact `.parquet` name, so a leftover `.tmp` is ignored and replaced on the next write. A corrupt existing file or value refuses the write (`Corrupt`) and is left untouched.
+- SEC-104-1 done: symbol allowlist `[A-Z0-9_&-]`, max 64 (uppercase only so case-insensitive filesystems cannot merge two symbols), checked before any path; bad symbol is `Other`. Symbol is never in SQL; the root is rejected if it holds a quote or control character.
+- The work runs in `spawn_blocking` (`tokio` is now a normal dependency of `store`). One store per root: the write lock is per instance.
+- New dependency `duckdb` (owner-approved, bundled + parquet, `~` patch pin).
+
 ## Deferred
 - Corrupt-value and leftover `*.tmp` cases are adapter-specific; slices 1 and 2.
 - Parquet/DuckDB needs owner approval of new dependencies.

@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use bazaar_core::candle::{Candle, Interval};
 use bazaar_core::ports::{CandleSink, RepoError};
@@ -29,18 +29,28 @@ const MAX_BATCH: usize = 100_000;
 /// Rows kept in one file (the merge holds them in memory).
 const MAX_FILE_ROWS: usize = 5_000_000;
 
-/// Symbols allowed in a file path: ASCII letters, digits, `_`, `-`, `&` (e.g. `M&M`, `BAJAJ-AUTO`).
-/// No dots, slashes, spaces or quotes: no traversal and nothing SQL-significant.
+/// Symbols allowed in a file path: ASCII uppercase letters, digits, `_`, `-`, `&` (e.g. `M&M`,
+/// `BAJAJ-AUTO`). No dots, slashes, spaces or quotes: no traversal and nothing SQL-significant.
+/// Uppercase only, so `abc` and `ABC` can never share a file on a case-insensitive filesystem.
 fn safe_symbol(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= MAX_SYMBOL_LEN
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'&'))
+        && s.bytes().all(|b| {
+            b.is_ascii_uppercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-' | b'&')
+        })
 }
 
 /// Writer over a Parquet directory tree.
-#[derive(Debug)]
+///
+/// Use one store per root: the lock that serialises read-merge-rename is per store, so a second
+/// store (or process) writing the same root can lose an update.
+#[derive(Debug, Clone)]
 pub struct ParquetStore {
+    inner: Arc<Inner>,
+}
+
+#[derive(Debug)]
+struct Inner {
     root: PathBuf,
     /// Serialises writers so two merges never race on one file.
     lock: Mutex<()>,
@@ -50,29 +60,37 @@ impl ParquetStore {
     /// Store rooted at `root` (created on first write).
     ///
     /// # Errors
-    /// `RepoError::Other` if the path is not UTF-8 or contains a quote or NUL (it ends up inside
-    /// one SQL string).
+    /// `RepoError::Other` if the path is not UTF-8 or contains a quote or a control character
+    /// (it ends up inside one SQL string).
     pub fn new(root: impl Into<PathBuf>) -> Result<Self, RepoError> {
         let root = root.into();
         let text = root.to_str().ok_or(RepoError::Other)?;
-        if text.contains(['\'', '\0']) {
+        // Invariant relied on by `write_tmp`: DuckDB single-quoted strings have no backslash
+        // escapes, so with no quote and no control character the path cannot end the literal.
+        if text.contains('\'') || text.chars().any(char::is_control) {
             return Err(RepoError::Other);
         }
         Ok(Self {
-            root,
-            lock: Mutex::new(()),
+            inner: Arc::new(Inner {
+                root,
+                lock: Mutex::new(()),
+            }),
         })
     }
 
     fn file_path(&self, symbol: &str, interval: Interval, adjusted: bool) -> PathBuf {
         let kind = if adjusted { "adj" } else { "raw" };
-        self.root
+        self.inner
+            .root
             .join(symbol)
             .join(format!("{}_{kind}.parquet", interval_label(interval)))
     }
 
     fn write_sync(&self, symbol: &str, candles: &[Candle]) -> Result<u64, RepoError> {
-        if !safe_symbol(symbol) || candles.len() > MAX_BATCH {
+        if !safe_symbol(symbol) {
+            return Err(RepoError::Other);
+        }
+        if candles.len() > MAX_BATCH {
             return Err(RepoError::TooLarge);
         }
         let Some(first) = candles.first() else {
@@ -89,7 +107,7 @@ impl ParquetStore {
             let row = Row::from_candle(c)?;
             batch.insert(row.close_ns, row);
         }
-        let _guard = self.lock.lock().map_err(|_| RepoError::Other)?;
+        let _guard = self.inner.lock.lock().map_err(|_| RepoError::Other)?;
         let target = self.file_path(symbol, first.interval(), first.adjusted());
         let dir = target.parent().ok_or(RepoError::Other)?;
         fs::create_dir_all(dir).map_err(|_| RepoError::Unavailable)?;
@@ -121,13 +139,14 @@ impl ParquetStore {
 }
 
 impl CandleSink for ParquetStore {
-    fn write_candles(
-        &self,
-        symbol: &str,
-        candles: &[Candle],
-    ) -> impl Future<Output = Result<u64, RepoError>> + Send {
-        // DuckDB work is local and short; no await point, so the result is ready at once.
-        std::future::ready(self.write_sync(symbol, candles))
+    async fn write_candles(&self, symbol: &str, candles: &[Candle]) -> Result<u64, RepoError> {
+        // DuckDB, fsync and the merge block: keep them off the async executor.
+        let store = self.clone();
+        let symbol = symbol.to_owned();
+        let candles = candles.to_vec();
+        tokio::task::spawn_blocking(move || store.write_sync(&symbol, &candles))
+            .await
+            .map_err(|_| RepoError::Other)?
     }
 }
 
@@ -206,6 +225,8 @@ fn write_tmp(conn: &Connection, tmp: &Path, rows: &BTreeMap<i64, Row>) -> Result
         app.flush().map_err(other)?;
     }
     let path = tmp.to_str().ok_or(RepoError::Other)?;
+    // The path is text inside the SQL: safe only because `ParquetStore::new` rejects quotes and
+    // control characters in the root and `safe_symbol` constrains the rest.
     conn.execute_batch(&format!(
         "COPY (SELECT * FROM c ORDER BY close_ns) TO '{path}' (FORMAT PARQUET)"
     ))
@@ -305,7 +326,7 @@ mod tests {
         ] {
             assert_eq!(
                 s.write_candles(bad, &[bar(20, 1, false)]).await,
-                Err(RepoError::TooLarge),
+                Err(RepoError::Other),
                 "{bad}"
             );
         }
@@ -319,6 +340,7 @@ mod tests {
         assert_eq!(s.write_candles("ABC", &[]).await, Ok(0));
         assert_eq!(fs::read_dir(d.path()).unwrap().count(), 0);
         assert!(ParquetStore::new("/tmp/a'b").is_err());
+        assert!(ParquetStore::new("/tmp/a\nb").is_err());
     }
 
     #[tokio::test]
