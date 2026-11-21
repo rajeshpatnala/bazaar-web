@@ -1,4 +1,4 @@
-import { Outlet } from "react-router";
+import { NavLink, Outlet } from "react-router";
 import { Disclaimer } from "../shared/ui/Disclaimer";
 import { ModeBadge } from "./ModeBadge";
 import { SessionGate } from "./SessionGate";
@@ -9,6 +9,12 @@ export function AppShell() {
     <div className="shell">
       <header className="shell-header">
         <h1>Bazaar</h1>
+        <nav aria-label="Main" className="shell-nav">
+          <NavLink to="/" end>
+            Home
+          </NavLink>
+          <NavLink to="/ideas">Ideas</NavLink>
+        </nav>
         <ModeBadge />
       </header>
       <main className="shell-main">
