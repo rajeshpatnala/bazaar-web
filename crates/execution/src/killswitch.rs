@@ -388,6 +388,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_release_write_of_a_never_persisted_engage_keeps_the_latch() {
+        let r = Arc::new(MemRepo::default());
+        let k = ks(&r, true);
+        r.fail_write.store(true, SeqCst);
+        assert!(k.engage("user", "y").await.is_err());
+        assert_eq!(k.release(PHRASE, "user").await, Err(ReleaseError::Storage));
+        assert_eq!(k.admits(false).await, Err(ExecError::KillSwitch));
+        assert!(r.rows.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn state_write_failure_after_the_row_still_refuses_and_exempt_flag_matters() {
         let r = Arc::new(MemRepo::default());
         let k = ks(&r, false);

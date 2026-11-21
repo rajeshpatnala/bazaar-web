@@ -1,6 +1,8 @@
 //! `SafetyGuard` (kill switch, breaker, rate limit in that fixed order) and the `GuardedExecutor`
-//! decorator that re-checks it right before `inner.place`. The pipeline (slice 3) checks first;
-//! this is the second layer, so a caller holding only the guarded wrapper cannot skip a guard.
+//! decorator that re-checks it right before `inner.place`. The pipeline (slice 3) pre-checks with
+//! the non-consuming `peek`; only `GuardedExecutor::place` consumes a rate slot, so one order uses
+//! exactly one slot (CR-105-1). This is the second layer: a caller holding only the guarded
+//! wrapper cannot skip a guard.
 
 use std::sync::Arc;
 
@@ -45,15 +47,35 @@ impl<R: KillSwitchRepo, P: PnlSource, A: AuditRepo> SafetyGuard<R, P, A> {
         }
     }
 
-    /// First refusal wins; the limiter is consumed only when everything before it passed.
+    /// Pipeline pre-check: the same refusals as `place` but no rate slot is consumed.
     ///
     /// # Errors
     /// `KillSwitch`, `BreakerTripped` or `RateLimited`.
-    pub async fn check(&self, intent: &OrderIntent, now: DateTime<Tz>) -> Result<(), ExecError> {
+    pub async fn peek(&self, intent: &OrderIntent, now: DateTime<Tz>) -> Result<(), ExecError> {
+        self.run(intent, now, false).await
+    }
+
+    /// First refusal wins; the limiter is consumed only when everything before it passed.
+    pub(crate) async fn check(
+        &self,
+        intent: &OrderIntent,
+        now: DateTime<Tz>,
+    ) -> Result<(), ExecError> {
+        self.run(intent, now, true).await
+    }
+
+    async fn run(
+        &self,
+        intent: &OrderIntent,
+        now: DateTime<Tz>,
+        consume: bool,
+    ) -> Result<(), ExecError> {
         self.kill.admits(intent.reduce_only).await?;
         if self.breaker.tripped(now).await.is_some() {
             if self.breaker_engages_kill_switch {
-                // Idempotent; a failed write still leaves the latch set (refuses).
+                // Idempotent; a failed write still leaves the latch set (refuses). After a
+                // same-day release the next check engages again (and audits it): a tripped day
+                // stays blocked (RISK-105-6).
                 if let Err(e) = self.kill.engage("breaker", "daily loss limit").await {
                     tracing::warn!(error = %e, "breaker could not persist the kill switch");
                 }
@@ -62,7 +84,11 @@ impl<R: KillSwitchRepo, P: PnlSource, A: AuditRepo> SafetyGuard<R, P, A> {
                 return Err(ExecError::BreakerTripped);
             }
         }
-        self.limiter.try_acquire(now)
+        if consume {
+            self.limiter.try_acquire(now, intent.reduce_only)
+        } else {
+            self.limiter.peek(now, intent.reduce_only)
+        }
     }
 }
 
@@ -106,7 +132,7 @@ impl<E: Executor, R: KillSwitchRepo, P: PnlSource, A: AuditRepo> Executor
 #[allow(clippy::unused_async_trait_impl)]
 mod tests {
     use super::*;
-    use crate::breaker::fakes::FakePnl;
+    use crate::breaker::fakes::{FakePnl, breaker_on};
     use crate::killswitch::fakes::{At, MemRepo, Shared};
     use crate::types::{IntentId, OrderKind, Product};
     use bazaar_risk::types::Side;
@@ -144,7 +170,7 @@ mod tests {
         repo: Arc<MemRepo>,
     }
 
-    fn rig(pnl: i64, per_min: u32, engage: bool, allow_reduce: bool) -> Rig {
+    async fn rig(pnl: i64, per_min: u32, engage: bool, allow_reduce: bool) -> Rig {
         let repo = Arc::new(MemRepo::default());
         let calls = Arc::new(AtomicU32::new(0));
         let kill = KillSwitch::new(
@@ -154,12 +180,7 @@ mod tests {
             allow_reduce,
         )
         .unwrap();
-        let breaker = DailyLossBreaker::new(
-            FakePnl::set(pnl, false),
-            repo.clone(),
-            crate::breaker::fakes::cal(),
-            rust_decimal::Decimal::from(2),
-        );
+        let breaker = breaker_on(FakePnl::set(pnl, false), &repo, At.now_ist()).await;
         let guard = SafetyGuard::new(
             kill,
             breaker,
@@ -176,19 +197,19 @@ mod tests {
 
     #[tokio::test]
     async fn passing_intent_reaches_inner_once() {
-        let r = rig(0, 10, false, true);
+        let r = rig(0, 10, false, true).await;
         assert!(place(&r, false).await.is_ok());
         assert_eq!(r.calls.load(SeqCst), 1);
     }
 
     #[tokio::test]
     async fn each_layer_refuses_without_reaching_inner() {
-        let r = rig(0, 10, false, true);
+        let r = rig(0, 10, false, true).await;
         r.ex.guard.kill.engage("user", "t").await.unwrap();
         assert_eq!(place(&r, false).await, Err(ExecError::KillSwitch));
-        let r = rig(-3000, 10, false, true);
+        let r = rig(-3000, 10, false, true).await;
         assert_eq!(place(&r, false).await, Err(ExecError::BreakerTripped));
-        let r = rig(0, 1, false, true);
+        let r = rig(0, 1, false, true).await;
         place(&r, false).await.unwrap();
         assert_eq!(place(&r, false).await, Err(ExecError::RateLimited));
         assert_eq!(r.calls.load(SeqCst), 1);
@@ -196,7 +217,7 @@ mod tests {
 
     #[tokio::test]
     async fn erroring_kill_switch_repo_refuses_even_reduce_only() {
-        let r = rig(0, 10, false, true);
+        let r = rig(0, 10, false, true).await;
         r.repo.fail_read.store(true, SeqCst);
         assert_eq!(place(&r, true).await, Err(ExecError::KillSwitch));
         assert_eq!(r.calls.load(SeqCst), 0);
@@ -204,24 +225,24 @@ mod tests {
 
     #[tokio::test]
     async fn breaker_without_kill_switch_still_lets_a_reduce_only_exit_pass() {
-        let r = rig(-3000, 10, false, false);
+        let r = rig(-3000, 10, false, false).await;
         assert!(place(&r, true).await.is_ok());
         assert_eq!(place(&r, false).await, Err(ExecError::BreakerTripped));
     }
 
     #[tokio::test]
     async fn breaker_engaging_kill_switch_follows_reduce_only_config() {
-        let r = rig(-3000, 10, true, false);
+        let r = rig(-3000, 10, true, false).await;
         assert_eq!(place(&r, true).await, Err(ExecError::KillSwitch));
         assert!(r.ex.guard.kill.is_engaged().await);
-        let r = rig(-3000, 10, true, true);
+        let r = rig(-3000, 10, true, true).await;
         assert!(place(&r, true).await.is_ok());
         assert_eq!(place(&r, false).await, Err(ExecError::KillSwitch));
     }
 
     #[tokio::test]
     async fn earlier_refusal_consumes_no_rate_slot() {
-        let r = rig(0, 1, false, true);
+        let r = rig(0, 1, false, true).await;
         r.ex.guard.kill.engage("user", "t").await.unwrap();
         for _ in 0..3 {
             assert!(place(&r, false).await.is_err());
@@ -232,5 +253,78 @@ mod tests {
             .await
             .unwrap();
         assert!(place(&r, false).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn pipeline_peek_then_guarded_place_counts_one_slot() {
+        let r = rig(0, 2, false, true).await;
+        let i = intent(false);
+        for _ in 0..5 {
+            r.ex.guard.peek(&i, At.now_ist()).await.unwrap();
+        }
+        assert!(place(&r, false).await.is_ok());
+        r.ex.guard.peek(&i, At.now_ist()).await.unwrap();
+        assert!(place(&r, false).await.is_ok());
+        assert_eq!(place(&r, false).await, Err(ExecError::RateLimited));
+        assert_eq!(r.calls.load(SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn reduce_only_exit_passes_at_the_minute_cap_and_keeps_entry_budget() {
+        let r = rig(0, 1, false, true).await;
+        assert!(place(&r, false).await.is_ok());
+        assert_eq!(place(&r, false).await, Err(ExecError::RateLimited));
+        assert!(place(&r, true).await.is_ok());
+        assert_eq!(r.calls.load(SeqCst), 2);
+        // A fresh rig: exits first do not use up the single entry slot.
+        let r = rig(0, 1, false, true).await;
+        assert!(place(&r, true).await.is_ok());
+        assert!(place(&r, false).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn breaker_kill_switch_is_persisted_and_seen_by_a_second_rig() {
+        let r = rig(-3000, 10, true, false).await;
+        assert_eq!(place(&r, false).await, Err(ExecError::KillSwitch));
+        assert!(r.repo.engaged.load(SeqCst));
+        let logged = r
+            .repo
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|x| x.draft.kind == "kill_switch_engaged" && x.draft.actor == "breaker");
+        assert!(logged);
+        let kill = KillSwitch::new(
+            Shared(r.repo.clone()),
+            Arc::new(At),
+            "RELEASE KILL SWITCH".into(),
+            false,
+        )
+        .unwrap();
+        assert!(kill.is_engaged().await);
+    }
+
+    #[tokio::test]
+    async fn released_kill_switch_on_a_tripped_day_is_engaged_again_and_audited() {
+        let r = rig(-3000, 10, true, false).await;
+        assert_eq!(place(&r, false).await, Err(ExecError::KillSwitch));
+        r.ex.guard
+            .kill
+            .release("RELEASE KILL SWITCH", "user")
+            .await
+            .unwrap();
+        assert_eq!(place(&r, false).await, Err(ExecError::KillSwitch));
+        assert!(r.repo.engaged.load(SeqCst));
+        let n = r
+            .repo
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|x| x.draft.kind == "kill_switch_engaged")
+            .count();
+        assert_eq!(n, 2);
+        assert_eq!(r.calls.load(SeqCst), 0);
     }
 }
