@@ -1,12 +1,14 @@
 # data.toml: endpoints, host allowlists, timeouts, rate limits and staleness windows for the
 # read-only market data adapters (F3). No secret lives here.
 #
-# NOT YET CHECKED AGAINST THE PROVIDERS' DOCS: the values below were written from the
-# developer's recollection of the Kite Connect v3 and NSE archive conventions on 2026-11-21
-# (no network access in that run). Every key listed in `unverified` must be compared with the
-# provider docs by the owner before the first real fetch; then remove it from the list and
-# update `verified_on`. Hosts the owner confirmed: nseindia.in (calendar). The two hosts below
-# for Kite and nsearchives.nseindia.com await the owner's confirmation (F3 owner input 4).
+# `verified_on` means "checked against the provider docs". While any key is listed in
+# `unverified`, the date is only the day the file was written and those keys are NOT verified:
+# the file is reported UNVERIFIED and never fresh. The values below were written from the
+# developer's recollection of Kite Connect v3 and the NSE archive conventions on 2026-11-21
+# (no network access in that run). The owner check (BZ-490/BZ-491) compares each key with the
+# provider docs, removes it from `unverified` and bumps `verified_on`. Hosts the owner
+# confirmed: nseindia.in (calendar). The Kite hosts and nsearchives.nseindia.com await the
+# owner's confirmation (F3 owner input 4).
 schema_version = 1
 verified_on = "2026-11-21"
 source = "https://kite.trade/docs/connect/v3/ and NSE archives (nsearchives.nseindia.com); written from memory, see unverified"

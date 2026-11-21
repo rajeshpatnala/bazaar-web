@@ -178,10 +178,58 @@ fn positive(file: &'static str, key: &str, v: u32, max: u32) -> Result<(), Confi
     Ok(())
 }
 
+/// Sections and keys an `unverified` entry may name (a section name covers all its keys).
+const KNOWN_KEYS: &[&str] = &[
+    "kite",
+    "nse",
+    "staleness",
+    "history",
+    "kite.api_base",
+    "kite.login_url",
+    "kite.api_version",
+    "kite.allowed_hosts",
+    "kite.connect_timeout_secs",
+    "kite.request_timeout_secs",
+    "kite.max_response_bytes",
+    "kite.historical_per_sec",
+    "kite.default_per_sec",
+    "kite.max_quote_batch",
+    "kite.token_expiry_hour_ist",
+    "kite.token_expiry_minute_ist",
+    "kite.span_days",
+    "nse.allowed_hosts",
+    "nse.bhavcopy_url_template",
+    "nse.banlist_url_template",
+    "nse.request_timeout_secs",
+    "nse.max_download_bytes",
+    "staleness.bhavcopy_max_age_days",
+    "staleness.ban_list_max_age_hours",
+    "staleness.quote_max_age_secs",
+    "history.daily_years",
+    "history.min15_years",
+];
+
+fn known_key(k: &str) -> bool {
+    KNOWN_KEYS.contains(&k)
+        || k.strip_prefix("kite.span_days.").is_some_and(|d| {
+            [
+                "min1", "min3", "min5", "min10", "min15", "min30", "min60", "day",
+            ]
+            .contains(&d)
+        })
+}
+
 fn valid_host(h: &str) -> bool {
+    // An all-numeric last label is an IP literal; `localhost` has no dot. Both are refused.
+    let last_is_numeric = h
+        .rsplit('.')
+        .next()
+        .is_some_and(|l| l.bytes().all(|b| b.is_ascii_digit()));
     !h.is_empty()
         && h.len() <= 253
         && h.contains('.')
+        && !last_is_numeric
+        && !h.ends_with(".localhost")
         && h.split('.').all(|l| {
             !l.is_empty()
                 && !l.starts_with('-')
@@ -259,6 +307,18 @@ impl KiteSection {
     fn check(&self, file: &'static str) -> Result<(), ConfigError> {
         check_hosts(file, "kite.allowed_hosts", &self.allowed_hosts)?;
         check_url(file, "kite.api_base", &self.api_base, &self.allowed_hosts)?;
+        let after_scheme = self.api_base.strip_prefix("https://").unwrap_or_default();
+        if after_scheme
+            .split_once('/')
+            .is_some_and(|(_, p)| !p.is_empty())
+            || after_scheme.contains(['?', '#'])
+        {
+            return Err(ConfigError::invalid(
+                file,
+                "kite.api_base",
+                "must end at the host (no path, query or fragment)",
+            ));
+        }
         check_url(file, "kite.login_url", &self.login_url, &self.allowed_hosts)?;
         if self.api_version.trim().is_empty() || self.api_version.len() > 10 {
             return Err(ConfigError::invalid(
@@ -282,11 +342,32 @@ impl KiteSection {
         )?;
         positive(file, "kite.default_per_sec", self.default_per_sec, 1000)?;
         positive(file, "kite.max_quote_batch", self.max_quote_batch, 10_000)?;
-        if self.token_expiry_hour_ist > 23 || self.token_expiry_minute_ist > 59 {
+        if self.token_expiry_hour_ist > 23 {
             return Err(ConfigError::invalid(
                 file,
                 "kite.token_expiry_hour_ist",
-                "must be a valid IST time of day",
+                "must be within 0 and 23",
+            ));
+        }
+        if self.token_expiry_minute_ist > 59 {
+            return Err(ConfigError::invalid(
+                file,
+                "kite.token_expiry_minute_ist",
+                "must be within 0 and 59",
+            ));
+        }
+        if self.connect_timeout_secs > self.request_timeout_secs {
+            return Err(ConfigError::invalid(
+                file,
+                "kite.connect_timeout_secs",
+                "must not exceed request_timeout_secs",
+            ));
+        }
+        if self.historical_per_sec > self.default_per_sec {
+            return Err(ConfigError::invalid(
+                file,
+                "kite.historical_per_sec",
+                "must not exceed default_per_sec",
             ));
         }
         self.span_days.check(file)
@@ -308,6 +389,26 @@ impl NseSection {
             &self.banlist_url_template,
             &self.allowed_hosts,
         )?;
+        for (key, url, placeholder) in [
+            (
+                "nse.bhavcopy_url_template",
+                &self.bhavcopy_url_template,
+                "{yyyymmdd}",
+            ),
+            (
+                "nse.banlist_url_template",
+                &self.banlist_url_template,
+                "{ddmmyyyy}",
+            ),
+        ] {
+            if !url.contains(placeholder) {
+                return Err(ConfigError::invalid(
+                    file,
+                    key,
+                    format!("must contain {placeholder}"),
+                ));
+            }
+        }
         positive(
             file,
             "nse.request_timeout_secs",
@@ -350,6 +451,13 @@ impl ConfigFile for DataConfig {
         let h = self.history()?;
         positive(FILE, "history.daily_years", h.daily_years, 30)?;
         positive(FILE, "history.min15_years", h.min15_years, 30)?;
+        if let Some(k) = self.unverified.iter().find(|k| !known_key(k)) {
+            return Err(ConfigError::invalid(
+                FILE,
+                "unverified",
+                format!("{k:?} is not a key or section of this file"),
+            ));
+        }
         if self.unverified.len() > 200 || self.unverified.iter().any(|k| k.len() > 100) {
             return Err(ConfigError::invalid(
                 FILE,
@@ -538,6 +646,64 @@ min15_years = 1
             "api_version = \"3\"\nextra = 1",
         ));
         assert!(e.contains("extra"), "{e}");
+    }
+
+    #[test]
+    fn templates_need_their_date_placeholder_and_api_base_no_path() {
+        let e = err_of(&with("x_{yyyymmdd}.zip", "x.zip"));
+        assert!(e.contains("{yyyymmdd}"), "{e}");
+        let e = err_of(&with("fo_secban_{ddmmyyyy}.csv", "fo_secban.csv"));
+        assert!(e.contains("{ddmmyyyy}"), "{e}");
+        let e = err_of(&with(
+            "\"https://api.kite.trade\"",
+            "\"https://api.kite.trade/v3\"",
+        ));
+        assert!(e.contains("kite.api_base"), "{e}");
+        assert!(
+            parse_str::<DataConfig>(&with(
+                "\"https://api.kite.trade\"",
+                "\"https://api.kite.trade/\""
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn unverified_entries_must_be_real_keys() {
+        let e = err_of(&with(
+            "[\"nse.banlist_url_template\"]",
+            "[\"kite.api_bse\"]",
+        ));
+        assert!(e.contains("kite.api_bse"), "{e}");
+        let ok = with(
+            "[\"nse.banlist_url_template\"]",
+            "[\"kite\", \"kite.span_days.min1\"]",
+        );
+        assert!(parse_str::<DataConfig>(&ok).is_ok());
+    }
+
+    #[test]
+    fn minute_key_is_named_and_cross_limits_hold() {
+        let e = err_of(&with(
+            "token_expiry_minute_ist = 0",
+            "token_expiry_minute_ist = 60",
+        ));
+        assert!(e.contains("token_expiry_minute_ist"), "{e}");
+        let e = err_of(&with(
+            "connect_timeout_secs = 5",
+            "connect_timeout_secs = 21",
+        ));
+        assert!(e.contains("connect_timeout_secs"), "{e}");
+        let e = err_of(&with("historical_per_sec = 3", "historical_per_sec = 11"));
+        assert!(e.contains("historical_per_sec"), "{e}");
+    }
+
+    #[test]
+    fn ip_literals_and_localhost_are_not_hosts() {
+        for bad in ["127.0.0.1", "10.0.0.1", "foo.localhost"] {
+            let e = err_of(&with("[\"api.kite.trade\", ", &format!("[\"{bad}\", ")));
+            assert!(e.contains("allowed_hosts"), "{bad}: {e}");
+        }
     }
 
     #[test]

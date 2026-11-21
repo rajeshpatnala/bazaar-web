@@ -20,6 +20,7 @@ Owner area: `crates/data`, `config/data.toml`, `core/src/{config/data,secret,por
 - Config keys: `data.toml` `kite.*`, `kite.span_days.*`, `nse.*`, `staleness.*`, `history.*`, `unverified`. `config/data.toml` is no longer a placeholder.
 
 ## Decisions
+- `data.toml` `verified_on` means "checked against the provider docs": while `unverified` is non-empty it is only the authoring date, the file is reported UNVERIFIED (never fresh) by `stale_warnings` and `check-connections` until the owner check (BZ-490/BZ-491) clears the list.
 - Token storage: file under `secrets/`, 0600, atomic write, never read by agents: `docs/adr/0002-kite-token-storage.md`.
 - Read-only client, REST polling for M1, host allowlist from config.
 

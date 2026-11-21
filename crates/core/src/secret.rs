@@ -9,7 +9,9 @@ use chrono::DateTime;
 use chrono_tz::Tz;
 
 /// A secret string (API key, API secret, access token).
-#[derive(PartialEq, Eq)]
+///
+/// Deliberately no `PartialEq`: comparisons of secrets are not constant-time; compare
+/// `expose()` values in tests only.
 pub struct Secret(String);
 
 impl Secret {
@@ -39,7 +41,7 @@ impl fmt::Debug for Secret {
 }
 
 /// A broker access token with its expiry (IST).
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct AccessToken {
     secret: Secret,
     expires_at: DateTime<Tz>,

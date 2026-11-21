@@ -417,6 +417,7 @@ pub trait TokenStore: Send + Sync {
 #[cfg(test)]
 #[allow(clippy::unused_async_trait_impl)] // the fake has nothing to await
 mod token_store_tests {
+    use super::tests::block;
     use super::*;
     use crate::secret::{AccessToken, Secret};
     use chrono::TimeZone;
@@ -439,15 +440,6 @@ mod token_store_tests {
         async fn clear(&self) -> Result<(), TokenError> {
             *self.0.lock().map_err(|_| TokenError::Unavailable)? = None;
             Ok(())
-        }
-    }
-
-    fn block<T>(f: impl Future<Output = T>) -> T {
-        let mut f = std::pin::pin!(f);
-        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-        match f.as_mut().poll(&mut cx) {
-            std::task::Poll::Ready(v) => v,
-            std::task::Poll::Pending => unreachable!("fake never pends"),
         }
     }
 
@@ -572,7 +564,7 @@ mod tests {
     }
 
     /// Drive a future to completion without a runtime (the fake never pends).
-    fn block<T>(f: impl Future<Output = T>) -> T {
+    pub(super) fn block<T>(f: impl Future<Output = T>) -> T {
         let mut f = std::pin::pin!(f);
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         match f.as_mut().poll(&mut cx) {

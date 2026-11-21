@@ -200,6 +200,9 @@ pub enum StaleReason {
     FutureDated,
     /// `calendar.toml` does not cover the current year.
     YearNotCovered { year: i32 },
+    /// `data.toml` lists keys not yet checked against the provider docs: `verified_on` is then
+    /// only the authoring date and the file is never fresh. Key names only, no values.
+    Unverified { keys: Vec<String> },
 }
 
 /// A staleness finding; shown in the UI and by `check-connections`, never a silent pass.
@@ -292,6 +295,14 @@ impl Config {
             if let Some(reason) = reason {
                 out.push(StaleWarning { file, reason });
             }
+        }
+        if !self.data.unverified.is_empty() {
+            out.push(StaleWarning {
+                file: DataConfig::FILE,
+                reason: StaleReason::Unverified {
+                    keys: self.data.unverified.clone(),
+                },
+            });
         }
         if !self.calendar.placeholder && !self.calendar.covered_years.contains(&today.year()) {
             out.push(StaleWarning {
@@ -398,6 +409,29 @@ mod tests {
         ));
         let bad_date = "schema_version = 1\nverified_on = \"2026-13-45\"\nsource = \"x\"\n";
         assert!(parse_str::<DataConfig>(bad_date).is_err());
+    }
+
+    #[test]
+    fn unverified_data_keys_are_reported_and_never_fresh() {
+        let mut cfg = Config::load(Path::new(FIXTURES)).unwrap();
+        let policy = StalenessPolicy {
+            default_max_age_days: 3650,
+            overrides: vec![],
+        };
+        let none = |c: &Config| {
+            c.stale_warnings(d(2026, 1, 6), &policy)
+                .into_iter()
+                .any(|w| matches!(w.reason, StaleReason::Unverified { .. }))
+        };
+        assert!(!none(&cfg));
+        cfg.data.unverified = vec!["kite.api_base".to_owned(), "nse".to_owned()];
+        let w = cfg.stale_warnings(d(2026, 1, 6), &policy);
+        assert!(w.contains(&StaleWarning {
+            file: "data.toml",
+            reason: StaleReason::Unverified {
+                keys: vec!["kite.api_base".to_owned(), "nse".to_owned()]
+            },
+        }));
     }
 
     #[test]
