@@ -1,0 +1,8 @@
+# DuckDB is linked from the SYSTEM library, not compiled (owner decision 2026-11-21, BZ-106).
+# These are defaults for the Homebrew layout on Apple Silicon; `force = false` means a DUCKDB_LIB_DIR /
+# DUCKDB_INCLUDE_DIR already in the environment wins (CI, Intel Mac under /usr/local, Linux, Windows).
+# macOS needs no rpath: Homebrew's libduckdb.dylib has an absolute install name.
+# Missing or mismatched library: run `just duckdb-check` (setup: docs/duckdb-setup.md).
+[env]
+DUCKDB_LIB_DIR = { value = "/opt/homebrew/lib", force = false }
+DUCKDB_INCLUDE_DIR = { value = "/opt/homebrew/include", force = false }

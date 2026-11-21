@@ -26,6 +26,10 @@ dev-gate: gate
 test:
     @python3 .claude/kit/kit.py test
 
+# check the system DuckDB library the build links (BZ-106): present, headers found, version matches the crate
+duckdb-check:
+    @sh scripts/duckdb-check.sh
+
 # full local CI: gate + doc tests + cargo deny + pnpm audit
 check:
     @python3 .claude/kit/kit.py check

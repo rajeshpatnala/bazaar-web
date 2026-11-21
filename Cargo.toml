@@ -48,8 +48,10 @@ sqlx = { version = "0.9", default-features = false, features = ["sqlite", "migra
 csv = "1.4"
 sha2 = "0.11"
 
-# candle store (F12 s2; duckdb approved by the owner, bundled so no system lib; ~ pin: patch bumps only)
-duckdb = { version = "~1.20001.0", features = ["bundled", "parquet"] }
+# candle store (F12 s2; duckdb approved by the owner; links the SYSTEM libduckdb, owner-approved 2026-11-21 (BZ-106);
+# crate 1.20001.0 = DuckDB 2.0.1, see docs/duckdb-setup.md;
+# no "parquet" feature: in this crate it forces "bundled"; the system library has Parquet built in; ~ pin: patch bumps only)
+duckdb = { version = "~1.20001.0" }
 
 # dev only
 tempfile = "3.27"

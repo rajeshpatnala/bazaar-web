@@ -16,6 +16,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  DUCKDB_VERSION: "2.0.1" # keep equal to the duckdb crate (1.20001.x), see docs/duckdb-setup.md
 
 jobs:
   pr-title:
@@ -33,6 +34,18 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - if: hashFiles('Cargo.toml') != ''
+        name: install system DuckDB (must match the duckdb crate, 1.20001.x = v2.0.1)
+        run: |
+          mkdir -p "$RUNNER_TEMP/libduckdb"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/libduckdb.zip" "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-linux-amd64.zip"
+          unzip -q "$RUNNER_TEMP/libduckdb.zip" -d "$RUNNER_TEMP/libduckdb"
+          {
+            echo "DUCKDB_LIB_DIR=$RUNNER_TEMP/libduckdb"
+            echo "DUCKDB_INCLUDE_DIR=$RUNNER_TEMP/libduckdb"
+            echo "LD_LIBRARY_PATH=$RUNNER_TEMP/libduckdb"
+          } >> "$GITHUB_ENV"
+          sh scripts/duckdb-check.sh
+      - if: hashFiles('Cargo.toml') != ''
         uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with: { components: "rustfmt, clippy" }
       - if: hashFiles('Cargo.toml') != ''
@@ -49,6 +62,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - if: hashFiles('Cargo.toml') != ''
+        name: install system DuckDB (must match the duckdb crate, 1.20001.x = v2.0.1)
+        run: |
+          mkdir -p "$RUNNER_TEMP/libduckdb"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/libduckdb.zip" "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-linux-amd64.zip"
+          unzip -q "$RUNNER_TEMP/libduckdb.zip" -d "$RUNNER_TEMP/libduckdb"
+          {
+            echo "DUCKDB_LIB_DIR=$RUNNER_TEMP/libduckdb"
+            echo "DUCKDB_INCLUDE_DIR=$RUNNER_TEMP/libduckdb"
+            echo "LD_LIBRARY_PATH=$RUNNER_TEMP/libduckdb"
+          } >> "$GITHUB_ENV"
+          sh scripts/duckdb-check.sh
       - if: hashFiles('Cargo.toml') != ''
         uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with: { components: "llvm-tools-preview" }
@@ -109,6 +134,10 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: install system DuckDB (Homebrew; must match the crate, see docs/duckdb-setup.md)
+        run: |
+          brew install duckdb
+          sh scripts/duckdb-check.sh
       - if: hashFiles('Cargo.toml') != ''
         uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
       - if: hashFiles('Cargo.toml') != ''
@@ -146,6 +175,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != '' && hashFiles('web/src/api/schema.d.ts') != ''
+        name: install system DuckDB (must match the duckdb crate, 1.20001.x = v2.0.1)
+        run: |
+          mkdir -p "$RUNNER_TEMP/libduckdb"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/libduckdb.zip" "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/libduckdb-linux-amd64.zip"
+          unzip -q "$RUNNER_TEMP/libduckdb.zip" -d "$RUNNER_TEMP/libduckdb"
+          {
+            echo "DUCKDB_LIB_DIR=$RUNNER_TEMP/libduckdb"
+            echo "DUCKDB_INCLUDE_DIR=$RUNNER_TEMP/libduckdb"
+            echo "LD_LIBRARY_PATH=$RUNNER_TEMP/libduckdb"
+          } >> "$GITHUB_ENV"
+          sh scripts/duckdb-check.sh
       - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != '' && hashFiles('web/src/api/schema.d.ts') != ''
         uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
       - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != '' && hashFiles('web/src/api/schema.d.ts') != ''
