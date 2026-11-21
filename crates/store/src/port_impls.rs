@@ -134,12 +134,7 @@ impl KillSwitchRepo for SqliteStore {
         Ok(self.kill_switch_get().await?.engaged)
     }
 
-    async fn set(
-        &self,
-        engaged: bool,
-        audit: AuditDraft,
-        chain: ChainFn,
-    ) -> Result<(), RepoError> {
+    async fn set(&self, engaged: bool, audit: AuditDraft, chain: ChainFn) -> Result<(), RepoError> {
         let at = ns_of(&audit.ts_ist_rfc3339)?;
         self.kill_switch_set_audited(engaged, &audit.actor, &audit.kind, at, &audit, chain)
             .await

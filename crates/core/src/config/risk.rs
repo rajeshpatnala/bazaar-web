@@ -1773,9 +1773,15 @@ mod tests {
     fn io_timeout_defaults_to_5_and_accepts_1_to_30() {
         let cfg: RiskConfig = parse_str(OK).unwrap();
         assert_eq!(cfg.execution.io_timeout_secs, 5);
-        assert_eq!(cfg.execution.io_timeout(), std::time::Duration::from_secs(5));
+        assert_eq!(
+            cfg.execution.io_timeout(),
+            std::time::Duration::from_secs(5)
+        );
         for v in ["1", "30"] {
-            let text = with("[execution]\n", &format!("[execution]\nio_timeout_secs = {v}\n"));
+            let text = with(
+                "[execution]\n",
+                &format!("[execution]\nio_timeout_secs = {v}\n"),
+            );
             let cfg: RiskConfig = parse_str(&text).unwrap();
             assert_eq!(cfg.execution.io_timeout_secs, v.parse::<u32>().unwrap());
         }
@@ -1784,7 +1790,10 @@ mod tests {
     #[test]
     fn io_timeout_zero_and_31_are_refused_naming_the_key() {
         for v in ["0", "31", "3600"] {
-            let text = with("[execution]\n", &format!("[execution]\nio_timeout_secs = {v}\n"));
+            let text = with(
+                "[execution]\n",
+                &format!("[execution]\nio_timeout_secs = {v}\n"),
+            );
             let err = parse_str::<RiskConfig>(&text).unwrap_err().to_string();
             assert!(err.contains("execution.io_timeout_secs"), "{v}: {err}");
         }

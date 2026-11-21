@@ -5,6 +5,7 @@
 //! F2 adds the two offline subcommands `import-instruments` and `check-connections`.
 
 pub mod commands;
+pub mod compose;
 
 use std::path::PathBuf;
 
