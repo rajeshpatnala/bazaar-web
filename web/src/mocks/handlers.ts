@@ -1,5 +1,8 @@
 import { http, HttpResponse, type RequestHandler } from "msw";
 import type { components } from "../api/schema";
+import { accountHandlers } from "./account";
+import { ideasHandlers } from "./ideas";
+import { ordersHandlers } from "./orders";
 
 type S = components["schemas"];
 
@@ -27,4 +30,7 @@ export const problemFixture = (status: number, code: string): S["Problem"] => ({
 export const handlers: RequestHandler[] = [
   http.get("/api/v1/auth/me", () => HttpResponse.json(authMeFixture)),
   http.get("/api/v1/status", () => HttpResponse.json(statusFixture)),
+  ...ideasHandlers,
+  ...ordersHandlers,
+  ...accountHandlers,
 ];

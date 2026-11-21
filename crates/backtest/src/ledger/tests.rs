@@ -83,6 +83,22 @@ fn at(dd: u32) -> DateTime<Tz> {
 }
 
 #[test]
+fn tagging_a_position_that_is_not_open_is_an_error_and_the_tag_reaches_the_trade() {
+    let cfg = cfg();
+    let mut l = ledger(&cfg);
+    assert!(matches!(
+        l.tag_open(1, Some("up".into())),
+        Err(BacktestError::Invalid(_))
+    ));
+    let buy = fill(1, Product::Delivery, LegSide::Buy, "500", 100, 1);
+    l.apply("s", buy, Some(px("490"))).unwrap();
+    l.tag_open(1, Some("up".into())).unwrap();
+    let sell = fill(1, Product::Delivery, LegSide::Sell, "510", 100, 2);
+    let t = l.apply("s", sell, None).unwrap().unwrap();
+    assert_eq!(t.regime.as_deref(), Some("up"));
+}
+
+#[test]
 fn delivery_long_round_trip_pays_dp_once_and_nets_everything() {
     // Buy 100 @ 500, sell 100 @ 510: gross 1000. STT 50 (buy) + 51 (sell) + DP 15.34 = 116.34.
     // Net 883.66; risk |500 - 490| x 100 = 1000, so R = 0.88366 -> 0.8837 (4 dp).
