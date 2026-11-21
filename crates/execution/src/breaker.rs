@@ -7,9 +7,10 @@
 //! failed append is kept and retried on the next check until it lands (`audit_pending`).
 //!
 //! Limits: the trading-day calendar uses `Segment::Equity` for every product (the intent carries
-//! no segment). A calendar error latches to `NaiveDate::MAX` and is logged; operator path: fix
-//! the calendar config, then restart (the restored latch comes from the audit row, so a restart
-//! on the same day keeps it, and the next trading day's rows are compared against the real date).
+//! no segment). A calendar error latches in-process to `NaiveDate::MAX` and is logged; the audit
+//! row records `until = "max"`. On the next start `new` re-derives the date from the row's `day`
+//! with the (fixed) calendar, or holds one calendar day if the calendar still errors, so a restart
+//! after the calendar is fixed (or the next day) clears it. No typed-phrase clear exists.
 //! `DayPnl::equity_base` must be the start-of-day capital, not live equity.
 
 use std::future::Future;
@@ -95,7 +96,20 @@ impl<P: PnlSource, A: AuditRepo> DailyLossBreaker<P, A> {
             .filter(|r| r.draft.kind == TRIP_KIND)
             .filter_map(|r| {
                 let v: serde_json::Value = serde_json::from_str(&r.draft.payload).ok()?;
-                parse_until(v.get("until")?.as_str()?)
+                let until = parse_until(v.get("until")?.as_str()?)?;
+                if until != NaiveDate::MAX {
+                    return Some(until);
+                }
+                // A calendar-error trip: re-derive from the trip day now that the calendar may be
+                // fixed; if it still errors, hold one calendar day (RISK-105-10).
+                let day: NaiveDate = v.get("day")?.as_str()?.parse().ok()?;
+                Some(
+                    calendar
+                        .next_trading_day(day, Segment::Equity)
+                        .ok()
+                        .or_else(|| day.succ_opt())
+                        .unwrap_or(NaiveDate::MAX),
+                )
             })
             .filter(|d| today < *d)
             .max();
@@ -382,6 +396,28 @@ mod tests {
             .await;
             assert!(matches!(r, Err(ExecError::InvalidInput(_))), "{pct}");
         }
+    }
+
+    #[tokio::test]
+    async fn calendar_error_trip_is_rederived_on_restart_not_latched_forever() {
+        let r = Arc::new(MemRepo::default());
+        let payload = serde_json::json!({"day": "2026-11-19", "until": "max"}).to_string();
+        r.rows.lock().unwrap().push(bazaar_core::ports::AuditRow {
+            seq: 1,
+            draft: AuditDraft {
+                ts_ist_rfc3339: day(19, 10).to_rfc3339(),
+                actor: "breaker".into(),
+                kind: TRIP_KIND.into(),
+                payload,
+            },
+            prev_hash: [0; 32],
+            hash: [0; 32],
+        });
+        // Same day: still tripped. Next trading day: clear.
+        let b = breaker_on(FakePnl::set(0, false), &r, day(19, 15)).await;
+        assert_eq!(b.tripped(day(19, 15)).await, Some(false));
+        let b = breaker_on(FakePnl::set(0, false), &r, day(20, 10)).await;
+        assert_eq!(b.tripped(day(20, 10)).await, None);
     }
 
     #[tokio::test]
