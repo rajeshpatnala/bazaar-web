@@ -53,6 +53,9 @@ pub struct Evidence {
     pub period: String,
     /// True when charges and slippage were deducted. Shown in the Why.
     pub costs_applied: bool,
+    /// True only when the stats come from out-of-sample / walk-forward trades. Unknown is
+    /// `false` (fail closed): in-sample numbers flatter the edge. Shown in the Why.
+    pub out_of_sample: bool,
 }
 
 impl Evidence {
@@ -67,6 +70,7 @@ impl Evidence {
             max_drawdown_pct: 0.0,
             period: String::new(),
             costs_applied: false,
+            out_of_sample: false,
         }
     }
 }
@@ -98,6 +102,7 @@ pub enum WhyFactor {
         trades: u32,
         profit_factor: Option<f64>,
         costs_applied: bool,
+        out_of_sample: bool,
         low_evidence: bool,
     },
     Liquidity {
@@ -173,6 +178,10 @@ pub enum RecError {
     NoTargets,
     #[error("a target is on the wrong side of the entry zone")]
     BadTarget,
+    #[error("a target is not strictly further from the entry than the one before it")]
+    TargetsNotMonotonic,
+    #[error("risk in rupees is below quantity x the worst-fill entry-to-stop distance")]
+    RiskBelowStopDistance,
     #[error("risk in rupees must be above zero")]
     NoRisk,
     #[error("reward:risk must be above zero")]
@@ -248,7 +257,7 @@ impl PartialEq for RecommendationParts {
 
 impl Recommendation {
     /// Validate and build. `min_trades_evidence` and `low_evidence_cap` come from `[scanner]`:
-    /// below the trade count `low_evidence` is set, `Warning::LowEvidence` is added and
+    /// below the trade count (or without evidence, costs or out-of-sample) `low_evidence` is set, `Warning::LowEvidence` is added and
     /// `confidence` is capped, so ranking by `confidence` never favours unproven names.
     pub fn new(
         mut p: RecommendationParts,
@@ -281,8 +290,24 @@ impl Recommendation {
         {
             return Err(RecError::BadTarget);
         }
+        if !p
+            .targets
+            .windows(2)
+            .all(|w| if buy { w[1] > w[0] } else { w[1] < w[0] })
+        {
+            return Err(RecError::TargetsNotMonotonic);
+        }
         if p.risk_rupees <= Decimal::ZERO {
             return Err(RecError::NoRisk);
+        }
+        // Worst fill: the far edge of the entry zone from the stop. Charges only push risk higher.
+        let distance = if buy {
+            hi - p.stop_loss
+        } else {
+            p.stop_loss - lo
+        };
+        if p.risk_rupees < Decimal::from(p.size.qty) * distance {
+            return Err(RecError::RiskBelowStopDistance);
         }
         if p.reward_risk <= Decimal::ZERO {
             return Err(RecError::BadRewardRisk);
@@ -302,8 +327,13 @@ impl Recommendation {
         if p.data_as_of > p.generated_at {
             return Err(RecError::DataFromFuture);
         }
+        // Fail closed: no evidence, too few trades, no costs or not out-of-sample is low evidence,
+        // whatever `min_trades_evidence` is (a 0 cannot clear it).
+        let low_evidence = p
+            .backtest
+            .as_ref()
+            .is_none_or(|b| b.trades < min_trades_evidence || !b.costs_applied || !b.out_of_sample);
         let backtest = p.backtest.take().unwrap_or_else(Evidence::neutral_prior);
-        let low_evidence = backtest.trades < min_trades_evidence;
         if low_evidence {
             p.confidence = p.confidence.min(low_evidence_cap);
             if !p.warnings.contains(&Warning::LowEvidence) {

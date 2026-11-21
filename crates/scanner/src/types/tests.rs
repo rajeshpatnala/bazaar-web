@@ -61,6 +61,75 @@ fn parts() -> RecommendationParts {
     }
 }
 
+fn good_evidence(trades: u32) -> Evidence {
+    Evidence {
+        trades,
+        costs_applied: true,
+        out_of_sample: true,
+        ..Evidence::neutral_prior()
+    }
+}
+
+fn low_with(f: impl FnOnce(&mut Evidence), min: u32) -> Recommendation {
+    let mut p = parts();
+    let mut e = good_evidence(30);
+    f(&mut e);
+    p.backtest = Some(e);
+    Recommendation::new(p, min, 55).unwrap()
+}
+
+#[test]
+fn each_low_evidence_branch_caps_confidence() {
+    assert!(low_with(|e| e.trades = 29, 30).low_evidence());
+    assert!(!low_with(|_| {}, 30).low_evidence());
+    let no_costs = low_with(|e| e.costs_applied = false, 30);
+    assert!(no_costs.low_evidence() && no_costs.confidence() == 55);
+    let in_sample = low_with(|e| e.out_of_sample = false, 30);
+    assert!(in_sample.low_evidence() && in_sample.confidence() == 55);
+    assert!(in_sample.warnings().contains(&Warning::LowEvidence));
+}
+
+#[test]
+fn zero_min_trades_cannot_clear_no_evidence() {
+    let r = Recommendation::new(parts(), 0, 55).unwrap();
+    assert!(r.low_evidence());
+    assert_eq!(r.confidence(), 55);
+}
+
+#[test]
+fn risk_below_stop_distance_is_rejected() {
+    let mut p = parts();
+    p.risk_rupees = d(59);
+    assert_eq!(
+        Recommendation::new(p.clone(), 30, 55).unwrap_err(),
+        RecError::RiskBelowStopDistance
+    );
+    p.action = Action::Sell;
+    p.stop_loss = d(106);
+    p.targets = vec![d(90)];
+    assert_eq!(
+        Recommendation::new(p, 30, 55).unwrap_err(),
+        RecError::RiskBelowStopDistance
+    );
+}
+
+#[test]
+fn targets_must_move_strictly_away_from_entry() {
+    let mut p = parts();
+    p.targets = vec![d(110), d(110)];
+    assert_eq!(
+        Recommendation::new(p.clone(), 30, 55).unwrap_err(),
+        RecError::TargetsNotMonotonic
+    );
+    p.targets = vec![d(110), d(105)];
+    assert_eq!(
+        Recommendation::new(p.clone(), 30, 55).unwrap_err(),
+        RecError::TargetsNotMonotonic
+    );
+    p.targets = vec![d(105), d(110)];
+    assert!(Recommendation::new(p, 30, 55).is_ok());
+}
+
 #[test]
 fn no_evidence_is_low_evidence_and_caps_confidence() {
     let r = Recommendation::new(parts(), 30, 55).unwrap();
@@ -73,10 +142,7 @@ fn no_evidence_is_low_evidence_and_caps_confidence() {
 #[test]
 fn enough_trades_keeps_confidence() {
     let mut p = parts();
-    p.backtest = Some(Evidence {
-        trades: 30,
-        ..Evidence::neutral_prior()
-    });
+    p.backtest = Some(good_evidence(30));
     let r = Recommendation::new(p, 30, 55).unwrap();
     assert!(!r.low_evidence());
     assert_eq!(r.confidence(), 80);
