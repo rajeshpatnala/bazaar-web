@@ -3,9 +3,12 @@
 
 mod approvals;
 mod audit;
+#[cfg(test)]
+mod audit_tests;
 mod candles;
 mod duck;
 mod killswitch;
+mod ledger;
 mod orders;
 mod parquet;
 mod sqlite;

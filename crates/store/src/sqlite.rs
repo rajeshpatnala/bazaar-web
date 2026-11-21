@@ -98,6 +98,20 @@ fn migrator() -> Migrator {
             SqlStr::from_static(include_str!("../migrations/0007_kill_switch_events.sql")),
             false,
         ),
+        Migration::new(
+            8,
+            Cow::Borrowed("audit_continuity"),
+            MigrationType::Simple,
+            SqlStr::from_static(include_str!("../migrations/0008_audit_continuity.sql")),
+            false,
+        ),
+        Migration::new(
+            9,
+            Cow::Borrowed("paper_ledger"),
+            MigrationType::Simple,
+            SqlStr::from_static(include_str!("../migrations/0009_paper_ledger.sql")),
+            false,
+        ),
     ])
 }
 
