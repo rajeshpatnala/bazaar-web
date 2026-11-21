@@ -70,7 +70,10 @@ fn json_escape(s: &str) -> String {
         match c {
             '"' => o.push_str("\\\""),
             '\\' => o.push_str("\\\\"),
-            c if u32::from(c) < 0x20 => o.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c if u32::from(c) < 0x20 => {
+                use std::fmt::Write as _;
+                let _ = write!(o, "\\u{:04x}", u32::from(c));
+            }
             c => o.push(c),
         }
     }
@@ -228,7 +231,7 @@ mod tests {
         let sql = match table {
             "approvals" => "SELECT COUNT(*) FROM approvals",
             "audit_log" => "SELECT COUNT(*) FROM audit_log",
-            _ => panic!("unknown table"),
+            _ => "SELECT -1",
         };
         sqlx::query_scalar(sql).fetch_one(&s.pool).await.unwrap()
     }
