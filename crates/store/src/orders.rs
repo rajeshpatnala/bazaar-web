@@ -254,7 +254,7 @@ mod tests {
             (3, "send".into(), Some("Approved".into()), "Sent".into())
         );
         assert_eq!(s.orders_in_state("Sent").await.unwrap().len(), 1);
-        assert!(s.orders_in_state("Approved").await.unwrap().is_empty());
+        assert_eq!(s.orders_in_state("Approved").await.unwrap(), Vec::new());
     }
 
     #[tokio::test]
