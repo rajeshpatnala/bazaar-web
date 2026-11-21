@@ -16,6 +16,7 @@ sqlx.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
 rust_decimal.workspace = true
+duckdb.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

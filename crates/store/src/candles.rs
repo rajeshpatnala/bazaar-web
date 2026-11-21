@@ -39,7 +39,7 @@ const READ: &str = "SELECT interval, adjusted, close_ns, open, high, low, close,
 const LAST: &str = "SELECT MAX(close_ns) AS last FROM candles \
     WHERE symbol = ? AND interval = ? AND adjusted = ?";
 
-const fn interval_label(i: Interval) -> &'static str {
+pub(crate) const fn interval_label(i: Interval) -> &'static str {
     match i {
         Interval::Min1 => "min1",
         Interval::Min3 => "min3",

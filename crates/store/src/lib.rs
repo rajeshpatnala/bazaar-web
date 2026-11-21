@@ -2,6 +2,8 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod candles;
+mod parquet;
 mod sqlite;
 
+pub use parquet::ParquetStore;
 pub use sqlite::SqliteStore;
