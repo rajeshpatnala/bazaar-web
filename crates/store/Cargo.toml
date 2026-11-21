@@ -14,9 +14,9 @@ workspace = true
 bazaar-core.workspace = true
 sqlx.workspace = true
 chrono.workspace = true
+chrono-tz.workspace = true
 rust_decimal.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 tokio.workspace = true
-chrono-tz.workspace = true

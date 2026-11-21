@@ -48,16 +48,25 @@ const GET_INSTRUMENT: &str = "SELECT instrument_token, exchange_token, tradingsy
     FROM instruments WHERE exchange = ? AND tradingsymbol = ?";
 
 fn migrator() -> Migrator {
-    Migrator::with_migrations(vec![Migration::new(
-        1,
-        Cow::Borrowed("instruments"),
-        MigrationType::Simple,
-        SqlStr::from_static(include_str!("../migrations/0001_instruments.sql")),
-        false,
-    )])
+    Migrator::with_migrations(vec![
+        Migration::new(
+            1,
+            Cow::Borrowed("instruments"),
+            MigrationType::Simple,
+            SqlStr::from_static(include_str!("../migrations/0001_instruments.sql")),
+            false,
+        ),
+        Migration::new(
+            2,
+            Cow::Borrowed("candles"),
+            MigrationType::Simple,
+            SqlStr::from_static(include_str!("../migrations/0002_candles.sql")),
+            false,
+        ),
+    ])
 }
 
-fn map_err(e: &sqlx::Error) -> RepoError {
+pub(crate) fn map_err(e: &sqlx::Error) -> RepoError {
     match e {
         sqlx::Error::Io(_)
         | sqlx::Error::PoolTimedOut
@@ -138,7 +147,7 @@ fn to_instrument(row: &SqliteRow) -> Result<Instrument, RepoError> {
 /// The SQLite store. Holds a single-connection pool, so all access is serialised (one writer).
 #[derive(Debug, Clone)]
 pub struct SqliteStore {
-    pool: SqlitePool,
+    pub(crate) pool: SqlitePool,
 }
 
 /// Best effort: owner-only access to the database and its WAL/SHM files (unix).
