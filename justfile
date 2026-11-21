@@ -15,7 +15,7 @@ doctor-fix:
     @python3 .claude/kit/doctor.py --fix
 
 # cargo fmt + clippy -D warnings + nextest; web typecheck + lint + vitest with compact output (required before any handoff)
-gate:
+gate: duckdb-check
     @python3 .claude/kit/kit.py gate
 
 # developer gate: gate + "production code changed => unit tests added"
@@ -23,8 +23,12 @@ dev-gate: gate
     @python3 .claude/kit/kit.py test-check
 
 # tests only (compact)
-test:
+test: duckdb-check
     @python3 .claude/kit/kit.py test
+
+# check the system DuckDB library the build links (BZ-106): present, headers found, version matches the crate
+duckdb-check:
+    @sh scripts/duckdb-check.sh
 
 # full local CI: gate + doc tests + cargo deny + pnpm audit
 check:

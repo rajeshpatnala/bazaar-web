@@ -22,7 +22,7 @@ Plan: `.agents/plans/F12-candle-store.md`. Status: in progress.
 - Write merges into the existing file (new row wins), writes `*.parquet.tmp`, fsyncs, renames, fsyncs the directory. Readers open only the exact `.parquet` name, so a leftover `.tmp` is ignored and replaced on the next write. A corrupt existing file or value refuses the write (`Corrupt`) and is left untouched.
 - SEC-104-1 done: symbol allowlist `[A-Z0-9_&-]`, max 64 (uppercase only so case-insensitive filesystems cannot merge two symbols), checked before any path; bad symbol is `Other`. Symbol is never in SQL; the root is rejected if it holds a quote or control character.
 - The work runs in `spawn_blocking` (`tokio` is now a normal dependency of `store`). One store per root: the write lock is per instance.
-- New dependency `duckdb` (owner-approved, bundled + parquet, `~` patch pin).
+- New dependency `duckdb` (owner-approved, `~` patch pin). BZ-106 (2026-11-21): now links the system libduckdb (no `bundled` C++ compile; the crate's `parquet` feature is dropped too because it forces `bundled`, the system library has Parquet built in); setup in `docs/duckdb-setup.md`, check with `just duckdb-check`.
 
 ## Slice 3 (DuckDB read side)
 - `store/src/duck.rs`: `DuckStore` implements `CandleSource` over the files `ParquetStore` writes. One in-memory DuckDB connection per read, on `spawn_blocking`; the exact `.parquet` file is opened (no directory glob), so a leftover `*.tmp` is never read. Path and bounds are bound parameters; the symbol uses the writer's uppercase allowlist (unsafe symbol is `Other`). Read capped at 1,000,000 rows (`TooLarge`).
