@@ -548,6 +548,7 @@ name = "bazaar-paper"
 version = "0.1.0"
 dependencies = [
  "bazaar-core",
+ "bazaar-execution",
  "chrono",
  "chrono-tz",
  "proptest",

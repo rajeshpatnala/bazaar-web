@@ -6,7 +6,7 @@ use chrono::DateTime;
 use chrono_tz::Tz;
 use rust_decimal::Decimal;
 
-use bazaar_risk::types::Side;
+pub use bazaar_risk::types::Side;
 
 /// 128-bit intent id from the injected `IdGen`; displayed as 32 hex digits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
