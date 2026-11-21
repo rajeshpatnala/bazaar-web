@@ -306,6 +306,7 @@ dependencies = [
  "bazaar-risk",
  "chrono",
  "chrono-tz",
+ "proptest",
  "rust_decimal",
  "serde_json",
  "sha2",

@@ -1,0 +1,1145 @@
+//! The single-writer `Pipeline`: gate, approval queue, re-gate at approval, pre-check of the
+//! guards (non-consuming `peek`), then the guarded executor. All state lives in one task fed by a
+//! channel, so two approvals of one intent resolve first-wins without locks. Paper and live differ
+//! only in the executor.
+
+use std::future::Future;
+use std::sync::Arc;
+use std::time::Duration;
+
+use bazaar_core::clock::Clock;
+use bazaar_core::ports::{
+    ApprovalDecision, ApprovalRepo, AuditRepo, KillSwitchRepo, OrderRecord, OrderRepo,
+    QuoteSnapshot, QuoteSource,
+};
+use chrono::DateTime;
+use chrono_tz::Tz;
+use rust_decimal::Decimal;
+use tokio::sync::{mpsc, oneshot};
+
+use crate::approval::{ApprovalQueue, Begin, Outcome, Pending, Track};
+use crate::audit::chain_hash;
+use crate::breaker::PnlSource;
+use crate::executor::{ApprovedOrder, ExecError, Executor};
+use crate::fills::FillHandler;
+use crate::guarded::GuardedExecutor;
+use crate::killswitch::ReleaseError;
+use crate::state::{ExecEvent, OrderState};
+use crate::types::{IntentId, OrderIntent};
+
+/// Longest `actor` / `reason` / typed phrase accepted at the handle edge (SEC-100-4).
+pub const MAX_TEXT: usize = 500;
+
+/// What the gate says. The real-`Gate` adapter lives in the composition slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateOutcome {
+    Pass,
+    Block(String),
+    /// The quote moved past the drift limit; the re-computed rupee risk.
+    Drifted {
+        new_risk: Decimal,
+    },
+}
+
+/// Sync gate port. The pipeline runs it in `spawn_blocking` (the gate does CPU work and takes
+/// locks), so it never stalls the writer's runtime thread.
+pub trait GatePort: Send + Sync + 'static {
+    fn gate(&self, intent: &OrderIntent, quote: Option<&QuoteSnapshot>) -> GateOutcome;
+}
+
+/// An executor wrapped in the guards: the pipeline pre-checks and drives the kill switch.
+pub trait Guarded: Executor {
+    fn peek(
+        &self,
+        intent: &OrderIntent,
+        now: DateTime<Tz>,
+    ) -> impl Future<Output = Result<(), ExecError>> + Send;
+    fn engage(
+        &self,
+        actor: &str,
+        reason: &str,
+    ) -> impl Future<Output = Result<(), ExecError>> + Send;
+    fn release(
+        &self,
+        typed: &str,
+        actor: &str,
+    ) -> impl Future<Output = Result<(), ReleaseError>> + Send;
+}
+
+impl<E: Executor, R: KillSwitchRepo, P: PnlSource, A: AuditRepo> Guarded
+    for GuardedExecutor<E, R, P, A>
+{
+    async fn peek(&self, intent: &OrderIntent, now: DateTime<Tz>) -> Result<(), ExecError> {
+        self.guard().peek(intent, now).await
+    }
+    async fn engage(&self, actor: &str, reason: &str) -> Result<(), ExecError> {
+        self.guard().kill().engage(actor, reason).await
+    }
+    async fn release(&self, typed: &str, actor: &str) -> Result<(), ReleaseError> {
+        self.guard().kill().release(typed, actor).await
+    }
+}
+
+/// Why a handle call failed before or outside an order outcome.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PipelineError {
+    #[error("text longer than {MAX_TEXT} characters")]
+    TooLong,
+    #[error("pipeline stopped")]
+    Closed,
+    #[error(transparent)]
+    Exec(#[from] ExecError),
+    #[error(transparent)]
+    Release(#[from] ReleaseError),
+}
+
+type Reply<T> = oneshot::Sender<T>;
+
+enum Cmd {
+    Submit(OrderIntent, Reply<Outcome>),
+    Decide(IntentId, ApprovalDecision, String, Reply<Outcome>),
+    Kill {
+        engage: bool,
+        actor: String,
+        text: String,
+        reply: Reply<Result<(), PipelineError>>,
+    },
+    ExpireStale(Reply<usize>),
+}
+
+/// Cloneable front door; there is no other way in.
+#[derive(Debug, Clone)]
+pub struct PipelineHandle {
+    tx: mpsc::Sender<Cmd>,
+}
+
+impl PipelineHandle {
+    async fn call<T>(&self, make: impl FnOnce(Reply<T>) -> Cmd) -> Result<T, PipelineError> {
+        let (r, rx) = oneshot::channel();
+        self.tx
+            .send(make(r))
+            .await
+            .map_err(|_| PipelineError::Closed)?;
+        rx.await.map_err(|_| PipelineError::Closed)
+    }
+
+    /// Gate an intent and queue it for approval.
+    ///
+    /// # Errors
+    /// `Closed` when the pipeline stopped.
+    pub async fn submit(&self, intent: OrderIntent) -> Result<Outcome, PipelineError> {
+        self.call(|r| Cmd::Submit(intent, r)).await
+    }
+
+    /// Record the user's decision (`actor` is the authenticated session user, audited); a second
+    /// one gets `AlreadyDecided`.
+    ///
+    /// # Errors
+    /// `TooLong` (actor over [`MAX_TEXT`]) or `Closed` when the pipeline stopped.
+    pub async fn decide(
+        &self,
+        id: IntentId,
+        d: ApprovalDecision,
+        actor: &str,
+    ) -> Result<Outcome, PipelineError> {
+        if actor.chars().count() > MAX_TEXT {
+            return Err(PipelineError::TooLong);
+        }
+        let actor = actor.to_owned();
+        self.call(|r| Cmd::Decide(id, d, actor, r)).await
+    }
+
+    /// Engage (`text` = reason) or release (`text` = typed phrase). `actor` and `text` are capped
+    /// at [`MAX_TEXT`] characters before anything is sent or audited.
+    ///
+    /// # Errors
+    /// `TooLong`, `Closed`, or the kill switch's own error.
+    pub async fn set_kill_switch(
+        &self,
+        engage: bool,
+        actor: &str,
+        text: &str,
+    ) -> Result<(), PipelineError> {
+        if actor.chars().count() > MAX_TEXT || text.chars().count() > MAX_TEXT {
+            return Err(PipelineError::TooLong);
+        }
+        let (actor, text) = (actor.to_owned(), text.to_owned());
+        self.call(|reply| Cmd::Kill {
+            engage,
+            actor,
+            text,
+            reply,
+        })
+        .await?
+    }
+
+    /// Expire every queued intent past its TTL (run at startup and on a timer).
+    ///
+    /// # Errors
+    /// `Closed` when the pipeline stopped.
+    pub async fn expire_stale(&self) -> Result<usize, PipelineError> {
+        self.call(Cmd::ExpireStale).await
+    }
+}
+
+/// I/O timeout used when the supplied one is zero (RISK-109-11).
+pub const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// Ceiling for the I/O timeout: a larger value is clamped so a bad config cannot stall the writer.
+pub const MAX_IO_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn clamp_io(d: Duration) -> Duration {
+    if d.is_zero() {
+        DEFAULT_IO_TIMEOUT
+    } else {
+        d.min(MAX_IO_TIMEOUT)
+    }
+}
+
+/// The writer. Owns the queue, the executor and the order store.
+pub struct Pipeline<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo> {
+    pub(crate) exec: X,
+    gate: Arc<G>,
+    quotes: Q,
+    orders: Arc<O>,
+    fills: FillHandler<O>,
+    queue: ApprovalQueue<A>,
+    clock: Arc<dyn Clock>,
+    io_timeout: Duration,
+}
+
+impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo> std::fmt::Debug
+    for Pipeline<X, G, Q, O, A>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pipeline").finish_non_exhaustive()
+    }
+}
+
+impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
+    Pipeline<X, G, Q, O, A>
+{
+    /// `io_timeout` bounds every quote read, gate run and send so one hung call cannot stall the
+    /// writer (the composition root supplies it from config). A zero value becomes
+    /// `DEFAULT_IO_TIMEOUT`; anything above `MAX_IO_TIMEOUT` is clamped to it.
+    #[allow(clippy::too_many_arguments)] // composition root wires every port once
+    pub fn new(
+        exec: X,
+        gate: Arc<G>,
+        quotes: Q,
+        orders: Arc<O>,
+        approvals: A,
+        approval_ttl_secs: u32,
+        clock: Arc<dyn Clock>,
+        io_timeout: Duration,
+    ) -> Self {
+        Self {
+            exec,
+            gate,
+            quotes,
+            fills: FillHandler::new(orders.clone()),
+            orders,
+            queue: ApprovalQueue::new(approvals, approval_ttl_secs),
+            clock,
+            io_timeout: clamp_io(io_timeout),
+        }
+    }
+
+    /// Move the pipeline into its task; the handle is the only way to reach it.
+    #[must_use]
+    pub fn spawn(self) -> PipelineHandle
+    where
+        Self: Send + 'static,
+    {
+        let (tx, mut rx) = mpsc::channel(64);
+        tokio::spawn(async move {
+            let mut me = self;
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    Cmd::Submit(i, r) => drop(r.send(me.submit(i).await)),
+                    Cmd::Decide(id, d, who, r) => drop(r.send(me.decide(id, d, &who).await)),
+                    Cmd::Kill {
+                        engage,
+                        actor,
+                        text,
+                        reply,
+                    } => {
+                        let res = if engage {
+                            me.exec
+                                .engage(&actor, &text)
+                                .await
+                                .map_err(PipelineError::from)
+                        } else {
+                            me.exec
+                                .release(&text, &actor)
+                                .await
+                                .map_err(PipelineError::from)
+                        };
+                        drop(reply.send(res));
+                    }
+                    Cmd::ExpireStale(r) => drop(r.send(me.expire_stale().await)),
+                }
+            }
+        });
+        PipelineHandle { tx }
+    }
+
+    async fn run_gate(&self, intent: &OrderIntent, quote: Option<QuoteSnapshot>) -> GateOutcome {
+        let (g, i) = (self.gate.clone(), intent.clone());
+        let run = tokio::task::spawn_blocking(move || g.gate(&i, quote.as_ref()));
+        match self.bounded(run).await {
+            Some(Ok(g)) => g,
+            Some(Err(_)) => GateOutcome::Block("gate task failed".into()),
+            None => GateOutcome::Block("gate timed out".into()),
+        }
+    }
+
+    /// `None` when `f` did not finish within the I/O timeout.
+    async fn bounded<T>(&self, f: impl Future<Output = T>) -> Option<T> {
+        tokio::time::timeout(self.io_timeout, f).await.ok()
+    }
+
+    /// Insert, gate and queue one intent.
+    pub(crate) async fn submit(&mut self, intent: OrderIntent) -> Outcome {
+        self.try_submit(intent).await.unwrap_or_else(Outcome::Error)
+    }
+
+    async fn try_submit(&mut self, intent: OrderIntent) -> Result<Outcome, ExecError> {
+        let now = self.clock.now_ist();
+        let id = intent.id;
+        let record = OrderRecord {
+            intent_id: id.0,
+            version: 0,
+            state: OrderState::Proposed.as_str().into(),
+            payload: serde_json::json!({
+                "symbol": intent.symbol, "qty": intent.qty, "reduce_only": intent.reduce_only,
+                "product": intent.product.as_str(),
+            })
+            .to_string(),
+        };
+        let audit = bazaar_core::ports::AuditDraft {
+            ts_ist_rfc3339: now.to_rfc3339(),
+            actor: "pipeline".into(),
+            kind: "proposed".into(),
+            payload: serde_json::json!({ "intent": id.to_string() }).to_string(),
+        };
+        self.orders
+            .insert(record, audit, chain_hash)
+            .await
+            .map_err(|_| ExecError::Storage)?;
+        let mut track = Track {
+            id,
+            version: 0,
+            state: OrderState::Proposed,
+        };
+        // No quote, or a late one, blocks explicitly: the gate never sees `None` (SEC-109-3).
+        let blocked = match self.bounded(self.quotes.quote(&intent.symbol)).await {
+            Some(Ok(q)) => self.run_gate(&intent, Some(q)).await,
+            _ => GateOutcome::Block("no fresh quote".into()),
+        };
+        match blocked {
+            GateOutcome::Pass => {
+                track
+                    .advance(&*self.orders, ExecEvent::GatePassed, now)
+                    .await?;
+                self.queue.enqueue(Pending {
+                    intent,
+                    track,
+                    queued_at: now,
+                });
+                Ok(Outcome::Queued)
+            }
+            blocked => {
+                track
+                    .advance(&*self.orders, ExecEvent::GateBlocked, now)
+                    .await?;
+                let out = blocked_outcome(blocked);
+                self.queue.finish(id, out.clone());
+                Ok(out)
+            }
+        }
+    }
+
+    /// Resolve a user decision. First wins; later calls get `AlreadyDecided`. A storage failure
+    /// before anything was persisted puts the intent back in the queue so the user can retry; after
+    /// that point the intent is finished as `Error` (its stored state is what reconciliation uses).
+    pub(crate) async fn decide(
+        &mut self,
+        id: IntentId,
+        d: ApprovalDecision,
+        actor: &str,
+    ) -> Outcome {
+        match self.queue.begin(id) {
+            Begin::Unknown => Outcome::Error(ExecError::InvalidInput("unknown intent")),
+            Begin::Done(o) => Outcome::AlreadyDecided(Box::new(o)),
+            Begin::Live(mut p) => match self.resolve(&mut p, d, actor).await {
+                Ok(out) => {
+                    self.queue.finish(id, out.clone());
+                    out
+                }
+                Err(e) if p.track.state == OrderState::PendingApproval => {
+                    self.queue.enqueue(*p);
+                    Outcome::Error(e)
+                }
+                Err(e) => {
+                    self.queue.finish(id, Outcome::Error(e.clone()));
+                    Outcome::Error(e)
+                }
+            },
+        }
+    }
+
+    async fn resolve(
+        &self,
+        p: &mut Pending,
+        d: ApprovalDecision,
+        actor: &str,
+    ) -> Result<Outcome, ExecError> {
+        let now = self.clock.now_ist();
+        let o = &*self.orders;
+        if self.queue.is_expired(p, now) {
+            p.track.advance(o, ExecEvent::Expire, now).await?;
+            return Ok(Outcome::Expired);
+        }
+        if d == ApprovalDecision::Decline {
+            if let Some(prior) = self.first_wins(p, d, now, actor).await? {
+                return Ok(prior);
+            }
+            p.track
+                .advance_as(o, ExecEvent::Decline, now, actor)
+                .await?;
+            return Ok(Outcome::Declined);
+        }
+        // Re-gate with a fresh quote; no quote means no approval-time gate, so it blocks.
+        let blocked = match self.bounded(self.quotes.quote(&p.intent.symbol)).await {
+            Some(Ok(q)) => self.run_gate(&p.intent, Some(q)).await,
+            _ => GateOutcome::Block("no fresh quote".into()),
+        };
+        if blocked != GateOutcome::Pass {
+            p.track.advance(o, ExecEvent::GateBlocked, now).await?;
+            return Ok(blocked_outcome(blocked));
+        }
+        if let Some(prior) = self.first_wins(p, d, now, actor).await? {
+            return Ok(prior);
+        }
+        p.track
+            .advance_as(o, ExecEvent::Approve, now, actor)
+            .await?;
+        if let Err(e) = self.exec.peek(&p.intent, now).await {
+            p.track.advance(o, ExecEvent::GuardBlocked, now).await?;
+            return Ok(Outcome::GuardBlocked(e));
+        }
+        p.track.advance(o, ExecEvent::Send, now).await?;
+        let order = ApprovedOrder::new(p.intent.clone());
+        // A send that hangs is an unknown outcome, never a retry.
+        let sent = self
+            .bounded(self.exec.place(&order))
+            .await
+            .unwrap_or(Err(ExecError::Unknown));
+        match sent {
+            Ok(ack) => {
+                // The order is out: a failed fill write must not hide that (RISK-109-2).
+                if self
+                    .fills
+                    .apply(&mut p.track, p.intent.qty, ack.filled_qty, now)
+                    .await
+                    .is_err()
+                {
+                    tracing::error!(intent = %p.track.id, "order sent but fill not recorded");
+                    return Ok(Outcome::PlacedUnrecorded(ack));
+                }
+                Ok(Outcome::Placed(ack))
+            }
+            Err(e) => {
+                let ev = if e == ExecError::Unknown {
+                    ExecEvent::Lost
+                } else {
+                    ExecEvent::Reject
+                };
+                p.track.advance(o, ev, now).await?;
+                Ok(Outcome::ExecFailed(e))
+            }
+        }
+    }
+
+    /// Persist the decision. `Some(outcome)` when the repo already holds a different one: the
+    /// stored decision stands and nothing is sent (RISK-109-1, SEC-109-1).
+    async fn first_wins(
+        &self,
+        p: &mut Pending,
+        d: ApprovalDecision,
+        now: DateTime<Tz>,
+        actor: &str,
+    ) -> Result<Option<Outcome>, ExecError> {
+        let stored = self
+            .queue
+            .record(p.track.id, d, now)
+            .await
+            .map_err(|_| ExecError::Storage)?;
+        if stored == d {
+            return Ok(None);
+        }
+        // Whatever the stored decision, nothing is sent and the order must reach a terminal
+        // state: a click against a stored Approve declines it (fail closed, RISK-109-12).
+        p.track
+            .advance_as(&*self.orders, ExecEvent::Decline, now, actor)
+            .await?;
+        let prior = if stored == ApprovalDecision::Decline {
+            Outcome::Declined
+        } else {
+            Outcome::Error(ExecError::InvalidInput("conflicting decision"))
+        };
+        Ok(Some(Outcome::AlreadyDecided(Box::new(prior))))
+    }
+
+    /// Expire every queued intent past its TTL; returns how many.
+    pub async fn expire_stale(&mut self) -> usize {
+        let now = self.clock.now_ist();
+        let mut n = 0;
+        for id in self.queue.stale(now) {
+            if let Begin::Live(mut p) = self.queue.begin(id) {
+                let out = match p.track.advance(&*self.orders, ExecEvent::Expire, now).await {
+                    Ok(()) => Outcome::Expired,
+                    Err(e) => Outcome::Error(e),
+                };
+                self.queue.finish(id, out);
+                n += 1;
+            }
+        }
+        n
+    }
+}
+
+fn blocked_outcome(g: GateOutcome) -> Outcome {
+    match g {
+        GateOutcome::Drifted { new_risk } => Outcome::QuoteDrifted { new_risk },
+        GateOutcome::Block(r) => Outcome::GateBlocked(r),
+        GateOutcome::Pass => Outcome::Error(ExecError::Storage),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unused_async_trait_impl)]
+pub(crate) mod fakes {
+    use super::*;
+    use crate::breaker::fakes::{FakePnl, breaker_on};
+    use crate::fills::RecordingExecutor;
+    use crate::guarded::SafetyGuard;
+    use crate::killswitch::KillSwitch;
+    use crate::killswitch::fakes::{At, MemRepo, Shared};
+    use crate::ratelimit::RateLimiter;
+    use bazaar_core::ports::{AuditDraft, ChainFn, RepoError, SourceError};
+    use bazaar_risk::types::Side;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+
+    #[derive(Default)]
+    pub(crate) struct MemOrders(
+        pub Mutex<HashMap<u128, (u32, String)>>,
+        pub Mutex<Option<String>>,
+    );
+    impl OrderRepo for MemOrders {
+        async fn insert(&self, o: OrderRecord, _: AuditDraft, _: ChainFn) -> Result<(), RepoError> {
+            let mut m = self.0.lock().unwrap();
+            if m.contains_key(&o.intent_id) {
+                return Err(RepoError::Conflict);
+            }
+            m.insert(o.intent_id, (0, o.state));
+            Ok(())
+        }
+        async fn get(&self, id: u128) -> Result<Option<OrderRecord>, RepoError> {
+            Ok(self.0.lock().unwrap().get(&id).map(|(v, s)| OrderRecord {
+                intent_id: id,
+                version: *v,
+                state: s.clone(),
+                payload: String::new(),
+            }))
+        }
+        async fn advance(
+            &self,
+            id: u128,
+            ver: u32,
+            st: String,
+            _: String,
+            _: AuditDraft,
+            _: ChainFn,
+        ) -> Result<u32, RepoError> {
+            if self.1.lock().unwrap().as_deref() == Some(st.as_str()) {
+                return Err(RepoError::Other);
+            }
+            let mut m = self.0.lock().unwrap();
+            let e = m.get_mut(&id).ok_or(RepoError::Other)?;
+            if e.0 != ver {
+                return Err(RepoError::Conflict);
+            }
+            *e = (ver + 1, st);
+            Ok(ver + 1)
+        }
+    }
+
+    #[derive(Default)]
+    pub(crate) struct MemApprovals(pub Mutex<HashMap<u128, ApprovalDecision>>);
+    impl ApprovalRepo for MemApprovals {
+        async fn decide(
+            &self,
+            id: u128,
+            d: ApprovalDecision,
+            _: String,
+        ) -> Result<ApprovalDecision, RepoError> {
+            Ok(*self.0.lock().unwrap().entry(id).or_insert(d))
+        }
+    }
+
+    pub(crate) struct Quotes(pub AtomicBool, pub AtomicBool);
+    impl QuoteSource for Quotes {
+        async fn quote(&self, _: &str) -> Result<QuoteSnapshot, SourceError> {
+            if self.1.load(SeqCst) {
+                std::future::pending::<()>().await;
+            }
+            if self.0.load(SeqCst) {
+                return Err(SourceError::Unavailable);
+            }
+            Ok(QuoteSnapshot {
+                last: Decimal::from(100),
+                lower_circuit: None,
+                upper_circuit: None,
+                bar_volume: None,
+                at_ist_rfc3339: String::new(),
+            })
+        }
+    }
+
+    /// Gate with a settable verdict; records the thread it ran on.
+    pub(crate) struct FakeGate {
+        pub verdict: Mutex<GateOutcome>,
+        pub thread: Mutex<Option<std::thread::ThreadId>>,
+    }
+    impl GatePort for FakeGate {
+        fn gate(&self, _: &OrderIntent, _: Option<&QuoteSnapshot>) -> GateOutcome {
+            *self.thread.lock().unwrap() = Some(std::thread::current().id());
+            self.verdict.lock().unwrap().clone()
+        }
+    }
+
+    /// Clock the test can move.
+    pub(crate) struct Tick(pub Mutex<DateTime<Tz>>);
+    impl Clock for Tick {
+        fn now_ist(&self) -> DateTime<Tz> {
+            *self.0.lock().unwrap()
+        }
+    }
+
+    pub(crate) type TestGuarded = GuardedExecutor<RecordingExecutor, Shared, FakePnl, MemRepo>;
+    pub(crate) type TestPipe = Pipeline<TestGuarded, FakeGate, Quotes, MemOrders, MemApprovals>;
+
+    pub(crate) struct Rig {
+        pub pipe: TestPipe,
+        pub rec: RecordingExecutor,
+        pub gate: Arc<FakeGate>,
+        pub clock: Arc<Tick>,
+        pub orders: Arc<MemOrders>,
+    }
+
+    pub(crate) fn start() -> DateTime<Tz> {
+        At.now_ist()
+    }
+
+    pub(crate) fn intent(id: u128, reduce_only: bool) -> OrderIntent {
+        OrderIntent {
+            id: IntentId(id),
+            symbol: "ABC".into(),
+            side: Side::Buy,
+            qty: 2,
+            kind: crate::types::OrderKind::Market,
+            product: crate::types::Product::Mis,
+            reduce_only,
+            created_at: start(),
+        }
+    }
+
+    /// Rig with `per_min` rate slots, `pnl` day P&L (rupees) and a 300 s approval TTL.
+    pub(crate) async fn rig(per_min: u32, pnl: i64) -> Rig {
+        rig_with(per_min, pnl, MemApprovals::default()).await
+    }
+
+    pub(crate) async fn rig_with(per_min: u32, pnl: i64, approvals: MemApprovals) -> Rig {
+        let repo = Arc::new(MemRepo::default());
+        let clock = Arc::new(Tick(Mutex::new(start())));
+        let kill = KillSwitch::new(
+            Shared(repo.clone()),
+            clock.clone(),
+            "RELEASE KILL SWITCH".into(),
+            true,
+        )
+        .unwrap();
+        let breaker = breaker_on(FakePnl::set(pnl, false), &repo, start()).await;
+        let guard = SafetyGuard::new(
+            kill,
+            breaker,
+            RateLimiter::new(100, per_min, 100).unwrap(),
+            false,
+        );
+        let rec = RecordingExecutor::default();
+        let exec = GuardedExecutor::new(rec.clone(), guard, clock.clone());
+        let gate = Arc::new(FakeGate {
+            verdict: Mutex::new(GateOutcome::Pass),
+            thread: Mutex::new(None),
+        });
+        let orders = Arc::new(MemOrders::default());
+        let pipe = Pipeline::new(
+            exec,
+            gate.clone(),
+            Quotes(AtomicBool::new(false), AtomicBool::new(false)),
+            orders.clone(),
+            approvals,
+            300,
+            clock.clone(),
+            Duration::from_millis(150),
+        );
+        Rig {
+            pipe,
+            rec,
+            gate,
+            clock,
+            orders,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fakes::*;
+    use super::*;
+    use crate::fills::RecordingExecutor;
+    use ApprovalDecision::{Approve, Decline};
+    use proptest::prelude::*;
+
+    fn ids(r: &Rig) -> Vec<u128> {
+        r.rec.placed().iter().map(|i| i.0).collect()
+    }
+    async fn queued(r: &mut Rig, id: u128, reduce: bool) {
+        assert_eq!(r.pipe.submit(intent(id, reduce)).await, Outcome::Queued);
+    }
+
+    #[tokio::test]
+    async fn happy_path_places_once_and_second_approval_is_already_decided() {
+        let mut r = rig(10, 0).await;
+        queued(&mut r, 1, false).await;
+        let out = r.pipe.decide(IntentId(1), Approve, "u").await;
+        assert!(matches!(&out, Outcome::Placed(a) if a.filled_qty == 2));
+        assert_eq!(r.orders.0.lock().unwrap()[&1].1, "filled");
+        assert_eq!(
+            r.pipe.decide(IntentId(1), Approve, "u").await,
+            Outcome::AlreadyDecided(Box::new(out))
+        );
+        assert!(matches!(
+            r.pipe.decide(IntentId(1), Decline, "u").await,
+            Outcome::AlreadyDecided(_)
+        ));
+        assert_eq!(ids(&r), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn gate_block_at_submit_and_at_approval_and_drift_never_send() {
+        let mut r = rig(10, 0).await;
+        *r.gate.verdict.lock().unwrap() = GateOutcome::Block("G01".into());
+        assert_eq!(
+            r.pipe.submit(intent(1, false)).await,
+            Outcome::GateBlocked("G01".into())
+        );
+        *r.gate.verdict.lock().unwrap() = GateOutcome::Pass;
+        queued(&mut r, 2, false).await;
+        *r.gate.verdict.lock().unwrap() = GateOutcome::Drifted {
+            new_risk: Decimal::from(9),
+        };
+        assert_eq!(
+            r.pipe.decide(IntentId(2), Approve, "u").await,
+            Outcome::QuoteDrifted {
+                new_risk: Decimal::from(9)
+            }
+        );
+        assert_eq!(r.orders.0.lock().unwrap()[&2].1, "blocked");
+        assert_eq!(ids(&r), Vec::<u128>::new());
+    }
+
+    #[tokio::test]
+    async fn missing_quote_at_approval_blocks() {
+        let mut r = rig(10, 0).await;
+        queued(&mut r, 1, false).await;
+        r.pipe
+            .quotes
+            .0
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            r.pipe.decide(IntentId(1), Approve, "u").await,
+            Outcome::GateBlocked("no fresh quote".into())
+        );
+        assert_eq!(ids(&r), Vec::<u128>::new());
+    }
+
+    #[tokio::test]
+    async fn expiry_decline_and_expire_stale() {
+        let mut r = rig(10, 0).await;
+        queued(&mut r, 1, false).await;
+        queued(&mut r, 2, false).await;
+        queued(&mut r, 3, false).await;
+        assert_eq!(
+            r.pipe.decide(IntentId(3), Decline, "u").await,
+            Outcome::Declined
+        );
+        *r.clock.0.lock().unwrap() += chrono::Duration::seconds(301);
+        assert_eq!(
+            r.pipe.decide(IntentId(1), Approve, "u").await,
+            Outcome::Expired
+        );
+        assert_eq!(r.pipe.expire_stale().await, 1);
+        assert_eq!(r.orders.0.lock().unwrap()[&2].1, "expired");
+        assert_eq!(
+            r.pipe.decide(IntentId(9), Approve, "u").await,
+            Outcome::Error(ExecError::InvalidInput("unknown intent"))
+        );
+        assert_eq!(ids(&r), Vec::<u128>::new());
+    }
+
+    #[tokio::test]
+    async fn gate_runs_off_the_runtime_thread() {
+        let mut r = rig(10, 0).await;
+        queued(&mut r, 1, false).await;
+        let ran_on = r.gate.thread.lock().unwrap().unwrap();
+        assert_ne!(ran_on, std::thread::current().id());
+    }
+
+    #[tokio::test]
+    async fn kill_switch_blocks_entries_both_layers_but_exit_passes() {
+        let mut r = rig(10, 0).await;
+        queued(&mut r, 1, false).await;
+        queued(&mut r, 2, true).await;
+        r.pipe.exec.engage("t", "test").await.unwrap();
+        // Pipeline layer: refused before the executor is touched.
+        assert_eq!(
+            r.pipe.decide(IntentId(1), Approve, "u").await,
+            Outcome::GuardBlocked(ExecError::KillSwitch)
+        );
+        assert_eq!(ids(&r), Vec::<u128>::new());
+        // Guard layer: the wrapper refuses a raw approved order on its own.
+        let raw = ApprovedOrder::new(intent(5, false));
+        assert_eq!(r.pipe.exec.place(&raw).await, Err(ExecError::KillSwitch));
+        assert_eq!(ids(&r), Vec::<u128>::new());
+        assert!(matches!(
+            r.pipe.decide(IntentId(2), Approve, "u").await,
+            Outcome::Placed(_)
+        ));
+        assert_eq!(ids(&r), vec![2]);
+    }
+
+    #[tokio::test]
+    async fn breaker_blocks_entries_both_layers_but_exit_passes() {
+        let mut r = rig(10, -2500).await;
+        queued(&mut r, 1, false).await;
+        queued(&mut r, 2, true).await;
+        assert_eq!(
+            r.pipe.decide(IntentId(1), Approve, "u").await,
+            Outcome::GuardBlocked(ExecError::BreakerTripped)
+        );
+        let raw = ApprovedOrder::new(intent(5, false));
+        assert_eq!(
+            r.pipe.exec.place(&raw).await,
+            Err(ExecError::BreakerTripped)
+        );
+        assert!(matches!(
+            r.pipe.decide(IntentId(2), Approve, "u").await,
+            Outcome::Placed(_)
+        ));
+        assert_eq!(ids(&r), vec![2]);
+    }
+
+    #[tokio::test]
+    async fn one_rate_slot_per_order_and_exit_is_exempt() {
+        let mut r = rig(1, 0).await;
+        for i in 1..=3 {
+            queued(&mut r, i, i == 3).await;
+        }
+        // peek consumed nothing: the single slot is still there for the first order's place.
+        assert!(matches!(
+            r.pipe.decide(IntentId(1), Approve, "u").await,
+            Outcome::Placed(_)
+        ));
+        // Pipeline layer refuses the second entry; guard layer would too.
+        assert_eq!(
+            r.pipe.decide(IntentId(2), Approve, "u").await,
+            Outcome::GuardBlocked(ExecError::RateLimited)
+        );
+        assert_eq!(
+            r.pipe
+                .exec
+                .place(&ApprovedOrder::new(intent(7, false)))
+                .await,
+            Err(ExecError::RateLimited)
+        );
+        assert!(matches!(
+            r.pipe.decide(IntentId(3), Approve, "u").await,
+            Outcome::Placed(_)
+        ));
+        assert_eq!(ids(&r), vec![1, 3]);
+    }
+
+    #[tokio::test]
+    async fn handle_caps_text_and_routes_commands() {
+        let r = rig(10, 0).await;
+        let rec = r.rec.clone();
+        let h = r.pipe.spawn();
+        let long = "x".repeat(501);
+        assert_eq!(
+            h.set_kill_switch(true, &long, "r").await,
+            Err(PipelineError::TooLong)
+        );
+        assert_eq!(
+            h.set_kill_switch(true, "a", &long).await,
+            Err(PipelineError::TooLong)
+        );
+        assert_eq!(
+            h.set_kill_switch(false, "a", &"y".repeat(500)).await,
+            Err(PipelineError::Release(ReleaseError::WrongPhrase))
+        );
+        h.set_kill_switch(true, "a", "why").await.unwrap();
+        assert_eq!(h.submit(intent(1, false)).await.unwrap(), Outcome::Queued);
+        assert_eq!(
+            h.decide(IntentId(1), Approve, "u").await.unwrap(),
+            Outcome::GuardBlocked(ExecError::KillSwitch)
+        );
+        h.set_kill_switch(false, "a", "RELEASE KILL SWITCH")
+            .await
+            .unwrap();
+        assert_eq!(h.expire_stale().await.unwrap(), 0);
+        assert_eq!(rec.placed(), vec![]);
+    }
+
+    #[tokio::test]
+    async fn hung_approval_time_quote_blocks_instead_of_stalling() {
+        let mut r = rig(10, 0).await;
+        queued(&mut r, 1, false).await;
+        r.pipe
+            .quotes
+            .1
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let out = r.pipe.decide(IntentId(1), Approve, "u").await;
+        assert!(matches!(out, Outcome::GateBlocked(_)), "{out:?}");
+        assert_eq!(ids(&r), Vec::<u128>::new());
+    }
+
+    #[tokio::test]
+    async fn io_timeout_is_defaulted_and_clamped() {
+        assert_eq!(
+            clamp_io(Duration::from_millis(150)),
+            Duration::from_millis(150)
+        );
+        assert_eq!(clamp_io(Duration::ZERO), DEFAULT_IO_TIMEOUT);
+        assert_eq!(clamp_io(Duration::from_secs(3600)), MAX_IO_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn decline_against_stored_approve_finishes_the_order_declined() {
+        let seeded = MemApprovals::default();
+        seeded.0.lock().unwrap().insert(1, Approve);
+        let mut r = rig_with(10, 0, seeded).await;
+        queued(&mut r, 1, false).await;
+        let out = r.pipe.decide(IntentId(1), Decline, "u").await;
+        assert!(matches!(out, Outcome::AlreadyDecided(_)), "{out:?}");
+        assert_eq!(r.orders.0.lock().unwrap()[&1].1, "declined");
+        assert_eq!(ids(&r), Vec::<u128>::new());
+    }
+
+    #[tokio::test]
+    async fn stored_decline_beats_a_later_approve_and_nothing_is_sent() {
+        let seeded = MemApprovals::default();
+        seeded.0.lock().unwrap().insert(1, Decline);
+        let mut r = rig_with(10, 0, seeded).await;
+        queued(&mut r, 1, false).await;
+        let out = r.pipe.decide(IntentId(1), Approve, "u").await;
+        assert_eq!(out, Outcome::AlreadyDecided(Box::new(Outcome::Declined)));
+        assert_eq!(r.orders.0.lock().unwrap()[&1].1, "declined");
+        assert_eq!(ids(&r), Vec::<u128>::new());
+    }
+
+    #[tokio::test]
+    async fn fill_write_failure_after_send_is_reported_as_placed_unrecorded() {
+        let mut r = rig(10, 0).await;
+        queued(&mut r, 1, false).await;
+        *r.orders.1.lock().unwrap() = Some("filled".into());
+        let out = r.pipe.decide(IntentId(1), Approve, "u").await;
+        assert!(matches!(out, Outcome::PlacedUnrecorded(a) if a.filled_qty == 2));
+        assert_eq!(ids(&r), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn storage_failure_before_approval_keeps_the_intent_for_a_retry() {
+        let mut r = rig(10, 0).await;
+        queued(&mut r, 1, false).await;
+        *r.orders.1.lock().unwrap() = Some("approved".into());
+        assert_eq!(
+            r.pipe.decide(IntentId(1), Approve, "u").await,
+            Outcome::Error(ExecError::Storage)
+        );
+        *r.orders.1.lock().unwrap() = None;
+        assert!(matches!(
+            r.pipe.decide(IntentId(1), Approve, "u").await,
+            Outcome::Placed(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn ttl_boundary_expires_at_ttl_not_before() {
+        let mut r = rig(10, 0).await;
+        queued(&mut r, 1, false).await;
+        queued(&mut r, 2, false).await;
+        *r.clock.0.lock().unwrap() += chrono::Duration::seconds(299);
+        assert!(matches!(
+            r.pipe.decide(IntentId(1), Approve, "u").await,
+            Outcome::Placed(_)
+        ));
+        *r.clock.0.lock().unwrap() += chrono::Duration::seconds(1);
+        assert_eq!(
+            r.pipe.decide(IntentId(2), Approve, "u").await,
+            Outcome::Expired
+        );
+    }
+
+    #[tokio::test]
+    async fn hung_quote_and_hung_send_time_out() {
+        let mut r = rig(10, 0).await;
+        r.pipe
+            .quotes
+            .1
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            r.pipe.submit(intent(1, false)).await,
+            Outcome::GateBlocked("no fresh quote".into())
+        );
+        r.pipe
+            .quotes
+            .1
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        queued(&mut r, 2, false).await;
+        r.rec.set_hang(true);
+        assert_eq!(
+            r.pipe.decide(IntentId(2), Approve, "u").await,
+            Outcome::ExecFailed(ExecError::Unknown)
+        );
+        assert_eq!(r.orders.0.lock().unwrap()[&2].1, "unknown");
+    }
+
+    #[tokio::test]
+    async fn submit_without_a_quote_blocks_and_actor_is_audited_and_capped() {
+        let mut r = rig(10, 0).await;
+        r.pipe
+            .quotes
+            .0
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            r.pipe.submit(intent(1, false)).await,
+            Outcome::GateBlocked("no fresh quote".into())
+        );
+        let h = rig(10, 0).await.pipe.spawn();
+        assert_eq!(
+            h.decide(IntentId(1), Approve, &"x".repeat(501)).await,
+            Err(PipelineError::TooLong)
+        );
+    }
+
+    #[test]
+    fn finished_outcomes_are_capped() {
+        let mut q = ApprovalQueue::new(MemApprovals::default(), 300);
+        q.done_cap = 2;
+        for i in 1..=3 {
+            q.finish(IntentId(i), Outcome::Declined);
+        }
+        assert!(matches!(q.begin(IntentId(1)), Begin::Unknown));
+        assert!(matches!(q.begin(IntentId(3)), Begin::Done(_)));
+    }
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        Submit(bool),
+        Approve(usize),
+        Decline(usize),
+        Time(i64),
+        Kill(bool),
+        GateBlock(bool),
+    }
+
+    fn op() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            any::<bool>().prop_map(Op::Submit),
+            (0..6usize).prop_map(Op::Approve),
+            (0..6usize).prop_map(Op::Decline),
+            (0..400i64).prop_map(Op::Time),
+            any::<bool>().prop_map(Op::Kill),
+            any::<bool>().prop_map(Op::GateBlock),
+        ]
+    }
+
+    proptest! {
+        /// AC1: nothing is placed after a gate Block, while killed (unless a reduce-only exit),
+        /// after expiry, or without an approval.
+        #[test]
+        fn nothing_is_placed_unless_every_condition_holds(ops in proptest::collection::vec(op(), 1..40)) {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+            rt.block_on(async {
+                let mut r = rig(1000, 0).await;
+                // (id, reduce_only, queued_at_secs, open)
+                let mut items: Vec<(u128, bool, i64, bool)> = vec![];
+                let (mut secs, mut killed, mut blocked, mut next) = (0i64, false, false, 1u128);
+                let mut expected: Vec<u128> = vec![];
+                for o in ops {
+                    match o {
+                        Op::Submit(red) => {
+                            let out = r.pipe.submit(intent(next, red)).await;
+                            prop_assert_eq!(out == Outcome::Queued, !blocked);
+                            if !blocked { items.push((next, red, secs, true)); }
+                            next += 1;
+                        }
+                        Op::Decline(i) => {
+                            if let Some(it) = items.get_mut(i) {
+                                r.pipe.decide(IntentId(it.0), Decline, "u").await;
+                                it.3 = false;
+                            }
+                        }
+                        Op::Approve(i) => {
+                            if let Some(it) = items.get_mut(i) {
+                                let out = r.pipe.decide(IntentId(it.0), Approve, "u").await;
+                                if it.3 {
+                                    let ok = secs - it.2 < 300 && !blocked && (!killed || it.1);
+                                    if ok { expected.push(it.0); }
+                                    prop_assert_eq!(matches!(out, Outcome::Placed(_)), ok);
+                                    it.3 = false;
+                                } else {
+                                    prop_assert!(matches!(out, Outcome::AlreadyDecided(_)));
+                                }
+                            }
+                        }
+                        Op::Time(s) => {
+                            secs += s;
+                            *r.clock.0.lock().unwrap() += chrono::Duration::seconds(s);
+                        }
+                        Op::Kill(on) => {
+                            if on { r.pipe.exec.engage("p", "prop").await.unwrap(); }
+                            else if killed { r.pipe.exec.release("RELEASE KILL SWITCH", "p").await.unwrap(); }
+                            killed = on;
+                        }
+                        Op::GateBlock(b) => {
+                            blocked = b;
+                            *r.gate.verdict.lock().unwrap() = if b { GateOutcome::Block("x".into()) } else { GateOutcome::Pass };
+                        }
+                    }
+                    prop_assert_eq!(ids(&r), expected.clone());
+                }
+                Ok(())
+            })?;
+        }
+    }
+
+    #[test]
+    fn recording_executor_is_empty_at_start() {
+        assert_eq!(RecordingExecutor::default().placed(), vec![]);
+    }
+}
