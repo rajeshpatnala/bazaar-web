@@ -4,7 +4,8 @@
 //! exact `<root>/<symbol>/<interval>_<raw|adj>.parquet` name (never a glob over the directory),
 //! so a leftover `*.tmp` is never opened. The symbol is allowlisted before it builds the path;
 //! the path and the bounds are bound parameters, never formatted into SQL. A value that does not
-//! decode is `RepoError::Corrupt`.
+//! decode is `RepoError::Corrupt`. The data root is trusted operator config: `is_file` follows
+//! symlinks, so nobody else may be able to write inside it.
 
 use std::path::{Path, PathBuf};
 
@@ -93,7 +94,9 @@ fn read_sync(root: &Path, range: &CandleRange, cap: usize) -> Result<Vec<Candle>
     };
     let from = range.from.timestamp_nanos_opt().ok_or(RepoError::Other)?;
     let to = range.to.timestamp_nanos_opt().ok_or(RepoError::Other)?;
-    let limit = i64::try_from(cap + 1).map_err(|_| RepoError::Other)?;
+    let limit = i64::try_from(cap.saturating_add(1)).map_err(|_| RepoError::Other)?;
+    // Deliberate catch-all: duckdb reports a bad Parquet file and an unreadable one with the same
+    // error type, so every failure after the file was found fails closed as `Corrupt`.
     let corrupt = |_| RepoError::Corrupt;
     let conn = Connection::open_in_memory().map_err(|_| RepoError::Unavailable)?;
     let mut stmt = conn.prepare(READ).map_err(corrupt)?;
@@ -182,6 +185,17 @@ mod tests {
         let r = CandleRange::new("ABC", Interval::Min5, t(0), t(59), false);
         assert_eq!(read_sync(d.path(), &r, 3).unwrap().len(), 3);
         assert_eq!(read_sync(d.path(), &r, 2), Err(RepoError::TooLarge));
+    }
+
+    #[test]
+    fn huge_cap_does_not_overflow() {
+        let d = tempfile::tempdir().unwrap();
+        let r = CandleRange::new("ABC", Interval::Min5, t(0), t(59), false);
+        // no file: empty before the limit is computed; with a file the limit is refused
+        assert_eq!(read_sync(d.path(), &r, usize::MAX), Ok(vec![]));
+        std::fs::create_dir(d.path().join("ABC")).unwrap();
+        std::fs::write(d.path().join("ABC").join("min5_raw.parquet"), b"x").unwrap();
+        assert_eq!(read_sync(d.path(), &r, usize::MAX), Err(RepoError::Other));
     }
 
     #[test]
