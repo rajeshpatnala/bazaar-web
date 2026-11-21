@@ -32,7 +32,7 @@ const MAX_FILE_ROWS: usize = 5_000_000;
 /// Symbols allowed in a file path: ASCII uppercase letters, digits, `_`, `-`, `&` (e.g. `M&M`,
 /// `BAJAJ-AUTO`). No dots, slashes, spaces or quotes: no traversal and nothing SQL-significant.
 /// Uppercase only, so `abc` and `ABC` can never share a file on a case-insensitive filesystem.
-fn safe_symbol(s: &str) -> bool {
+pub(crate) fn safe_symbol(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= MAX_SYMBOL_LEN
         && s.bytes().all(|b| {
@@ -63,13 +63,7 @@ impl ParquetStore {
     /// `RepoError::Other` if the path is not UTF-8 or contains a quote or a control character
     /// (it ends up inside one SQL string).
     pub fn new(root: impl Into<PathBuf>) -> Result<Self, RepoError> {
-        let root = root.into();
-        let text = root.to_str().ok_or(RepoError::Other)?;
-        // Invariant relied on by `write_tmp`: DuckDB single-quoted strings have no backslash
-        // escapes, so with no quote and no control character the path cannot end the literal.
-        if text.contains('\'') || text.chars().any(char::is_control) {
-            return Err(RepoError::Other);
-        }
+        let root = check_root(root.into())?;
         Ok(Self {
             inner: Arc::new(Inner {
                 root,
@@ -79,11 +73,7 @@ impl ParquetStore {
     }
 
     fn file_path(&self, symbol: &str, interval: Interval, adjusted: bool) -> PathBuf {
-        let kind = if adjusted { "adj" } else { "raw" };
-        self.inner
-            .root
-            .join(symbol)
-            .join(format!("{}_{kind}.parquet", interval_label(interval)))
+        file_path(&self.inner.root, symbol, interval, adjusted)
     }
 
     fn write_sync(&self, symbol: &str, candles: &[Candle]) -> Result<u64, RepoError> {
@@ -150,11 +140,29 @@ impl CandleSink for ParquetStore {
     }
 }
 
+/// Root must be UTF-8 and free of quotes and control characters: it ends up inside SQL text.
+/// Invariant relied on by `write_tmp`: `DuckDB` single-quoted strings have no backslash escapes,
+/// so with no quote and no control character the path cannot end the literal.
+pub(crate) fn check_root(root: PathBuf) -> Result<PathBuf, RepoError> {
+    let text = root.to_str().ok_or(RepoError::Other)?;
+    if text.contains('\'') || text.chars().any(char::is_control) {
+        return Err(RepoError::Other);
+    }
+    Ok(root)
+}
+
+/// `<root>/<symbol>/<interval>_<raw|adj>.parquet`; the caller has already checked the symbol.
+pub(crate) fn file_path(root: &Path, symbol: &str, interval: Interval, adjusted: bool) -> PathBuf {
+    let kind = if adjusted { "adj" } else { "raw" };
+    root.join(symbol)
+        .join(format!("{}_{kind}.parquet", interval_label(interval)))
+}
+
 #[derive(Debug, Clone)]
-struct Row {
-    close_ns: i64,
-    ohlc: [String; 4],
-    volume: i64,
+pub(crate) struct Row {
+    pub(crate) close_ns: i64,
+    pub(crate) ohlc: [String; 4],
+    pub(crate) volume: i64,
 }
 
 impl Row {
@@ -169,7 +177,11 @@ impl Row {
         })
     }
 
-    fn to_candle(&self, interval: Interval, adjusted: bool) -> Result<Candle, RepoError> {
+    pub(crate) fn to_candle(
+        &self,
+        interval: Interval,
+        adjusted: bool,
+    ) -> Result<Candle, RepoError> {
         let d = |s: &String| Decimal::from_str(s).map_err(|_| RepoError::Corrupt);
         let [open, high, low, close] = &self.ohlc;
         Candle::new(

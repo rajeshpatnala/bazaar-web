@@ -24,6 +24,12 @@ Plan: `.agents/plans/F12-candle-store.md`. Status: in progress.
 - The work runs in `spawn_blocking` (`tokio` is now a normal dependency of `store`). One store per root: the write lock is per instance.
 - New dependency `duckdb` (owner-approved, bundled + parquet, `~` patch pin).
 
+## Slice 3 (DuckDB read side)
+- `store/src/duck.rs`: `DuckStore` implements `CandleSource` over the files `ParquetStore` writes. One in-memory DuckDB connection per read, on `spawn_blocking`; the exact `.parquet` file is opened (no directory glob), so a leftover `*.tmp` is never read. Path and bounds are bound parameters; the symbol uses the writer's uppercase allowlist (unsafe symbol is `Other`). Read capped at 1,000,000 rows (`TooLarge`).
+- `last_candle_ts` is `MAX(close_ns)` of the file, so it cannot lag a write (AC 6, CR-111-4). A damaged file or value is `Corrupt`.
+- `DuckStore::ping()` for `check-connections` (`OK duckdb`); the CLI line itself is not wired yet (outside this slice).
+- `store/tests/candles_parquet.rs`: shared contract suite, SQLite equivalence, leftover tmp, corrupt file and value, hostile symbol.
+
 ## Deferred
 - Corrupt-value and leftover `*.tmp` cases are adapter-specific; slices 1 and 2.
 - Parquet/DuckDB needs owner approval of new dependencies.
