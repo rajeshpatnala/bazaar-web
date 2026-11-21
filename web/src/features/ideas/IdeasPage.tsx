@@ -3,6 +3,7 @@ import { Card } from "../../shared/ui/Card";
 import { Disclosure } from "../../shared/ui/Disclosure";
 import { Money } from "../../shared/ui/Money";
 import { EmptyView, ErrorView, LoadingView } from "../../shared/ui/StateViews";
+import { formatIstIso } from "../../shared/lib/format-ist";
 import { Tag } from "../../shared/ui/Tag";
 import { ideasQuery } from "./queries";
 import type { Idea } from "./types";
@@ -19,7 +20,7 @@ export function IdeaCard({ idea, action }: { idea: Idea; action?: React.ReactNod
         {idea.data_delayed && <Tag tone="warn">Data delayed</Tag>}
       </div>
       <dl className="idea-figures">
-        <dt>Max loss (shown first)</dt>
+        <dt>Max loss</dt>
         <dd>
           <Money value={idea.max_loss} />
         </dd>
@@ -40,8 +41,8 @@ export function IdeaCard({ idea, action }: { idea: Idea; action?: React.ReactNod
       </dl>
       <Disclosure summary="Why this idea?">
         <ul>
-          {idea.why.map((w) => (
-            <li key={w}>{w}</li>
+          {idea.why.map((w, n) => (
+            <li key={`${idea.id}-${n}`}>{w}</li>
           ))}
         </ul>
       </Disclosure>
@@ -56,6 +57,7 @@ export function IdeasPage() {
     <section>
       <h2>Ideas to consider today</h2>
       <p className="lbl">These are suggestions to review, not forecasts. Any of them can lose money.</p>
+      {q.data && <p className="lbl">As of {formatIstIso(q.data.as_of)}</p>}
       {q.isPending && <LoadingView label="Loading ideas..." />}
       {q.isError && <ErrorView message="Could not load ideas." onRetry={() => void q.refetch()} />}
       {q.data && q.data.ideas.length === 0 && (

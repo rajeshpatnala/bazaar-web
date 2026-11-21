@@ -48,4 +48,15 @@ describe("Ideas page", () => {
     await userEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByText("No high-quality setups today")).toBeInTheDocument();
   });
+
+  it("shows the as-of time in IST", async () => {
+    renderApp({ route: "/ideas" });
+    expect(await screen.findByText(/As of 19 Nov, 10:00 IST/)).toBeInTheDocument();
+  });
+
+  it("treats a wrongly shaped response as an error", async () => {
+    server.use(http.get("/api/v1/ideas", () => HttpResponse.json({ nope: true })));
+    renderApp({ route: "/ideas" });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load ideas.");
+  });
 });
