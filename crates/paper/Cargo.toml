@@ -11,3 +11,13 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+bazaar-core = { path = "../core" }
+rust_decimal.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+bazaar-core = { path = "../core", features = ["test-util"] }
+chrono.workspace = true
+chrono-tz.workspace = true
+proptest.workspace = true

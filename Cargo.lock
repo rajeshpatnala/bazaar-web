@@ -546,6 +546,15 @@ dependencies = [
 [[package]]
 name = "bazaar-paper"
 version = "0.1.0"
+dependencies = [
+ "bazaar-core",
+ "chrono",
+ "chrono-tz",
+ "proptest",
+ "rust_decimal",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "bazaar-regime"
