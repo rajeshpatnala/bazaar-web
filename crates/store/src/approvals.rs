@@ -343,7 +343,11 @@ mod tests {
             s.approval_decide(&t1, ApprovalDecision::Approved, "a", &d, test_chain),
             s.approval_decide(&t2, ApprovalDecision::Approved, "b", &d, test_chain)
         );
-        assert_eq!([a.is_ok(), b.is_ok()].iter().filter(|x| **x).count(), 1);
+        // Note: the pool has max_connections(1), so join! serialises the two calls; the loser
+        // fails on the unique index / stale version, not on real write contention.
+        let (ok, lost) = if a.is_ok() { (a, b) } else { (b, a) };
+        assert_eq!(ok, Ok(2));
+        assert_eq!(lost, Err(RepoError::Conflict));
         assert_eq!(count(&s, "approvals").await, 1);
     }
 
@@ -459,6 +463,129 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(again, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn failing_audit_insert_as_last_write_rolls_back_decide() {
+        let s = store_with_order().await;
+        sqlx::query(
+            "CREATE TRIGGER boom BEFORE INSERT ON audit_log \
+             BEGIN SELECT RAISE(ABORT, 'boom'); END",
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        let r = s
+            .approval_decide(
+                &tr("o1", 1, "approve", "Approved"),
+                ApprovalDecision::Approved,
+                "me",
+                &test_draft("approval"),
+                test_chain,
+            )
+            .await;
+        assert!(r.is_err());
+        assert_eq!(count(&s, "approvals").await, 0);
+        let o = s.order_get("o1").await.unwrap().unwrap();
+        assert_eq!((o.state.as_str(), o.version), ("PendingApproval", 1));
+        assert_eq!(s.order_events("o1").await.unwrap().len(), 1);
+        assert_eq!(count(&s, "audit_log").await, 0);
+    }
+
+    #[tokio::test]
+    async fn failing_audit_insert_rolls_back_reconcile() {
+        let s = store_with_order().await;
+        s.approval_record("o1", ApprovalDecision::Approved, "me", 3)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER boom BEFORE INSERT ON audit_log \
+             BEGIN SELECT RAISE(ABORT, 'boom'); END",
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        let r = s
+            .approvals_reconcile("PendingApproval", "Expired", 9, "t", test_chain)
+            .await;
+        assert!(r.is_err());
+        let o = s.order_get("o1").await.unwrap().unwrap();
+        assert_eq!((o.state.as_str(), o.version), ("PendingApproval", 1));
+        assert_eq!(s.order_events("o1").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn audit_chain_links_across_callers() {
+        let s = store_with_order().await;
+        s.order_create("o2", "PendingApproval", "{}", 2)
+            .await
+            .unwrap();
+        s.order_create("o3", "PendingApproval", "{}", 3)
+            .await
+            .unwrap();
+        // Three different writers: decide, plain advance, reconcile.
+        s.approval_decide(
+            &tr("o1", 1, "approve", "Approved"),
+            ApprovalDecision::Approved,
+            "me",
+            &test_draft("approval"),
+            test_chain,
+        )
+        .await
+        .unwrap();
+        s.order_advance(
+            &tr("o2", 1, "cancel", "Cancelled"),
+            &test_draft("order"),
+            test_chain,
+        )
+        .await
+        .unwrap();
+        s.approval_record("o3", ApprovalDecision::Declined, "me", 4)
+            .await
+            .unwrap();
+        s.approvals_reconcile("PendingApproval", "Expired", 9, "t", test_chain)
+            .await
+            .unwrap();
+        let rows: Vec<(i64, Vec<u8>, Vec<u8>)> =
+            sqlx::query_as("SELECT seq, prev_hash, hash FROM audit_log ORDER BY seq")
+                .fetch_all(&s.pool)
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].1, vec![0_u8; 32]);
+        for (i, r) in rows.iter().enumerate() {
+            assert_eq!(r.0, i64::try_from(i).unwrap() + 1);
+            if i > 0 {
+                assert_eq!(r.1, rows[i - 1].2);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_handles_several_orders_including_declined() {
+        let s = store_with_order().await;
+        s.order_create("o2", "PendingApproval", "{}", 2)
+            .await
+            .unwrap();
+        s.order_create("o3", "PendingApproval", "{}", 3)
+            .await
+            .unwrap();
+        s.approval_record("o1", ApprovalDecision::Approved, "me", 4)
+            .await
+            .unwrap();
+        s.approval_record("o3", ApprovalDecision::Declined, "me", 5)
+            .await
+            .unwrap();
+        let fixed = s
+            .approvals_reconcile("PendingApproval", "Expired", 9, "t", test_chain)
+            .await
+            .unwrap();
+        assert_eq!(fixed, ["o1", "o3"]);
+        assert_eq!(
+            s.order_get("o2").await.unwrap().unwrap().state,
+            "PendingApproval"
+        );
+        assert_eq!(count(&s, "audit_log").await, 2);
     }
 
     #[test]
