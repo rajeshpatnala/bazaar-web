@@ -54,7 +54,11 @@ async fn parquet_failed_write_leaves_earlier_data_intact() {
         .await;
     assert_eq!(res, Err(RepoError::Corrupt));
     assert_eq!(std::fs::read(&f).unwrap(), b"junk");
-    assert!(!all(dir.path()).iter().any(|n| n.ends_with(".tmp")));
+    assert!(!all(dir.path()).iter().any(|n| {
+        std::path::Path::new(n)
+            .extension()
+            .is_some_and(|e| e == "tmp")
+    }));
     let got = r
         .read_candles(&range("ABC", at(9, 0), at(15, 30), false))
         .await
@@ -112,7 +116,7 @@ async fn hostile_symbols_on_write_are_refused_and_create_nothing() {
             "parquet write accepted {s:?}"
         );
     }
-    assert!(all(dir.path()).is_empty());
+    assert_eq!(all(dir.path()), Vec::<String>::new());
     // allowed shapes with & and - work
     w.write_candles("M&M", &fixture_candles()).await.unwrap();
     w.write_candles("BAJAJ-AUTO", &fixture_candles())
@@ -145,12 +149,11 @@ async fn hostile_symbols_refused_on_read_both_adapters() {
         Err(RepoError::TooLarge)
     );
     for ok in ["..", "a'b", "abc"] {
-        assert!(
-            s.read_candles(&range(ok, at(9, 0), at(15, 30), false))
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        let got = s
+            .read_candles(&range(ok, at(9, 0), at(15, 30), false))
+            .await
+            .unwrap();
+        assert_eq!(got, Vec::<Candle>::new());
     }
 }
 
