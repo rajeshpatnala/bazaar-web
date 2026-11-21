@@ -17,7 +17,7 @@
 //! `docs/features/F11-scanner.md`. Step 4 must derive `families_total` from the enabled
 //! strategies' families in config, never from the hits.
 
-use bazaar_core::config::{ScannerConfig, ScannerWeights};
+use bazaar_core::config::{EventKind, ScannerConfig, ScannerWeights};
 use bazaar_regime::Fit;
 use chrono::{DateTime, NaiveDate};
 use chrono_tz::Tz;
@@ -87,6 +87,7 @@ fn usable(e: &Evidence) -> bool {
         && e.profit_factor.is_finite()
         && e.profit_factor >= 0.0
         && e.win_rate.is_finite()
+        && (0.0..=1.0).contains(&e.win_rate)
         && e.avg_r.is_finite()
         && e.max_drawdown_pct.is_finite()
 }
@@ -103,12 +104,12 @@ fn evidence_component(own: Option<&Evidence>, wide: Option<&Evidence>, cfg: &Sca
     let Some(own) = own.filter(|e| usable(e)) else {
         return 0.0;
     };
-    let prior = wide
-        .filter(|w| usable(w) && w.trades >= cfg.min_trades_evidence)
-        .map_or(1.0, |w| w.profit_factor);
     if own.avg_r <= 0.0 {
         return 0.0; // no positive expectancy: no evidence credit
     }
+    let prior = wide
+        .filter(|w| usable(w) && w.trades >= cfg.min_trades_evidence)
+        .map_or(1.0, |w| w.profit_factor);
     let n = f64::from(own.trades);
     let weight = n / (n + f64::from(cfg.shrink_k));
     quality(weight.mul_add(own.profit_factor, (1.0 - weight) * prior))
@@ -165,6 +166,20 @@ fn primary(hits: &[Hit]) -> Option<&Hit> {
     })
 }
 
+/// Plain-English label for an event kind (never the Debug repr). The note is config text and
+/// must be escaped when rendered (step 4 acceptance, SEC-118-1).
+fn event_label(k: EventKind) -> &'static str {
+    match k {
+        EventKind::Results => "results",
+        EventKind::RbiPolicy => "RBI policy",
+        EventKind::Budget => "budget",
+        EventKind::Expiry => "expiry",
+        EventKind::ExDate => "ex-date",
+        EventKind::IndexRebalance => "index rebalance",
+        EventKind::SpecialSession => "special session",
+    }
+}
+
 /// Penalty points and warnings from events inside the window. An empty calendar proves nothing:
 /// no bonus, and a warning that dates were not checked.
 fn event_penalty(c: &Candidate, cx: &ScoreContext<'_>) -> (f64, Vec<Warning>) {
@@ -185,8 +200,10 @@ fn event_penalty(c: &Candidate, cx: &ScoreContext<'_>) -> (f64, Vec<Warning>) {
         }
         nearest = Some(nearest.map_or(days, |n| n.min(days)));
         warnings.push(Warning::EventNearby(format!(
-            "{:?} on {}: {}",
-            e.kind, e.date, e.note
+            "{} on {}: {}",
+            event_label(e.kind),
+            e.date,
+            e.note
         )));
     }
     let max = cx.cfg.event_penalty_max_points.clamp(0.0, 100.0);

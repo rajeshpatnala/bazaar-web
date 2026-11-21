@@ -103,11 +103,16 @@ struct FakeEvidence {
     own: Vec<(u64, Evidence)>,
     wide: Option<Evidence>,
     asked: Mutex<Vec<DateTime<Tz>>>,
+    /// When set, evidence exists only for this strategy id.
+    only_strategy: Option<&'static str>,
 }
 
 impl EvidenceSource for FakeEvidence {
-    fn for_instrument(&self, _: &str, token: u64, as_of: DateTime<Tz>) -> Option<Evidence> {
+    fn for_instrument(&self, id: &str, token: u64, as_of: DateTime<Tz>) -> Option<Evidence> {
         self.asked.lock().unwrap().push(as_of);
+        if self.only_strategy.is_some_and(|s| s != id) {
+            return None;
+        }
         self.own
             .iter()
             .find(|(t, _)| *t == token)
@@ -229,8 +234,8 @@ fn in_sample_or_gross_evidence_counts_as_none() {
 }
 
 #[test]
-fn low_evidence_name_never_outranks_a_provisional_one() {
-    // LOW: three families agree, huge liquidity, no evidence. PROV: one family, thin liquidity,
+fn low_evidence_name_never_outranks_a_proven_one() {
+    // LOW: three families agree, huge liquidity, no evidence. PROVEN: one family, thin liquidity,
     // 30 trades at a modest profit factor.
     let low = cand(
         "AAA",
@@ -324,7 +329,7 @@ fn golden_ranks_on_the_fixture() {
             10,
         ),
         cand("BETA", 2, vec![hit("b", "trend", false)], 10),
-        cand("GAMMA", 3, vec![hit("c", "reversion", true)], 10),
+        cand("GAMMA", 3, vec![hit("c", "reversion", true)], 5),
     ];
     let r = run(
         cands,
@@ -336,12 +341,11 @@ fn golden_ranks_on_the_fixture() {
     );
     // ALPHA: conf 2/3, regime 1, liq 1, evid q(0.667*2+0.333*1=1.667)=0.667 -> 100*(0.2+0.25+0.15+0.2)=80.
     // BETA:  conf 1/3, regime 1, liq 1, evid q(0.5*1.6+0.5=1.3)=0.3 -> 100*(0.1+0.25+0.15+0.09)=59 (proven).
-    // GAMMA: conf 1/3, regime .5, liq 1, no evid -> 100*(0.1+0.125+0.15)=37.5 -> 38. NOTE: this
-    // sits exactly on a .5 boundary and relies on round-half-away-from-zero (IEEE-exact today).
+    // GAMMA: conf 1/3, regime .5, liq ln5/ln10=0.699, no evid -> 100*(0.1+0.125+0.1048)=32.98 -> 33.
     assert_eq!(names(&r), vec!["ALPHA", "BETA", "GAMMA"]);
     assert_eq!(
         r.iter().map(|s| s.score).collect::<Vec<_>>(),
-        vec![80, 59, 38]
+        vec![80, 59, 33]
     );
     assert!(!r[0].low_evidence && !r[1].low_evidence && r[2].low_evidence);
 }
@@ -595,4 +599,44 @@ fn event_on_day_five_penalises_and_day_six_does_not() {
     };
     assert!((run_with(5)[0].components.event_penalty - max / 6.0).abs() < 1e-9);
     assert!(run_with(6)[0].components.event_penalty.abs() < 1e-12);
+}
+
+#[test]
+fn evidence_is_looked_up_for_the_primary_hits_strategy() {
+    // "b" has the higher reward:risk, so it is primary; only "b" has proven evidence.
+    let mut a = hit("a", "trend", false);
+    a.signal.reference_rr = Decimal::from(1);
+    let mut b = hit("b", "breakout", false);
+    b.signal.reference_rr = Decimal::from(2);
+    let evidence = FakeEvidence {
+        own: vec![(1, ev(60, 2.0))],
+        only_strategy: Some("b"),
+        ..FakeEvidence::default()
+    };
+    let r = run(
+        vec![cand("AAA", 1, vec![a, b], 10)],
+        &evidence,
+        &FakeEvents::default(),
+    );
+    assert!(!r[0].low_evidence && r[0].evidence.is_some());
+}
+
+#[test]
+fn win_rate_outside_zero_one_is_unusable_and_event_text_is_plain() {
+    let mut e = ev(100, 2.0);
+    e.win_rate = 1.5;
+    assert!(!usable(&e));
+    let r = run(
+        vec![cand("AAA", 1, vec![hit("a", "trend", false)], 10)],
+        &FakeEvidence::default(),
+        &FakeEvents {
+            rows: vec![event(1, "AAA")],
+            empty: false,
+        },
+    );
+    assert!(
+        r[0].warnings
+            .iter()
+            .any(|w| matches!(w, Warning::EventNearby(t) if t.starts_with("results on ")))
+    );
 }
