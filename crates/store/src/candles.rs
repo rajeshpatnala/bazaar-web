@@ -145,8 +145,9 @@ impl CandleSink for SqliteStore {
     }
 }
 
-impl CandleSource for SqliteStore {
-    async fn read_candles(&self, range: &CandleRange) -> Result<Vec<Candle>, RepoError> {
+impl SqliteStore {
+    /// `read_candles` with an injectable row cap (the public path uses `MAX_READ_ROWS`).
+    async fn read_capped(&self, range: &CandleRange, cap: usize) -> Result<Vec<Candle>, RepoError> {
         check_symbol(&range.symbol)?;
         let rows = sqlx::query(READ)
             .bind(&range.symbol)
@@ -154,14 +155,20 @@ impl CandleSource for SqliteStore {
             .bind(i64::from(range.adjusted))
             .bind(to_ns(&range.from)?)
             .bind(to_ns(&range.to)?)
-            .bind(i64::try_from(MAX_READ_ROWS + 1).map_err(|_| RepoError::Other)?)
+            .bind(i64::try_from(cap + 1).map_err(|_| RepoError::Other)?)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| map_err(&e))?;
-        if rows.len() > MAX_READ_ROWS {
+        if rows.len() > cap {
             return Err(RepoError::TooLarge);
         }
         rows.iter().map(to_candle).collect()
+    }
+}
+
+impl CandleSource for SqliteStore {
+    async fn read_candles(&self, range: &CandleRange) -> Result<Vec<Candle>, RepoError> {
+        self.read_capped(range, MAX_READ_ROWS).await
     }
 
     async fn last_candle_ts(
@@ -179,5 +186,72 @@ impl CandleSource for SqliteStore {
             .map_err(|e| map_err(&e))?;
         let last: Option<i64> = row.try_get("last").map_err(|_| RepoError::Corrupt)?;
         Ok(last.map(from_ns))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal::Decimal;
+
+    fn t(m: u32) -> DateTime<Tz> {
+        Kolkata.with_ymd_and_hms(2026, 1, 5, 9, m, 0).unwrap()
+    }
+
+    fn bar(m: u32) -> Candle {
+        let p = Decimal::from(100);
+        Candle::new(t(m), Interval::Min5, [p; 4], 1, false).unwrap()
+    }
+
+    fn rng() -> CandleRange {
+        CandleRange::new("ABC", Interval::Min5, t(0), t(59), false)
+    }
+
+    #[tokio::test]
+    async fn read_cap_is_enforced_and_exact_cap_passes() {
+        let s = SqliteStore::open_in_memory().await.unwrap();
+        s.write_candles("ABC", &[bar(20), bar(25), bar(30)])
+            .await
+            .unwrap();
+        assert_eq!(s.read_capped(&rng(), 3).await.unwrap().len(), 3);
+        assert_eq!(s.read_capped(&rng(), 2).await, Err(RepoError::TooLarge));
+        assert_eq!(RepoError::TooLarge.safe_reason(), "too_large");
+    }
+
+    #[test]
+    fn unknown_interval_label_is_corrupt_and_known_ones_round_trip() {
+        assert_eq!(parse_interval("bogus"), Err(RepoError::Corrupt));
+        assert_eq!(parse_interval(""), Err(RepoError::Corrupt));
+        assert_eq!(parse_interval("min5"), Ok(Interval::Min5));
+        assert_eq!(parse_interval("day"), Ok(Interval::Day));
+    }
+
+    #[tokio::test]
+    async fn extreme_close_ns_reads_without_panic_and_last_ts_ignores_bad_prices() {
+        let s = SqliteStore::open_in_memory().await.unwrap();
+        s.write_candles("ABC", &[bar(20)]).await.unwrap();
+        sqlx::query("UPDATE candles SET close = 'junk'")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        // freshness marker only needs the key column, so damaged prices do not hide it
+        assert_eq!(
+            s.last_candle_ts("ABC", Interval::Min5, false).await,
+            Ok(Some(t(20)))
+        );
+        assert_eq!(s.read_candles(&rng()).await, Err(RepoError::Corrupt));
+        // a row at the i64 extremes decodes to a time (or is Corrupt), never a panic
+        sqlx::query("UPDATE candles SET close = '100', close_ns = 9223372036854775807")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        let wide = CandleRange::new("ABC", Interval::Min5, t(0), t(0), false);
+        assert_eq!(s.read_candles(&wide).await, Ok(vec![]));
+        assert!(
+            s.last_candle_ts("ABC", Interval::Min5, false)
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 }
