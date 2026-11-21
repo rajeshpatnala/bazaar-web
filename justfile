@@ -278,7 +278,8 @@ ui-dev:
     #!/usr/bin/env bash
     set -euo pipefail
     cargo build -q -p bazaar-server
-    target/debug/bazaar-server --no-open &
+    # `serve` has no option to skip the browser: it opens the printed :5173 link itself (may race Vite startup; reload once).
+    target/debug/bazaar-server serve &
     server=$!
     trap 'kill $server 2>/dev/null' EXIT
     pnpm -C web dev

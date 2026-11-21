@@ -25,8 +25,8 @@ pub use charges::{
 pub use error::ConfigError;
 pub use files::{
     ComplianceConfig, DataConfig, Event, EventKind, EventsConfig, MAX_EVENTS,
-    MAX_SYMBOLS_PER_WATCHLIST, MAX_TEXT_CHARS, MAX_WATCHLISTS, StrategiesConfig, Watchlist,
-    WatchlistsConfig,
+    MAX_SYMBOLS_PER_WATCHLIST, MAX_TEXT_CHARS, MAX_WATCHLISTS, ScannerConfig, ScannerWeights,
+    StrategiesConfig, Watchlist, WatchlistsConfig,
 };
 pub use risk::{
     Behaviour, CooloffUntil, ExecutionSection, Exposure, HardLimits, Limits, ModeSection,
@@ -223,7 +223,7 @@ pub struct Config {
 impl Config {
     /// Load and validate every file in `dir`; the first error wins.
     pub fn load(dir: &Path) -> Result<Self, ConfigError> {
-        Ok(Self {
+        let cfg = Self {
             risk: load(dir)?,
             charges: load(dir)?,
             strategies: load(dir)?,
@@ -232,7 +232,30 @@ impl Config {
             calendar: load(dir)?,
             data: load(dir)?,
             compliance: load(dir)?,
-        })
+        };
+        cfg.check_scanner_ceilings()?;
+        Ok(cfg)
+    }
+
+    /// The scanner's ban-list age may not exceed the G06 ceiling in `risk.toml`
+    /// (`hard_limits.max_ban_list_age_hours`), so it cannot loosen the gate's bound.
+    fn check_scanner_ceilings(&self) -> Result<(), ConfigError> {
+        let ceiling = self.risk.hard_limits.max_ban_list_age_hours;
+        let min_oos = self.risk.gate.evidence.min_oos_trades;
+        match &self.strategies.scanner {
+            Some(s) if s.max_ban_list_age_hours > ceiling => Err(ConfigError::invalid(
+                StrategiesConfig::FILE,
+                "scanner.max_ban_list_age_hours",
+                format!("is above the risk.toml hard_limits ceiling ({ceiling})"),
+            )),
+            // The badge may not call a thinner record "enough" than the gate (G01).
+            Some(s) if s.min_trades_evidence < min_oos => Err(ConfigError::invalid(
+                StrategiesConfig::FILE,
+                "scanner.min_trades_evidence",
+                format!("is below risk.toml gate.evidence.min_oos_trades ({min_oos})"),
+            )),
+            _ => Ok(()),
+        }
     }
 
     /// Staleness of every file against `today` (from the `Clock`, never the system).
@@ -287,6 +310,28 @@ mod tests {
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    #[test]
+    fn scanner_ban_age_may_not_exceed_g06_ceiling() {
+        let mut c = Config::load(Path::new(SHIPPED)).unwrap();
+        let ceiling = c.risk.hard_limits.max_ban_list_age_hours;
+        let s = c.strategies.scanner.as_mut().unwrap();
+        s.max_ban_list_age_hours = ceiling;
+        assert!(c.check_scanner_ceilings().is_ok());
+        c.strategies
+            .scanner
+            .as_mut()
+            .unwrap()
+            .max_ban_list_age_hours = ceiling + 1;
+        assert!(c.check_scanner_ceilings().is_err());
+        let min_oos = c.risk.gate.evidence.min_oos_trades;
+        let s = c.strategies.scanner.as_mut().unwrap();
+        s.max_ban_list_age_hours = ceiling;
+        s.min_trades_evidence = min_oos;
+        assert!(c.check_scanner_ceilings().is_ok());
+        c.strategies.scanner.as_mut().unwrap().min_trades_evidence = min_oos - 1;
+        assert!(c.check_scanner_ceilings().is_err());
     }
 
     #[test]

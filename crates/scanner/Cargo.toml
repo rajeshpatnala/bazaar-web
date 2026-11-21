@@ -11,3 +11,10 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+bazaar-core = { path = "../core" }
+bazaar-regime = { path = "../regime" }
+bazaar-risk = { path = "../risk" }
+chrono.workspace = true
+chrono-tz.workspace = true
+rust_decimal.workspace = true
+thiserror.workspace = true

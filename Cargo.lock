@@ -311,6 +311,7 @@ dependencies = [
  "sha2",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -369,6 +370,15 @@ dependencies = [
 [[package]]
 name = "bazaar-scanner"
 version = "0.1.0"
+dependencies = [
+ "bazaar-core",
+ "bazaar-regime",
+ "bazaar-risk",
+ "chrono",
+ "chrono-tz",
+ "rust_decimal",
+ "thiserror",
+]
 
 [[package]]
 name = "bazaar-server"
