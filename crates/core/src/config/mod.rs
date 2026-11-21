@@ -6,6 +6,7 @@
 
 mod calendar;
 mod charges;
+mod data;
 mod error;
 mod files;
 mod risk;
@@ -22,11 +23,12 @@ pub use charges::{
     Brokerage, ChargeExchange, ChargeSegment, ChargeSide, ChargesConfig, ChargesMeta, DpCharge,
     GstRate, HistoryPolicy, MAX_RATE_SETS, NoRateSet, OptionExercise, RateSet, TurnoverBasis,
 };
+pub use data::{DataConfig, HistorySection, KiteSection, NseSection, SpanDays, StalenessSection};
 pub use error::ConfigError;
 pub use files::{
-    ComplianceConfig, DataConfig, Event, EventKind, EventsConfig, MAX_EVENTS,
-    MAX_SYMBOLS_PER_WATCHLIST, MAX_TEXT_CHARS, MAX_WATCHLISTS, ScannerConfig, ScannerWeights,
-    StrategiesConfig, Watchlist, WatchlistsConfig,
+    ComplianceConfig, Event, EventKind, EventsConfig, MAX_EVENTS, MAX_SYMBOLS_PER_WATCHLIST,
+    MAX_TEXT_CHARS, MAX_WATCHLISTS, ScannerConfig, ScannerWeights, StrategiesConfig, Watchlist,
+    WatchlistsConfig,
 };
 pub use risk::{
     Behaviour, CooloffUntil, ExecutionSection, Exposure, HardLimits, Limits, ModeSection,

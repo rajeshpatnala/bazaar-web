@@ -1,5 +1,62 @@
-# data.toml: placeholder. It holds no data and is never reported as fresh (no verified_on on purpose).
-# Replace it with real, dated, sourced content and remove `placeholder`.
+# data.toml: endpoints, host allowlists, timeouts, rate limits and staleness windows for the
+# read-only market data adapters (F3). No secret lives here.
+#
+# NOT YET CHECKED AGAINST THE PROVIDERS' DOCS: the values below were written from the
+# developer's recollection of the Kite Connect v3 and NSE archive conventions on 2026-11-21
+# (no network access in that run). Every key listed in `unverified` must be compared with the
+# provider docs by the owner before the first real fetch; then remove it from the list and
+# update `verified_on`. Hosts the owner confirmed: nseindia.in (calendar). The two hosts below
+# for Kite and nsearchives.nseindia.com await the owner's confirmation (F3 owner input 4).
 schema_version = 1
-placeholder = true
-source = "placeholder: no data yet; to be filled by the market-data feature (bz-market-data)"
+verified_on = "2026-11-21"
+source = "https://kite.trade/docs/connect/v3/ and NSE archives (nsearchives.nseindia.com); written from memory, see unverified"
+unverified = [
+  "kite.api_base", "kite.login_url", "kite.api_version", "kite.allowed_hosts",
+  "kite.historical_per_sec", "kite.default_per_sec", "kite.max_quote_batch",
+  "kite.token_expiry_hour_ist", "kite.span_days",
+  "nse.allowed_hosts", "nse.bhavcopy_url_template", "nse.banlist_url_template",
+  "nse.max_download_bytes", "staleness", "history",
+]
+
+[kite]
+api_base = "https://api.kite.trade"
+login_url = "https://kite.zerodha.com/connect/login"
+api_version = "3"
+allowed_hosts = ["api.kite.trade", "kite.zerodha.com"]
+connect_timeout_secs = 5
+request_timeout_secs = 20
+max_response_bytes = 16777216
+historical_per_sec = 3
+default_per_sec = 10
+max_quote_batch = 500
+# The access token expires at about 06:00 IST on the next day.
+token_expiry_hour_ist = 6
+token_expiry_minute_ist = 0
+
+# Largest span (days) one historical call may cover.
+[kite.span_days]
+min1 = 60
+min3 = 100
+min5 = 100
+min10 = 100
+min15 = 200
+min30 = 200
+min60 = 400
+day = 2000
+
+[nse]
+allowed_hosts = ["nsearchives.nseindia.com"]
+# {yyyymmdd} and {ddmmyyyy} are replaced by the trade date. Ban list URL is from memory.
+bhavcopy_url_template = "https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{yyyymmdd}_F_0000.csv.zip"
+banlist_url_template = "https://nsearchives.nseindia.com/content/fo/fo_secban_{ddmmyyyy}.csv"
+request_timeout_secs = 30
+max_download_bytes = 33554432
+
+[staleness]
+bhavcopy_max_age_days = 4
+ban_list_max_age_hours = 24
+quote_max_age_secs = 10
+
+[history]
+daily_years = 3
+min15_years = 1

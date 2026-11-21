@@ -15,6 +15,7 @@ pub mod instrument;
 pub mod mode;
 pub mod money;
 pub mod ports;
+pub mod secret;
 pub mod segment;
 #[cfg(feature = "test-util")]
 pub mod testutil;

@@ -383,6 +383,99 @@ pub trait QuoteSource: Send + Sync {
     ) -> impl Future<Output = Result<QuoteSnapshot, SourceError>> + Send;
 }
 
+/// Why the token store failed: category only, never a path or the token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum TokenError {
+    /// The store could not be read or written (missing directory, permissions).
+    #[error("token store unavailable")]
+    Unavailable,
+    /// The stored value could not be decoded; treated as "no token", never repaired.
+    #[error("stored token is corrupt")]
+    Corrupt,
+}
+
+/// Where the broker access token lives between runs (see ADR 0002).
+///
+/// `load` returns the token even if expired (the caller checks `is_valid_at` with the `Clock`).
+/// Implementations write atomically with owner-only permissions and never log the value.
+pub trait TokenStore: Send + Sync {
+    /// The stored token, `None` if none was saved.
+    fn load(
+        &self,
+    ) -> impl Future<Output = Result<Option<crate::secret::AccessToken>, TokenError>> + Send;
+
+    /// Replace the stored token. All-or-nothing: on error the previous token is intact.
+    fn save(
+        &self,
+        token: &crate::secret::AccessToken,
+    ) -> impl Future<Output = Result<(), TokenError>> + Send;
+
+    /// Remove the stored token (logout or after the broker rejects it). No token is not an error.
+    fn clear(&self) -> impl Future<Output = Result<(), TokenError>> + Send;
+}
+
+#[cfg(test)]
+mod token_store_tests {
+    use super::*;
+    use crate::secret::{AccessToken, Secret};
+    use chrono::TimeZone;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct MemStore(Mutex<Option<(String, DateTime<Tz>)>>);
+
+    impl TokenStore for MemStore {
+        async fn load(&self) -> Result<Option<AccessToken>, TokenError> {
+            let g = self.0.lock().map_err(|_| TokenError::Unavailable)?;
+            Ok(g.as_ref()
+                .map(|(s, e)| AccessToken::new(Secret::new(s.clone()), *e)))
+        }
+        async fn save(&self, t: &AccessToken) -> Result<(), TokenError> {
+            *self.0.lock().map_err(|_| TokenError::Unavailable)? =
+                Some((t.secret().expose().to_owned(), t.expires_at()));
+            Ok(())
+        }
+        async fn clear(&self) -> Result<(), TokenError> {
+            *self.0.lock().map_err(|_| TokenError::Unavailable)? = None;
+            Ok(())
+        }
+    }
+
+    fn block<T>(f: impl Future<Output = T>) -> T {
+        let mut f = std::pin::pin!(f);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        match f.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(v) => v,
+            std::task::Poll::Pending => unreachable!("fake never pends"),
+        }
+    }
+
+    #[test]
+    fn save_load_clear_contract() {
+        let store = MemStore::default();
+        assert!(block(store.load()).unwrap().is_none());
+        let exp = chrono_tz::Asia::Kolkata
+            .with_ymd_and_hms(2026, 11, 22, 6, 0, 0)
+            .unwrap();
+        block(store.save(&AccessToken::new(Secret::new("t1".to_owned()), exp))).unwrap();
+        let got = block(store.load()).unwrap().unwrap();
+        assert_eq!(got.secret().expose(), "t1");
+        assert_eq!(got.expires_at(), exp);
+        block(store.clear()).unwrap();
+        block(store.clear()).unwrap();
+        assert!(block(store.load()).unwrap().is_none());
+    }
+
+    #[test]
+    fn token_errors_carry_no_detail() {
+        assert_eq!(TokenError::Corrupt.to_string(), "stored token is corrupt");
+        assert_eq!(
+            TokenError::Unavailable.to_string(),
+            "token store unavailable"
+        );
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unused_async_trait_impl)] // the fake has nothing to await
 mod tests {

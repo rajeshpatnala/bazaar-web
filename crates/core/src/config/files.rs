@@ -207,11 +207,6 @@ impl ScannerConfig {
     }
 }
 header_only!(
-    /// `data.toml`: rate limits and refresh windows (owner: `bz-market-data`).
-    DataConfig,
-    "data.toml"
-);
-header_only!(
     /// `compliance.toml`: live-phase checklist state (phase 9 only).
     ComplianceConfig,
     "compliance.toml"
@@ -367,7 +362,6 @@ mod tests {
     #[test]
     fn header_only_files_reject_tables() {
         let text = format!("{HEAD}[rates]\nstt = \"1\"\n");
-        assert!(parse_str::<DataConfig>(&text).is_err());
         assert!(parse_str::<ComplianceConfig>(&text).is_err());
     }
 
