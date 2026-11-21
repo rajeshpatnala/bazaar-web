@@ -21,6 +21,7 @@ Plan: `.agents/plans/F11-scanner.md`. Spec: `docs/strategy/F11-scanner-defaults.
 Evidence is empty until F9 runs (all recs `low_evidence`), no options structures, events calendar is a placeholder, equity long-only.
 
 ## Deferred
+- Step 2 review (PR 114): CR-114-3 defer: step 4 - Buy-versus-conflicting-signal report (AC3); strategies emit long Buy only until then. RISK-114-7 defer: step 4 gate - owner confirms `min_adv_inr` (G12) is not looser than `min_median_traded_value`; no code check before the owner confirms the figures.
 - Rank by capped confidence, absolute log liquidity scale, golden fixtures (strategist): steps 2-3.
 - QUAN-102-7: round or reject entry, stop and targets to the instrument-master tick (test the stop 96.0333 case): step 4 (the tick comes from the instrument master the sizing step reads).
 - QUAN-102-6 remainder: charges-inclusive `risk_rupees` formula and the `reward_risk`-to-first-target check: step 4 (`risk::size` caller, tested there).
