@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 bazaar-core = { path = "../core" }
+bazaar-regime = { path = "../regime" }
 bazaar-risk = { path = "../risk" }
 bazaar-strategies = { path = "../strategies" }
 chrono.workspace = true
@@ -23,6 +24,5 @@ thiserror.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
-bazaar-regime = { path = "../regime" }
 proptest.workspace = true
 serde_json.workspace = true

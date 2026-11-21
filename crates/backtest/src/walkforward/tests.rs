@@ -83,6 +83,7 @@ fn trade(at: DateTime<chrono_tz::Tz>, net: &str, r: &str) -> Trade {
         net_pnl: d(net),
         risk_inr: d("100"),
         r_multiple: Some(d(r)),
+        regime: None,
     }
 }
 
@@ -112,7 +113,6 @@ fn params<'a>(ch: &'a ChargesConfig, sets: &'a [ParamSet]) -> WfParams<'a> {
     WfParams {
         capital: d("100000"),
         sets,
-        regimes: 2,
         cost: CostModel::new(ch, HistoryPolicy::Strict, ChargeExchange::Nse),
     }
 }
@@ -180,7 +180,7 @@ fn is_runs_see_no_oos_bars_get_no_evidence_and_oos_gets_it() {
     let c = cfg();
     let folds = split(&b, &c).unwrap();
     let log: RefCell<Vec<Call>> = RefCell::new(Vec::new());
-    let mut run = |w: Window, cand: usize, s: &[Candle], ev: Option<EvidenceInputs>| {
+    let mut run = |w: Window, cand: usize, s: &WindowBars<'_>, ev: Option<EvidenceInputs>| {
         let last = trade_date(s.last().unwrap().close_time());
         log.borrow_mut().push((w, cand, last, ev));
         Ok(winner_loser(s, "50"))
@@ -212,7 +212,7 @@ fn oos_prices_cannot_change_is_selection_or_evidence() {
             *x = Candle::new(x.close_time(), Interval::Day, px, 1000, true).unwrap();
         }
         // The result is a function of the slice's closes, so an OOS bar in IS would change it.
-        let mut run = |_: Window, _: usize, s: &[Candle], _: Option<EvidenceInputs>| {
+        let mut run = |_: Window, _: usize, s: &WindowBars<'_>, _: Option<EvidenceInputs>| {
             let sum: Decimal = s.iter().map(Candle::close).sum();
             Ok(winner_loser(s, &(sum / d("1000")).round().to_string()))
         };
@@ -231,7 +231,7 @@ fn the_best_in_sample_candidate_alone_runs_oos_and_trials_are_counted() {
     let b = bars("100");
     let c = cfg();
     let log: RefCell<Vec<(Window, usize)>> = RefCell::new(Vec::new());
-    let mut run = |w: Window, cand: usize, s: &[Candle], _: Option<EvidenceInputs>| {
+    let mut run = |w: Window, cand: usize, s: &WindowBars<'_>, _: Option<EvidenceInputs>| {
         log.borrow_mut().push((w, cand));
         // Candidate 1 earns most in IS; ties would go to the lower index.
         Ok(winner_loser(s, ["40", "60", "60"][cand]))
@@ -253,7 +253,7 @@ fn a_candidate_missing_the_is_bar_gets_no_oos_run() {
     let b = bars("100");
     let c = cfg();
     let oos_runs = RefCell::new(0_u32);
-    let mut run = |w: Window, _: usize, s: &[Candle], _: Option<EvidenceInputs>| {
+    let mut run = |w: Window, _: usize, s: &WindowBars<'_>, _: Option<EvidenceInputs>| {
         if w == Window::OutOfSample {
             *oos_runs.borrow_mut() += 1;
         }
@@ -278,8 +278,9 @@ fn a_candidate_missing_the_is_bar_gets_no_oos_run() {
 fn pooled_oos_trades_feed_the_assessment_and_thin_folds_are_flagged() {
     let b = bars("100");
     let c = cfg();
-    let mut run =
-        |_: Window, _: usize, s: &[Candle], _: Option<EvidenceInputs>| Ok(winner_loser(s, "50"));
+    let mut run = |_: Window, _: usize, s: &WindowBars<'_>, _: Option<EvidenceInputs>| {
+        Ok(winner_loser(s, "50"))
+    };
     let (ch, ps) = (charges(), sets(1));
     let r = walk_forward(&c, &b, &params(&ch, &ps), &mut run).unwrap();
     // 2 trades per OOS fold: below thin_fold_trades (5); pooled 10 trades over 5 folds.
@@ -315,14 +316,15 @@ fn measurement_evidence_is_the_is_metrics_with_the_named_flag() {
 fn zero_candidates_and_run_errors_are_errors() {
     let b = bars("100");
     let c = cfg();
-    let mut ok =
-        |_: Window, _: usize, s: &[Candle], _: Option<EvidenceInputs>| Ok(winner_loser(s, "50"));
+    let mut ok = |_: Window, _: usize, s: &WindowBars<'_>, _: Option<EvidenceInputs>| {
+        Ok(winner_loser(s, "50"))
+    };
     let (ch, none, one) = (charges(), sets(0), sets(1));
     assert!(matches!(
         walk_forward(&c, &b, &params(&ch, &none), &mut ok),
         Err(BacktestError::Invalid(_))
     ));
-    let mut bad = |_: Window, _: usize, _: &[Candle], _: Option<EvidenceInputs>| {
+    let mut bad = |_: Window, _: usize, _: &WindowBars<'_>, _: Option<EvidenceInputs>| {
         Err(BacktestError::Overflow("test"))
     };
     assert!(matches!(
@@ -354,7 +356,7 @@ fn step_zero_and_unsorted_bars_are_refused() {
 fn oos_runs(c: &BacktestConfig, ps: &[ParamSet], is: (&str, &str), loss: (&str, &str)) -> u32 {
     let (b, ch) = (bars("100"), charges());
     let n = RefCell::new(0_u32);
-    let mut run = |w: Window, _: usize, s: &[Candle], _: Option<EvidenceInputs>| {
+    let mut run = |w: Window, _: usize, s: &WindowBars<'_>, _: Option<EvidenceInputs>| {
         if w == Window::OutOfSample {
             *n.borrow_mut() += 1;
         }
@@ -379,7 +381,7 @@ fn prior_trials_count_and_raise_the_bar() {
     let mut c = cfg();
     c.trials.prior_trials = 10;
     let n = RefCell::new(0_u32);
-    let mut run = |w: Window, _: usize, s: &[Candle], _: Option<EvidenceInputs>| {
+    let mut run = |w: Window, _: usize, s: &WindowBars<'_>, _: Option<EvidenceInputs>| {
         if w == Window::OutOfSample {
             *n.borrow_mut() += 1;
         }
@@ -404,13 +406,14 @@ fn ties_pick_the_lowest_index_and_selection_is_among_sets_that_clear_the_bar() {
     let (b, ch) = (bars("100"), charges());
     let c = cfg();
     let ps = sets(3);
-    let mut tie =
-        |_: Window, _: usize, s: &[Candle], _: Option<EvidenceInputs>| Ok(winner_loser(s, "50"));
+    let mut tie = |_: Window, _: usize, s: &WindowBars<'_>, _: Option<EvidenceInputs>| {
+        Ok(winner_loser(s, "50"))
+    };
     let r = walk_forward(&c, &b, &params(&ch, &ps), &mut tie).unwrap();
     assert!(r.folds.iter().all(|f| f.chosen == 0));
     // Set 0 earns more but misses the bar (PF 1.33 < 1.4 with 2 sets); set 1 clears it.
     let two = sets(2);
-    let mut pick = |_: Window, i: usize, s: &[Candle], _: Option<EvidenceInputs>| {
+    let mut pick = |_: Window, i: usize, s: &WindowBars<'_>, _: Option<EvidenceInputs>| {
         Ok(if i == 0 {
             wl(s, ("400", "4"), ("-300", "-3"))
         } else {
@@ -428,8 +431,9 @@ fn duplicate_parameter_sets_count_once_and_distinct_sets_count_each() {
     let mut ps = sets(2);
     ps.push(ps[0].clone());
     ps.push(ps[1].clone());
-    let mut run =
-        |_: Window, _: usize, s: &[Candle], _: Option<EvidenceInputs>| Ok(winner_loser(s, "50"));
+    let mut run = |_: Window, _: usize, s: &WindowBars<'_>, _: Option<EvidenceInputs>| {
+        Ok(winner_loser(s, "50"))
+    };
     let r = walk_forward(&c, &b, &params(&ch, &ps), &mut run).unwrap();
     assert_eq!(r.trials, 2);
     assert_eq!(r.param_sets, sets(2));
@@ -445,7 +449,7 @@ fn skipped_folds_do_not_count_as_folds_for_the_label() {
     let (b, ch, ps) = (bars("100"), charges(), sets(1));
     let c = cfg();
     let is_calls = RefCell::new(0_u32);
-    let mut run = |w: Window, _: usize, s: &[Candle], _: Option<EvidenceInputs>| {
+    let mut run = |w: Window, _: usize, s: &WindowBars<'_>, _: Option<EvidenceInputs>| {
         let at = s.last().unwrap().close_time();
         if w == Window::InSample {
             let first = *is_calls.borrow() == 0;
@@ -474,7 +478,7 @@ fn skipped_folds_do_not_count_as_folds_for_the_label() {
 fn costs_approximate_comes_from_the_cost_model() {
     let (b, ch, ps) = (bars("100"), charges(), sets(1));
     let c = cfg();
-    let mut run = |_: Window, _: usize, s: &[Candle], _: Option<EvidenceInputs>| {
+    let mut run = |_: Window, _: usize, s: &WindowBars<'_>, _: Option<EvidenceInputs>| {
         let at = s.last().unwrap().close_time();
         let mut t: Vec<Trade> = (0..29).map(|_| trade(at, "50", "0.5")).collect();
         t.push(trade(at, "-5", "-0.05"));
@@ -524,7 +528,7 @@ fn window_env_gives_oos_exactly_the_engine_evidence_and_is_the_selection_policy(
 fn the_result_vote_counts_skipped_folds_as_failures() {
     let (b, ch, ps) = (bars("100"), charges(), sets(1));
     let c = cfg();
-    let mut bad = |_: Window, _: usize, s: &[Candle], _: Option<EvidenceInputs>| {
+    let mut bad = |_: Window, _: usize, s: &WindowBars<'_>, _: Option<EvidenceInputs>| {
         Ok(wl(s, ("-10", "-0.1"), ("5", "0.05")))
     };
     let r = walk_forward(&c, &b, &params(&ch, &ps), &mut bad).unwrap();
@@ -538,13 +542,17 @@ fn the_gated_runner_gives_in_sample_runs_selection_only_evidence() {
     // 2024 bars predate the shipped rate sets, so the cost model uses latest-for-all.
     let mut params = params(&ch, &ps);
     params.cost = CostModel::new(&ch, HistoryPolicy::LatestForAll, ChargeExchange::Nse);
+    let cost = params.cost;
     let mut seen = Vec::new();
-    let mut run = |win: Window, _: usize, slice: &[Candle], env: GateEnv<'_>| {
+    let mut run = |win: Window, _: usize, slice: &WindowBars<'_>, env: GateEnv<'_>| {
         seen.push((win, env.evidence.oos_trades));
-        Ok(match win {
-            Window::InSample => wl(slice, ("10", "0.1"), ("-5", "-0.05")),
-            Window::OutOfSample => out(vec![]),
-        })
+        Ok(costed(
+            &cost,
+            match win {
+                Window::InSample => wl(slice, ("10", "0.1"), ("-5", "-0.05")),
+                Window::OutOfSample => out(vec![]),
+            },
+        ))
     };
     let (res, _) = walk_forward_gated(&cfg(), &bs, &params, "IT", &quiet, &mut run).unwrap();
     assert_eq!(res.folds.len(), 5);
@@ -597,7 +605,7 @@ fn gated_range(with_sell_candidate: bool) -> ChargesEvidence {
     let (bs, ch, ps) = (bars("100"), dated_charges(), sets(2));
     let mut params = params(&ch, &ps);
     params.cost = CostModel::new(&ch, HistoryPolicy::LatestForAll, ChargeExchange::Nse);
-    let mut run = |win: Window, i: usize, slice: &[Candle], _: GateEnv<'_>| {
+    let mut run = |win: Window, i: usize, slice: &WindowBars<'_>, _: GateEnv<'_>| {
         Ok(match (win, i) {
             (Window::InSample, 0) => one_sided(slice, LegSide::Buy),
             (Window::InSample, 1) if with_sell_candidate => one_sided(slice, LegSide::Sell),
@@ -630,11 +638,153 @@ fn the_gated_runner_spans_rate_sets_used_only_in_sample() {
 #[test]
 fn a_gated_run_with_no_trades_levies_no_charges() {
     let (bs, ch, ps) = (bars("100"), charges(), sets(1));
-    let mut run = |_: Window, _: usize, _: &[Candle], _: GateEnv<'_>| Ok(out(vec![]));
+    let mut run = |_: Window, _: usize, _: &WindowBars<'_>, _: GateEnv<'_>| Ok(out(vec![]));
     let (_, used) =
         walk_forward_gated(&cfg(), &bs, &params(&ch, &ps), "IT", &quiet, &mut run).unwrap();
     assert_eq!(
         used,
         ChargesEvidence::for_test(ChargesUsed::NoneLevied, HistoryPolicy::Strict)
     );
+}
+
+fn tagged(mut t: Trade, tag: &str) -> Trade {
+    t.regime = Some(tag.to_owned());
+    t
+}
+
+#[test]
+fn regimes_covered_counts_distinct_settled_tags_only() {
+    let at = bars("100").last().unwrap().close_time();
+    let t = |tag: Option<&str>| {
+        let base = trade(at, "10", "0.1");
+        tag.map_or(base.clone(), |g| tagged(base, g))
+    };
+    let many = |tag: &str, n: usize| vec![tagged(trade(at, "10", "0.1"), tag); n];
+    assert_eq!(regimes_covered(&[], 10), 0);
+    assert_eq!(regimes_covered(&[t(None), t(None)], 1), 0);
+    assert_eq!(
+        regimes_covered(&[t(Some("up")), t(Some("up")), t(None)], 1),
+        1
+    );
+    assert_eq!(regimes_covered(&[t(Some("up")), t(Some("down"))], 1), 2);
+    // QUAN-99-2: one trade does not make a regime.
+    let mut skewed = many("up", 99);
+    skewed.extend(many("down", 1));
+    assert_eq!(regimes_covered(&skewed, 10), 1);
+    skewed.extend(many("down", 9));
+    assert_eq!(regimes_covered(&skewed, 10), 2);
+}
+
+/// 5 folds x 20 OOS trades (18 winners, 2 losers): 100 R trades, tagged by the closure.
+fn label_with_tags(tags: [&str; 2]) -> EvidenceLabel {
+    let (b, c) = (bars("100"), cfg());
+    let mut run = |w: Window, _: usize, s: &WindowBars<'_>, _: Option<EvidenceInputs>| {
+        let at = s.last().unwrap().close_time();
+        if w == Window::InSample {
+            return Ok(winner_loser(s, "50"));
+        }
+        let trades = (0..20).map(|i| {
+            let (net, r) = if i < 18 {
+                ("50", "0.5")
+            } else {
+                ("-5", "-0.05")
+            };
+            tagged(trade(at, net, r), tags[i % 2])
+        });
+        Ok(out(trades.collect()))
+    };
+    let (ch, ps) = (charges(), sets(1));
+    let r = walk_forward(&c, &b, &params(&ch, &ps), &mut run).unwrap();
+    assert_eq!(r.pooled.r_trades, 100);
+    r.assessment.label
+}
+
+#[test]
+fn the_label_uses_regimes_from_trade_tags_not_caller_input() {
+    // Two tags across the OOS trades reach Trusted; one tag cannot, whatever the caller thinks.
+    assert_eq!(label_with_tags(["up", "down"]), EvidenceLabel::Trusted);
+    assert_eq!(label_with_tags(["up", "up"]), EvidenceLabel::Provisional);
+}
+
+#[test]
+fn windows_carry_history_only_warmup_strictly_before_the_window() {
+    let b = bars("100");
+    let mut c = cfg();
+    c.walk_forward.warmup_bars = 20;
+    let folds = split(&b, &c).unwrap();
+    let seen: RefCell<Vec<(usize, usize, usize)>> = RefCell::new(Vec::new());
+    let mut run = |_: Window, _: usize, s: &WindowBars<'_>, _: Option<EvidenceInputs>| {
+        let first = b.iter().position(|x| x.close_time() == s[0].close_time());
+        seen.borrow_mut()
+            .push((s.warmup(), s.with_history().len(), first.unwrap()));
+        // The deref is the window only; history precedes it bar for bar.
+        assert_eq!(s.with_history().len(), s.warmup() + s.len());
+        Ok(winner_loser(s, "50"))
+    };
+    let (ch, ps) = (charges(), sets(1));
+    walk_forward(&c, &b, &params(&ch, &ps), &mut run).unwrap();
+    let seen = seen.into_inner();
+    for (i, f) in folds.iter().enumerate() {
+        let (is, oos) = (&seen[2 * i], &seen[2 * i + 1]);
+        assert_eq!((is.0, is.2), (20, f.is.start));
+        assert_eq!((oos.0, oos.2), (20, f.oos.start));
+        assert_eq!(is.1, 20 + f.is.len());
+    }
+    // A history longer than the bars leaves an empty window, never a panic.
+    assert_eq!(WindowBars::new(&b[..5], 9).len(), 0);
+    assert_eq!(WindowBars::new(&b[..5], 0).len(), 5);
+}
+
+#[test]
+fn the_oos_gate_env_evidence_is_the_evidence_given_to_the_closure() {
+    let (bs, ch, ps) = (bars("100"), charges(), sets(1));
+    let mut params = params(&ch, &ps);
+    params.cost = CostModel::new(&ch, HistoryPolicy::LatestForAll, ChargeExchange::Nse);
+    let cost = params.cost;
+    let seen: RefCell<Vec<(Window, EvidenceInputs)>> = RefCell::new(Vec::new());
+    let mut run = |win: Window, _: usize, s: &WindowBars<'_>, env: GateEnv<'_>| {
+        seen.borrow_mut().push((win, env.evidence));
+        Ok(costed(&cost, winner_loser(s, "50")))
+    };
+    let (res, _) = walk_forward_gated(&cfg(), &bs, &params, "IT", &quiet, &mut run).unwrap();
+    let seen = seen.into_inner();
+    let oos: Vec<&EvidenceInputs> = seen
+        .iter()
+        .filter(|(w, _)| *w == Window::OutOfSample)
+        .map(|(_, e)| e)
+        .collect();
+    assert_eq!(oos.len(), 5);
+    for (ev, fold) in oos.iter().zip(&res.folds) {
+        assert_eq!(**ev, measurement_evidence(&fold.is));
+    }
+}
+
+/// The run's trades with the charges the cost model gives each leg (as a real engine records).
+fn costed(cost: &CostModel<'_>, mut o: RunOutput) -> RunOutput {
+    for t in &mut o.trades {
+        for f in [&mut t.entry, &mut t.exit] {
+            f.charges = cost.charges_excl_dp(&f.leg).unwrap();
+        }
+    }
+    o
+}
+
+#[test]
+fn the_gated_runner_refuses_charges_from_another_cost_model() {
+    let (bs, ch, ps) = (bars("100"), charges(), sets(1));
+    let mut params = params(&ch, &ps);
+    params.cost = CostModel::new(&ch, HistoryPolicy::LatestForAll, ChargeExchange::Nse);
+    let cost = params.cost;
+    // Correct charges pass; a tampered component, or a zero (never costed) run, is refused.
+    let mut ok = |_: Window, _: usize, s: &WindowBars<'_>, _: GateEnv<'_>| {
+        Ok(costed(&cost, winner_loser(s, "50")))
+    };
+    assert!(walk_forward_gated(&cfg(), &bs, &params, "IT", &quiet, &mut ok).is_ok());
+    let mut tampered = |_: Window, _: usize, s: &WindowBars<'_>, _: GateEnv<'_>| {
+        let mut o = costed(&cost, winner_loser(s, "50"));
+        o.trades[0].exit.charges.stt += d("1");
+        Ok(o)
+    };
+    let r = walk_forward_gated(&cfg(), &bs, &params, "IT", &quiet, &mut tampered);
+    assert!(matches!(r, Err(BacktestError::Invalid(_))));
 }

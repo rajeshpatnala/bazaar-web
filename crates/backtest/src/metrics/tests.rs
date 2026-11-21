@@ -45,6 +45,7 @@ fn trade(net: &str, r: Option<&str>) -> Trade {
         net_pnl: d(net),
         risk_inr: d("100"),
         r_multiple: r.map(d),
+        regime: None,
     }
 }
 

@@ -18,7 +18,7 @@ use bazaar_core::config::{self, CalendarConfig, ChargeExchange, ChargesConfig};
 use bazaar_core::dataview::DataView;
 use bazaar_core::instrument::{Exchange, Instrument, InstrumentType};
 use bazaar_core::segment::{InstrumentKind, Segment};
-use bazaar_regime::{Fact, RegimeFit, RegimeState};
+use bazaar_regime::{Fact, RegimeFit, RegimeState, Trend};
 use bazaar_risk::config::{Baseline, EffectiveLimits, GateConfig};
 use bazaar_risk::sizing::Sized;
 use bazaar_strategies::{
@@ -237,12 +237,14 @@ fn env() -> Env {
     }
 }
 
-fn exec(
-    e: &Env,
-    bars: &[Candle],
-    mode: Mode,
-    future_regime: bool,
-) -> (Result<RunOutput, BacktestError>, Seen, Vec<DateTime<Tz>>) {
+type Exec = (Result<RunOutput, BacktestError>, Seen, Vec<DateTime<Tz>>);
+
+fn exec(e: &Env, bars: &[Candle], mode: Mode, future_regime: bool) -> Exec {
+    exec_w(e, bars, mode, future_regime, 0)
+}
+
+/// As [`exec`], with the first `warmup` bars history-only.
+fn exec_w(e: &Env, bars: &[Candle], mode: Mode, future_regime: bool, warmup: usize) -> Exec {
     let spec = RunSpec {
         bars,
         instrument: &e.inst,
@@ -253,11 +255,24 @@ fn exec(
         product: Product::Delivery,
         capital: d("100000"),
         slippage_multiplier: d("1"),
+        warmup,
     };
     let regimes = Regimes {
+        // The trend at bar i reads closes up to i only (history bars included), so the engine's
+        // per-trade tag is past-only; the bars before warm-up are what it is computed from.
         states: bars
             .iter()
-            .map(|b| RegimeState::unknown(b.close_time(), Fact::new("t", "n/a", "fixture")))
+            .enumerate()
+            .map(|(i, b)| {
+                let mut s = RegimeState::unknown(b.close_time(), Fact::new("t", "n/a", "fixture"));
+                s.trend = match i.checked_sub(1).map(|j| b.close().cmp(&bars[j].close())) {
+                    None => Trend::Unknown,
+                    Some(std::cmp::Ordering::Greater) => Trend::Up,
+                    Some(std::cmp::Ordering::Less) => Trend::Down,
+                    Some(std::cmp::Ordering::Equal) => Trend::Range,
+                };
+                s
+            })
             .collect(),
         future: future_regime,
     };
@@ -278,12 +293,14 @@ fn series() -> impl PropStrategy<Value = Vec<Row>> {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(48))]
 
-    /// Replacing every bar after `k` changes nothing observable up to `k`.
+    /// Replacing every bar after `k` changes nothing observable up to `k`: not the views, the
+    /// trades (their regime tags included) or the equity curve, for any history-only warm-up.
     #[test]
     fn lookahead_future_bars_do_not_change_the_past(
         head in series(),
         tail in series(),
         cut in 2usize..6,
+        warm in 0usize..3,
     ) {
         let e = env();
         let k = cut.min(head.len() - 3);
@@ -291,8 +308,8 @@ proptest! {
         other.extend(tail.iter().take(head.len() - k - 1).copied());
         other.resize(head.len(), head[head.len() - 1]);
         let (a, b) = (candles(&e.cal, &head), candles(&e.cal, &other));
-        let (ra, sa, _) = exec(&e, &a, Mode::PastUp, false);
-        let (rb, sb, _) = exec(&e, &b, Mode::PastUp, false);
+        let (ra, sa, _) = exec_w(&e, &a, Mode::PastUp, false, warm);
+        let (rb, sb, _) = exec_w(&e, &b, Mode::PastUp, false, warm);
         let (ra, rb) = (ra.unwrap(), rb.unwrap());
         let tk = a[k].close_time();
         let upto = |s: &Seen| s.iter().filter(|(n, _)| *n <= k + 1).copied().collect::<Seen>();
@@ -329,6 +346,42 @@ proptest! {
             prop_assert!(slip > Decimal::ZERO);
             prop_assert_eq!(slip % e.inst.tick_size, Decimal::ZERO);
             prop_assert_eq!(t.entry.leg.price.value(), bars[idx].open() + slip);
+        }
+    }
+}
+
+#[test]
+fn trades_are_tagged_with_the_trend_at_the_entry_decision_bar_and_never_before_warmup() {
+    let e = env();
+    // Closes rise then fall: the signal bar's trend is what the trade carries.
+    let rows = [
+        row(2000, 5, 5, 0),
+        row(2000, 5, 5, 4),
+        row(2000, 5, 5, 8),
+        row(2000, 5, 5, 9),
+        row(2000, 5, 5, 3),
+        row(2000, 5, 5, 2),
+        row(2000, 5, 5, 1),
+        row(2000, 5, 5, 0),
+    ];
+    let bars = candles(&e.cal, &rows);
+    for warm in [0, 2] {
+        let (out, seen, _) = exec_w(&e, &bars, Mode::PastUp, false, warm);
+        assert!(seen.iter().all(|(n, _)| *n > warm));
+        let out = out.unwrap();
+        assert_ne!(out.trades.len(), 0);
+        for t in &out.trades {
+            let idx = bars
+                .iter()
+                .position(|b| b.close_time() == t.entry.bar_time)
+                .unwrap();
+            assert!(idx > warm);
+            let expect = match bars[idx - 1].close().cmp(&bars[idx - 2].close()) {
+                std::cmp::Ordering::Greater => "up",
+                std::cmp::Ordering::Less => "down",
+                std::cmp::Ordering::Equal => "range",
+            };
+            assert_eq!(t.regime.as_deref(), Some(expect));
         }
     }
 }

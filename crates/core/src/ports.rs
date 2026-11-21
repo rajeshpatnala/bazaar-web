@@ -2,9 +2,11 @@
 
 use std::future::Future;
 
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate};
+use chrono_tz::Tz;
 use thiserror::Error;
 
+use crate::candle::{Candle, Interval};
 use crate::instrument::{Exchange, Instrument, InstrumentType};
 
 /// Storage failure with a safe, category-only reason: no paths, SQL or row contents.
@@ -254,6 +256,81 @@ pub trait PaperLedgerRepo: Send + Sync {
         &self,
         opening: LedgerEntry,
     ) -> impl Future<Output = Result<u32, RepoError>> + Send;
+}
+
+/// What to read: one symbol and interval over a closed time window of bar close times.
+///
+/// `adjusted` is part of the key: adjusted and unadjusted bars are stored apart and never mixed
+/// in one read. `from > to` is an empty range, not an error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandleRange {
+    pub symbol: String,
+    pub interval: Interval,
+    /// Inclusive lower bound on `close_time`.
+    pub from: DateTime<Tz>,
+    /// Inclusive upper bound on `close_time`.
+    pub to: DateTime<Tz>,
+    pub adjusted: bool,
+}
+
+impl CandleRange {
+    /// Range over `[from, to]` (close times, inclusive) for one symbol, interval and adjusted flag.
+    #[must_use]
+    pub fn new(
+        symbol: &str,
+        interval: Interval,
+        from: DateTime<Tz>,
+        to: DateTime<Tz>,
+        adjusted: bool,
+    ) -> Self {
+        Self {
+            symbol: symbol.to_owned(),
+            interval,
+            from,
+            to,
+            adjusted,
+        }
+    }
+
+    /// True when `c` belongs to this range (same interval and adjusted flag, close time inside).
+    #[must_use]
+    pub fn contains(&self, c: &Candle) -> bool {
+        c.interval() == self.interval
+            && c.adjusted() == self.adjusted
+            && c.close_time() >= self.from
+            && c.close_time() <= self.to
+    }
+}
+
+/// Read closed candles. Adapters hide the storage engine; callers see only `Candle`s.
+pub trait CandleSource: Send + Sync {
+    /// Candles in `range`, oldest close time first. Unknown symbol or empty range is `Ok(vec![])`;
+    /// a stored value that cannot be decoded is `RepoError::Corrupt`, never a zero or a panic.
+    fn read_candles(
+        &self,
+        range: &CandleRange,
+    ) -> impl Future<Output = Result<Vec<Candle>, RepoError>> + Send;
+
+    /// Close time of the newest stored candle for the key (freshness marker), `None` if none.
+    fn last_candle_ts(
+        &self,
+        symbol: &str,
+        interval: Interval,
+        adjusted: bool,
+    ) -> impl Future<Output = Result<Option<DateTime<Tz>>, RepoError>> + Send;
+}
+
+/// Persist closed candles.
+pub trait CandleSink: Send + Sync {
+    /// Upsert `candles` for `symbol` keyed by `(symbol, interval, adjusted, close_time)`: the new
+    /// row wins, no duplicate remains. All-or-nothing: on error earlier data is intact. A batch
+    /// mixing intervals or adjusted flags is refused with `RepoError::Conflict` and writes
+    /// nothing. Duplicate close times inside one batch: the last one wins. Updates the `last_candle_ts` marker. Returns the rows written.
+    fn write_candles(
+        &self,
+        symbol: &str,
+        candles: &[Candle],
+    ) -> impl Future<Output = Result<u64, RepoError>> + Send;
 }
 
 /// Why a margin or quote source could not answer.

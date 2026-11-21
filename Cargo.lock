@@ -407,6 +407,7 @@ version = "0.1.0"
 dependencies = [
  "bazaar-core",
  "chrono",
+ "chrono-tz",
  "rust_decimal",
  "sqlx",
  "tempfile",

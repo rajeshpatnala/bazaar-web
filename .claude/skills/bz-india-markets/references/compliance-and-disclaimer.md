@@ -4,7 +4,7 @@ Open this file for any user-facing copy (recommendations, Why? panels, tooltips,
 
 ## 1. Permanent disclaimer (exact text)
 
-> For education and personal analysis. Not investment advice. Past performance does not guarantee future results.
+> For education and personal analysis. Not investment advice; not SEBI registered; markets carry risk. Past performance does not guarantee future results.
 
 Rules:
 - One shared constant in the UI (`shared/disclaimer.ts`) and one in `crates/core` for exports and notifications. Do not retype it; do not paraphrase it.
