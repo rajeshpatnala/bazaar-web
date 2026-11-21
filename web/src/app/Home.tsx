@@ -7,40 +7,49 @@ import { Money } from "../shared/ui/Money";
 import { EmptyView, ErrorView, LoadingView } from "../shared/ui/StateViews";
 import { Tag } from "../shared/ui/Tag";
 
+/** Home screen: the account overview from the server, with loading, error, empty and data-delayed states. */
 export function Home() {
-  const q = useQuery(overviewQuery);
-  const o = q.data;
+  const query = useQuery(overviewQuery);
+  const overview = query.data;
+  // PROVISIONAL until BZ-509: the practice label shows only when the server says "paper".
+  const isPaper = overview?.execution_mode === "paper";
   return (
     <section>
       <h2>Market overview</h2>
-      <p className="lbl">A practice account. Nothing here is a recommendation or a forecast.</p>
-      {q.isPending && <LoadingView label="Loading overview..." />}
-      {q.isError && <ErrorView message="Could not load the overview." onRetry={() => void q.refetch()} />}
-      {o && (
+      <p className="lbl">Nothing here is a recommendation or a forecast.</p>
+      {query.isPending && <LoadingView label="Loading overview..." />}
+      {query.isError && <ErrorView message="Could not load the overview." onRetry={() => void query.refetch()} />}
+      {overview && (
         <Card labelledBy="overview-title">
           <h3 id="overview-title">
-            Practice account <Tag tone="warn">PAPER</Tag>
+            {isPaper ? (
+              <>
+                Practice account <Tag tone="warn">PAPER</Tag>
+              </>
+            ) : (
+              <>Account (Mode: {overview.execution_mode})</>
+            )}
           </h3>
           <div>
-            <Tag>Market: {o.regime}</Tag> {o.data_delayed && <Tag tone="warn">Data delayed</Tag>}
+            <Tag>Market: {overview.regime}</Tag> {overview.data_delayed && <Tag tone="warn">Data delayed</Tag>}
           </div>
           <dl className="idea-figures">
             <dt>Capital</dt>
             <dd>
-              <Money value={o.capital} />
+              <Money value={overview.capital} />
             </dd>
             <dt>Today's profit or loss</dt>
             <dd>
-              <Money value={o.day_pnl} />
+              <Money value={overview.day_pnl} />
             </dd>
             <dt>Open positions</dt>
-            <dd>{o.open_positions}</dd>
+            <dd>{overview.open_positions}</dd>
             <dt>Ideas to review</dt>
-            <dd>{o.ideas_today}</dd>
+            <dd>{overview.ideas_today}</dd>
             <dt>As of</dt>
-            <dd>{formatIstIso(o.as_of)}</dd>
+            <dd>{formatIstIso(overview.as_of)}</dd>
           </dl>
-          {o.ideas_today === 0 ? (
+          {overview.ideas_today === 0 ? (
             <EmptyView title="No high-quality setups today">Waiting is a fine choice.</EmptyView>
           ) : (
             <p>

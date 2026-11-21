@@ -7,5 +7,7 @@ export type Overview = {
   open_positions: number;
   ideas_today: number;
   regime: string;
+  /** Server mode; the practice label shows only when this is "paper". */
+  execution_mode: string;
   data_delayed: boolean;
 };

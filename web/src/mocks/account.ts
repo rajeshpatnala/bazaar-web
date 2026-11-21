@@ -9,6 +9,7 @@ export const overviewFixture: Overview = {
   open_positions: 1,
   ideas_today: 2,
   regime: "Sideways",
+  execution_mode: "paper",
   data_delayed: false,
 };
 

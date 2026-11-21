@@ -42,6 +42,25 @@ describe("Home overview", () => {
     expect(await screen.findByRole("region", { name: /Practice account/ })).toBeInTheDocument();
   });
 
+  it("does not call a non-paper mode a practice account", async () => {
+    server.use(http.get("/api/v1/overview", () => HttpResponse.json({ ...overviewFixture, execution_mode: "semi_auto" })));
+    renderApp({ route: "/" });
+    const card = await screen.findByRole("region", { name: /Mode: semi_auto/ });
+    expect(within(card).queryByText("PAPER")).toBeNull();
+    expect(screen.queryByText(/Practice account/)).toBeNull();
+  });
+
+  it.each([
+    ["a negative idea count", { ideas_today: -1 }],
+    ["a negative position count", { open_positions: -2 }],
+    ["an empty regime", { regime: "" }],
+    ["a missing mode", { execution_mode: undefined }],
+  ])("rejects %s", async (_name, patch) => {
+    server.use(http.get("/api/v1/overview", () => HttpResponse.json({ ...overviewFixture, ...patch })));
+    renderApp({ route: "/" });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not load the overview.");
+  });
+
   it("loading state shows first", async () => {
     renderApp({ route: "/" });
     expect(await screen.findByText("Loading overview...")).toBeInTheDocument();
