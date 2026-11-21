@@ -207,6 +207,7 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
 {
     /// `io_timeout` bounds every quote read, gate run and send so one hung call cannot stall the
     /// writer (the composition root supplies it from config).
+    #[allow(clippy::too_many_arguments)] // composition root wires every port once
     pub fn new(
         exec: X,
         gate: Arc<G>,
