@@ -241,11 +241,18 @@ impl Config {
     /// (`hard_limits.max_ban_list_age_hours`), so it cannot loosen the gate's bound.
     fn check_scanner_ceilings(&self) -> Result<(), ConfigError> {
         let ceiling = self.risk.hard_limits.max_ban_list_age_hours;
+        let min_oos = self.risk.gate.evidence.min_oos_trades;
         match &self.strategies.scanner {
             Some(s) if s.max_ban_list_age_hours > ceiling => Err(ConfigError::invalid(
                 StrategiesConfig::FILE,
                 "scanner.max_ban_list_age_hours",
                 format!("is above the risk.toml hard_limits ceiling ({ceiling})"),
+            )),
+            // RISK-102-2: the badge may not call a thinner record "enough" than the gate (G01).
+            Some(s) if s.min_trades_evidence < min_oos => Err(ConfigError::invalid(
+                StrategiesConfig::FILE,
+                "scanner.min_trades_evidence",
+                format!("is below risk.toml gate.evidence.min_oos_trades ({min_oos})"),
             )),
             _ => Ok(()),
         }
@@ -317,6 +324,13 @@ mod tests {
             .as_mut()
             .unwrap()
             .max_ban_list_age_hours = ceiling + 1;
+        assert!(c.check_scanner_ceilings().is_err());
+        let min_oos = c.risk.gate.evidence.min_oos_trades;
+        let s = c.strategies.scanner.as_mut().unwrap();
+        s.max_ban_list_age_hours = ceiling;
+        s.min_trades_evidence = min_oos;
+        assert!(c.check_scanner_ceilings().is_ok());
+        c.strategies.scanner.as_mut().unwrap().min_trades_evidence = min_oos - 1;
         assert!(c.check_scanner_ceilings().is_err());
     }
 

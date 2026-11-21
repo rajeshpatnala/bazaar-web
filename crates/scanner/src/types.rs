@@ -8,7 +8,9 @@ use chrono::DateTime;
 use chrono_tz::Tz;
 use rust_decimal::Decimal;
 
-/// What the user is advised to consider. Long-only equity for now.
+/// What the user is advised to consider. Delivery equity is long-only today: `Sell` would be an
+/// intraday short (MIS), which the gate, sizing and journal do not cover yet, so no scanner
+/// step may emit it until short selling is scoped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Action {
@@ -59,19 +61,16 @@ pub struct Evidence {
 }
 
 impl Evidence {
-    /// The neutral shrink prior (profit factor 1.0, expectancy 0, zero trades): claims no edge.
-    #[must_use]
-    pub const fn neutral_prior() -> Self {
-        Self {
-            trades: 0,
-            win_rate: 0.0,
-            profit_factor: 1.0,
-            avg_r: 0.0,
-            max_drawdown_pct: 0.0,
-            period: String::new(),
-            costs_applied: false,
-            out_of_sample: false,
-        }
+    /// Finite numbers in range (QUAN-102-5, SEC-102-1).
+    fn is_sane(&self) -> bool {
+        let finite = self.profit_factor.is_finite()
+            && self.avg_r.is_finite()
+            && self.win_rate.is_finite()
+            && self.max_drawdown_pct.is_finite();
+        finite
+            && (0.0..=1.0).contains(&self.win_rate)
+            && self.profit_factor >= 0.0
+            && self.max_drawdown_pct >= 0.0
     }
 }
 
@@ -103,7 +102,6 @@ pub enum WhyFactor {
         profit_factor: Option<f64>,
         costs_applied: bool,
         out_of_sample: bool,
-        low_evidence: bool,
     },
     Liquidity {
         median_traded_value: Decimal,
@@ -182,6 +180,10 @@ pub enum RecError {
     TargetsNotMonotonic,
     #[error("risk in rupees is below quantity x the worst-fill entry-to-stop distance")]
     RiskBelowStopDistance,
+    #[error("evidence statistics are not finite or out of range")]
+    BadEvidence,
+    #[error("gate summary `passed` disagrees with its failure lists")]
+    GateInconsistent,
     #[error("risk in rupees must be above zero")]
     NoRisk,
     #[error("reward:risk must be above zero")]
@@ -201,7 +203,7 @@ pub enum RecError {
 }
 
 /// Everything a recommendation needs, in one place. `Recommendation::new` checks it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RecommendationParts {
     pub id: u128,
     pub generated_at: DateTime<Tz>,
@@ -230,29 +232,6 @@ pub struct RecommendationParts {
 pub struct Recommendation {
     p: RecommendationParts,
     low_evidence: bool,
-}
-
-impl PartialEq for RecommendationParts {
-    fn eq(&self, o: &Self) -> bool {
-        self.id == o.id
-            && self.generated_at == o.generated_at
-            && self.data_as_of == o.data_as_of
-            && self.instrument == o.instrument
-            && self.action == o.action
-            && self.entry_zone == o.entry_zone
-            && self.stop_loss == o.stop_loss
-            && self.targets == o.targets
-            && self.size == o.size
-            && self.risk_rupees == o.risk_rupees
-            && self.reward_risk == o.reward_risk
-            && self.agreeing_strategies == o.agreeing_strategies
-            && self.confidence == o.confidence
-            && self.regime == o.regime
-            && self.backtest == o.backtest
-            && self.why == o.why
-            && self.warnings == o.warnings
-            && self.gate == o.gate
-    }
 }
 
 impl Recommendation {
@@ -324,6 +303,13 @@ impl Recommendation {
         if p.why.is_empty() {
             return Err(RecError::NoWhy);
         }
+        if p.backtest.as_ref().is_some_and(|b| !b.is_sane()) {
+            return Err(RecError::BadEvidence);
+        }
+        let g = &p.gate;
+        if g.passed != (g.hard_failures.is_empty() && g.overridable_failures.is_empty()) {
+            return Err(RecError::GateInconsistent);
+        }
         if p.data_as_of > p.generated_at {
             return Err(RecError::DataFromFuture);
         }
@@ -333,14 +319,12 @@ impl Recommendation {
             .backtest
             .as_ref()
             .is_none_or(|b| b.trades < min_trades_evidence || !b.costs_applied || !b.out_of_sample);
-        let backtest = p.backtest.take().unwrap_or_else(Evidence::neutral_prior);
         if low_evidence {
             p.confidence = p.confidence.min(low_evidence_cap);
             if !p.warnings.contains(&Warning::LowEvidence) {
                 p.warnings.push(Warning::LowEvidence);
             }
         }
-        p.backtest = Some(backtest);
         Ok(Self { p, low_evidence })
     }
 
@@ -405,11 +389,10 @@ impl Recommendation {
     pub const fn regime(&self) -> &RegimeState {
         &self.p.regime
     }
-    /// Always present: "no evidence" is the neutral prior with zero trades.
+    /// `None` means no evidence: renderers print "no evidence", never zeros.
     #[must_use]
-    pub fn backtest(&self) -> &Evidence {
-        // `new` always fills it; the fallback keeps this panic-free.
-        self.p.backtest.as_ref().unwrap_or(&NEUTRAL)
+    pub const fn backtest(&self) -> Option<&Evidence> {
+        self.p.backtest.as_ref()
     }
     #[must_use]
     pub const fn low_evidence(&self) -> bool {
@@ -428,8 +411,6 @@ impl Recommendation {
         &self.p.gate
     }
 }
-
-static NEUTRAL: Evidence = Evidence::neutral_prior();
 
 #[cfg(test)]
 mod tests;

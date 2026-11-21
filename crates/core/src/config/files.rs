@@ -71,6 +71,19 @@ pub struct StrategiesConfig {
     pub scanner: Option<ScannerConfig>,
 }
 
+impl StrategiesConfig {
+    /// The `[scanner]` table. Fails closed: a missing table is an error, never a set of defaults.
+    pub fn scanner_required(&self) -> Result<&ScannerConfig, ConfigError> {
+        self.scanner.as_ref().ok_or_else(|| {
+            ConfigError::invalid(
+                Self::FILE,
+                "scanner",
+                "the [scanner] table is required to scan",
+            )
+        })
+    }
+}
+
 impl ConfigFile for StrategiesConfig {
     const FILE: &'static str = "strategies.toml";
     impl_header!();
@@ -154,11 +167,11 @@ impl ScannerConfig {
                 "must be above 0",
             ));
         }
-        if self.low_evidence_cap > 100 {
+        if self.low_evidence_cap >= 100 {
             return Err(ConfigError::invalid(
                 file,
                 "scanner.low_evidence_cap",
-                "must be within 0 and 100",
+                "must be below 100 (100 switches the cap off)",
             ));
         }
         if !(1..=20).contains(&self.max_results) {
@@ -381,6 +394,14 @@ mod tests {
     }
 
     #[test]
+    fn missing_scanner_table_fails_closed() {
+        let none = parse_str::<StrategiesConfig>(HEAD).unwrap();
+        assert!(none.scanner_required().is_err());
+        let some = parse_str::<StrategiesConfig>(&format!("{HEAD}{SCANNER}")).unwrap();
+        assert!(some.scanner_required().is_ok());
+    }
+
+    #[test]
     fn scanner_rejects_bad_values() {
         let bad = |from: &str, to: &str| {
             parse_str::<StrategiesConfig>(&format!("{HEAD}{}", SCANNER.replace(from, to)))
@@ -405,6 +426,16 @@ mod tests {
         assert!(bad("max_results = 5", "max_results = 5\nextra = 1").is_err());
         assert!(bad("= 24", "= 0").is_err());
         assert!(bad("= 10.0", "= 1.0").is_err());
+        assert!(bad("= 10.0", "= 1001.0").is_err());
+        assert!(bad("= 55", "= 100").is_err(), "cap 100 is a no-op");
+        assert!(bad("min_history_bars = 250", "min_history_bars = 0").is_err());
+        assert!(bad("min_trades_evidence = 30", "min_trades_evidence = 0").is_err());
+        assert!(bad("= 15.0", "= -1.0").is_err());
+        assert!(bad("= 15.0", "= nan").is_err());
+        assert!(
+            bad("confluence = 0.30", "confluence = 0.3000000001").is_ok(),
+            "sum within tolerance"
+        );
     }
 
     #[test]

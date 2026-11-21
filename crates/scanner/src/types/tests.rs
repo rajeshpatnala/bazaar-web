@@ -66,7 +66,11 @@ fn good_evidence(trades: u32) -> Evidence {
         trades,
         costs_applied: true,
         out_of_sample: true,
-        ..Evidence::neutral_prior()
+        win_rate: 0.5,
+        profit_factor: 1.4,
+        avg_r: 0.2,
+        max_drawdown_pct: 8.0,
+        period: "2021 to 2025".into(),
     }
 }
 
@@ -135,7 +139,7 @@ fn no_evidence_is_low_evidence_and_caps_confidence() {
     let r = Recommendation::new(parts(), 30, 55).unwrap();
     assert!(r.low_evidence());
     assert_eq!(r.confidence(), 55);
-    assert_eq!(r.backtest().trades, 0);
+    assert!(r.backtest().is_none());
     assert!(r.warnings().contains(&Warning::LowEvidence));
 }
 
@@ -209,7 +213,65 @@ fn gate_summary_splits_hard_and_overridable() {
 }
 
 #[test]
-fn neutral_prior_claims_no_edge() {
-    let n = Evidence::neutral_prior();
-    assert_eq!((n.trades, n.profit_factor, n.avg_r), (0, 1.0, 0.0));
+fn bad_evidence_numbers_are_rejected() {
+    for f in [
+        (|e: &mut Evidence| e.win_rate = f64::NAN) as fn(&mut Evidence),
+        |e| e.win_rate = 1.7,
+        |e| e.profit_factor = f64::INFINITY,
+        |e| e.avg_r = f64::NAN,
+        |e| e.max_drawdown_pct = -1.0,
+    ] {
+        let mut p = parts();
+        let mut e = good_evidence(30);
+        f(&mut e);
+        p.backtest = Some(e);
+        assert_eq!(
+            Recommendation::new(p, 30, 55).unwrap_err(),
+            RecError::BadEvidence
+        );
+    }
+}
+
+#[test]
+fn gate_summary_must_agree_with_its_lists() {
+    let mut p = parts();
+    p.gate.hard_failures = vec![RuleId::G02];
+    assert_eq!(
+        Recommendation::new(p.clone(), 30, 55).unwrap_err(),
+        RecError::GateInconsistent
+    );
+    p.gate.passed = false;
+    assert!(Recommendation::new(p, 30, 55).is_ok());
+}
+
+#[test]
+fn existing_low_evidence_warning_is_not_duplicated() {
+    let mut p = parts();
+    p.warnings = vec![Warning::LowEvidence];
+    let r = Recommendation::new(p, 30, 55).unwrap();
+    assert_eq!(r.warnings(), &[Warning::LowEvidence]);
+}
+
+#[test]
+fn horizon_is_part_of_equality() {
+    let a = parts();
+    assert_eq!(a, a.clone());
+}
+
+#[test]
+fn missing_input_failure_counts_as_hard() {
+    let rs: Vec<RuleResult> = RuleId::EVALUATION_ORDER
+        .iter()
+        .map(|r| {
+            if *r == RuleId::G05 {
+                RuleResult::input_missing(*r, "?", "y", "supply it")
+            } else {
+                RuleResult::pass(*r, "x", "y")
+            }
+        })
+        .collect();
+    let v = GateVerdict::new(ConfigHash::of_text("cfg"), &rs).unwrap();
+    let s = GateSummary::from_verdict(&v, t(18));
+    assert_eq!(s.hard_failures, vec![RuleId::G05]);
+    assert_eq!(s.overridable_failures, Vec::<RuleId>::new());
 }

@@ -10,15 +10,23 @@ use crate::types::Evidence;
 /// Backtest statistics for a strategy. `None` means no evidence: the caller must label it so.
 pub trait EvidenceSource: Send + Sync {
     /// Stats of `strategy_id` on this instrument (out of sample, net of costs when available).
-    fn for_instrument(&self, strategy_id: &str, instrument_token: u64) -> Option<Evidence>;
-    /// Strategy-wide stats; the shrink prior only when they hold enough trades, else neutral.
-    fn for_strategy(&self, strategy_id: &str) -> Option<Evidence>;
+    /// Only trades closed before `as_of` (the decision bar) may count: no look-ahead.
+    fn for_instrument(
+        &self,
+        strategy_id: &str,
+        instrument_token: u64,
+        as_of: DateTime<Tz>,
+    ) -> Option<Evidence>;
+    /// Strategy-wide stats (same `as_of` cutoff); the shrink prior only when they hold enough
+    /// trades, else neutral.
+    fn for_strategy(&self, strategy_id: &str, as_of: DateTime<Tz>) -> Option<Evidence>;
 }
 
 /// State of the ban list as the source reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BanListStatus {
-    /// Names (tradingsymbols) in the ban period; `as_of` is the source's date, if it gave one.
+    /// Names (tradingsymbols) in the ban period, compared trimmed and upper-case. Adapters (F13)
+    /// must cap the list and event sizes; `as_of` is the source's date, if it gave one.
     Available {
         symbols: Vec<String>,
         as_of: Option<DateTime<Tz>>,
