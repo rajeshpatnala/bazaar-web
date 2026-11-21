@@ -8,6 +8,13 @@ Plan: `.agents/plans/F12-candle-store.md`. Status: in progress.
 - `store/tests/candle_contract.rs`: `run_contract(make)` shared suite, proven on an in-memory fake. Slices 1 (SQLite) and 2 (Parquet) call it; copy or `#[path]` include it.
 - Dev-dependency `chrono-tz` added to `store` (already in the workspace; tests build IST times).
 
+## Slice 1 (SQLite adapter)
+- `store/migrations/0002_candles.sql`, `store/src/candles.rs`: `SqliteStore` implements `CandleSource` + `CandleSink`. Key `(symbol, interval, adjusted, close_ns)`; prices as canonical decimal TEXT, close time as UTC epoch nanoseconds (rendered back in IST); one transaction per write; `last_candle_ts` is `MAX(close_ns)` so it cannot lag a write.
+- Corrupt decimal, negative volume or an invalid OHLC row reads as `RepoError::Corrupt`. Volume above `i64::MAX` is refused (`Other`) before anything is written.
+- SEC-104-1 (SQLite half) done: symbol is only ever a bound parameter (test with a hostile symbol). The Parquet path allowlist stays with slice 2.
+- `chrono-tz` moved from dev-dependency to dependency of `store` (already in the workspace; no new crate).
+- `store/tests/candles_sqlite.rs` runs the shared contract suite plus corrupt-row cases.
+
 ## Deferred
 - Corrupt-value and leftover `*.tmp` cases are adapter-specific; slices 1 and 2.
 - Parquet/DuckDB needs owner approval of new dependencies.
