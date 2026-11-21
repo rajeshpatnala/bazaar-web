@@ -3,3 +3,4 @@
 - [Paper and live both supported](project_paper_and_live_both.md) — owner wants both modes always, switched in UI; paper default, live chosen server-side
 - [UI direction B](project_ui_direction_b.md) — owner chose light premium preview B for F13 (2026-11-20)
 - [Manager decides](feedback_manager_decides.md) — owner offline: take recommended options, keep going; queue owner-only items
+- [DuckDB: system lib](project_keep_duckdb.md) — keep DuckDB but link system lib (BZ-106); Dockerfile later
