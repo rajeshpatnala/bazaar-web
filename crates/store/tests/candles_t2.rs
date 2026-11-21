@@ -266,11 +266,38 @@ async fn parquet_equivalence_with_sqlite_on_empty_and_adjusted() {
 fn core_ports_is_free_of_sqlx_and_duckdb_and_core_does_not_depend_on_them() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../core");
     let ports = std::fs::read_to_string(root.join("src/ports.rs")).unwrap();
-    for word in ["sqlx", "duckdb", "rusqlite", "parquet", "arrow"] {
-        assert!(!ports.contains(word), "core/src/ports.rs mentions {word}");
+    let deny = [
+        "sqlx",
+        "duckdb",
+        "rusqlite",
+        "parquet",
+        "arrow",
+        "bazaar_store",
+    ];
+    // whole identifiers only, so words like "narrow" in a doc comment do not match
+    for tok in ports.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+        assert!(!deny.contains(&tok), "core/src/ports.rs uses {tok}");
     }
+    // every key of every *dependencies* table in core/Cargo.toml
     let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
-    for word in ["sqlx", "duckdb", "bazaar-store"] {
-        assert!(!manifest.contains(word), "core/Cargo.toml mentions {word}");
+    let mut in_deps = false;
+    let mut checked = 0;
+    for line in manifest.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_deps = line.contains("dependencies");
+        } else if in_deps && !line.is_empty() && !line.starts_with('#') {
+            let key = line
+                .split(['=', '.'])
+                .next()
+                .unwrap()
+                .trim()
+                .replace('-', "_");
+            assert!(
+                !deny.contains(&key.as_str()),
+                "core/Cargo.toml depends on {key}"
+            );
+            checked += 1;
+        }
     }
+    assert!(checked > 3, "found no dependency keys: parser broke");
 }
