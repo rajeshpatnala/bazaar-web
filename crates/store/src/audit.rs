@@ -9,10 +9,10 @@ use crate::sqlite::{SqliteStore, map_err};
 
 const GENESIS: [u8; 32] = [0; 32];
 /// Caps on draft fields, enforced before any SQL (SEC-123-4).
-const MAX_TS: usize = 64;
-const MAX_ACTOR: usize = 500;
-const MAX_KIND: usize = 64;
-const MAX_PAYLOAD: usize = 64 * 1024;
+pub(crate) const MAX_TS: usize = 64;
+pub(crate) const MAX_ACTOR: usize = 500;
+pub(crate) const MAX_KIND: usize = 64;
+pub(crate) const MAX_PAYLOAD: usize = 64 * 1024;
 
 fn check_caps(d: &AuditDraft) -> Result<(), RepoError> {
     if d.ts_ist_rfc3339.len() > MAX_TS
@@ -72,6 +72,10 @@ pub(crate) async fn append_in_tx(
 
 /// Check rows in order: gapless 1-based `seq`, `prev_hash` links, and every hash recomputed with
 /// `chain`. A mismatch is `Corrupt` (category only; no row contents).
+///
+/// Limit (ADR 0001): hashes link each row to its predecessor only, so removing rows from the
+/// tail leaves a valid shorter chain. Tail truncation is undetectable by hash alone; it needs
+/// the external anchor of the latest (seq, hash) planned for slice 8.
 pub(crate) fn verify_rows(rows: &[AuditRow], chain: ChainFn) -> Result<(), RepoError> {
     let mut prev = GENESIS;
     for (i, r) in rows.iter().enumerate() {

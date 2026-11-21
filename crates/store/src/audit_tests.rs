@@ -2,13 +2,10 @@
 
 use bazaar_core::ports::{AuditDraft, ChainFn, RepoError};
 
-use crate::audit::{append_in_tx, test_chain, test_draft};
+use crate::audit::{
+    MAX_ACTOR, MAX_KIND, MAX_PAYLOAD, MAX_TS, append_in_tx, test_chain, test_draft, verify_rows,
+};
 use crate::sqlite::SqliteStore;
-
-const MAX_ACTOR: usize = 500;
-const MAX_KIND: usize = 64;
-const MAX_PAYLOAD: usize = 64 * 1024;
-const MAX_TS: usize = 64;
 
 async fn append(s: &SqliteStore, d: &AuditDraft) -> Result<u64, RepoError> {
     let mut tx = s.pool.begin().await.unwrap();
@@ -158,10 +155,83 @@ async fn migrations_8_and_9_apply_on_an_existing_v7_database() {
         raw_insert(&s, 9, vec![0; 32]).await.is_err(),
         "trigger is back"
     );
+    assert_eq!(s.ledger_current_epoch().await.unwrap(), Vec::new());
+    sqlx::query("INSERT INTO paper_ledger (epoch, kind, amount, ts_ist) VALUES (1, 'k', '1', 't')")
+        .execute(&s.pool)
+        .await
+        .unwrap();
     assert!(
-        s.ledger_current_epoch().await.unwrap().is_empty(),
-        "ledger table is back"
+        sqlx::query("DELETE FROM paper_ledger")
+            .execute(&s.pool)
+            .await
+            .is_err()
     );
+    assert!(
+        sqlx::query("UPDATE paper_ledger SET kind = 'x'")
+            .execute(&s.pool)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn verify_rows_detects_removed_swapped_and_altered_rows() {
+    let rows = store_with(4).await.audit_read_all().await.unwrap();
+    assert_eq!(verify_rows(&rows, test_chain), Ok(()));
+    let mut removed = rows.clone();
+    removed.remove(1);
+    assert_eq!(verify_rows(&removed, test_chain), Err(RepoError::Corrupt));
+    let mut swapped = rows.clone();
+    swapped.swap(1, 2);
+    assert_eq!(verify_rows(&swapped, test_chain), Err(RepoError::Corrupt));
+    let mut altered = rows.clone();
+    altered[2].draft.payload = "{\"x\":1}".to_owned();
+    assert_eq!(verify_rows(&altered, test_chain), Err(RepoError::Corrupt));
+    let mut relinked = rows;
+    relinked[2].prev_hash = [1; 32];
+    assert_eq!(verify_rows(&relinked, test_chain), Err(RepoError::Corrupt));
+}
+
+#[tokio::test]
+async fn truncated_tail_still_verifies_documented_limit() {
+    // ADR 0001: tail truncation is undetectable by hash; the slice-8 anchor covers it.
+    let mut rows = store_with(4).await.audit_read_all().await.unwrap();
+    rows.truncate(2);
+    assert_eq!(verify_rows(&rows, test_chain), Ok(()));
+    let s = store_with(4).await;
+    sqlx::query("DROP TRIGGER audit_log_no_delete")
+        .execute(&s.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM audit_log WHERE seq > 2")
+        .execute(&s.pool)
+        .await
+        .unwrap();
+    assert_eq!(s.audit_verify(test_chain).await, Ok(()));
+}
+
+#[tokio::test]
+async fn caps_accept_exactly_the_maximum() {
+    let s = store_with(0).await;
+    let d = AuditDraft {
+        ts_ist_rfc3339: "t".repeat(MAX_TS),
+        actor: "a".repeat(MAX_ACTOR),
+        kind: "k".repeat(MAX_KIND),
+        payload: "p".repeat(MAX_PAYLOAD),
+    };
+    assert_eq!(append(&s, &d).await, Ok(1));
+}
+
+#[tokio::test]
+async fn audit_hash_column_must_be_32_bytes() {
+    let s = store_with(0).await;
+    let r = sqlx::query(
+        "INSERT INTO audit_log (seq, ts_ist, actor, kind, payload, prev_hash, hash) \
+         VALUES (1, 't', 'a', 'k', '{}', zeroblob(32), x'00')",
+    )
+    .execute(&s.pool)
+    .await;
+    assert!(r.is_err());
 }
 
 #[tokio::test]

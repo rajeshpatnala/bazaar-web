@@ -50,6 +50,15 @@ impl SqliteStore {
         }
         entries.iter().try_for_each(check)?;
         let mut tx = self.pool.begin().await.map_err(|e| map_err(&e))?;
+        // Appends go to the current epoch only (1 on an empty table); only `ledger_new_epoch`
+        // raises it. A stale or jumped epoch is a `Conflict` and nothing is stored.
+        let max: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(epoch), 1) FROM paper_ledger")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| map_err(&e))?;
+        if entries.iter().any(|e| i64::from(e.epoch) != max) {
+            return Err(RepoError::Conflict);
+        }
         for e in entries {
             bind(e).execute(&mut *tx).await.map_err(|e| map_err(&e))?;
         }
@@ -153,6 +162,124 @@ mod tests {
         let es = [entry(1, "a", "1", None), entry(1, "boom", "2", None)];
         assert!(s.ledger_append_many(&es).await.is_err());
         assert_eq!(s.ledger_current_epoch().await.unwrap(), Vec::new());
+    }
+
+    #[tokio::test]
+    async fn appends_must_target_the_current_epoch() {
+        let s = store().await;
+        s.ledger_append(&entry(1, "opening", "5", None))
+            .await
+            .unwrap();
+        assert_eq!(
+            s.ledger_append(&entry(2, "x", "1", None)).await,
+            Err(RepoError::Conflict)
+        );
+        assert_eq!(
+            s.ledger_append(&entry(u32::MAX, "x", "1", None)).await,
+            Err(RepoError::Conflict)
+        );
+        // A mixed batch is refused whole.
+        let mixed = [entry(1, "ok", "1", None), entry(7, "bad", "1", None)];
+        assert_eq!(s.ledger_append_many(&mixed).await, Err(RepoError::Conflict));
+        assert_eq!(s.ledger_current_epoch().await.unwrap().len(), 1);
+        s.ledger_new_epoch(&entry(0, "opening", "9", None))
+            .await
+            .unwrap();
+        assert_eq!(
+            s.ledger_append(&entry(1, "old", "1", None)).await,
+            Err(RepoError::Conflict)
+        );
+        assert_eq!(s.ledger_append(&entry(2, "new", "1", None)).await, Ok(()));
+        // An empty table accepts epoch 1 only.
+        let e = store().await;
+        assert_eq!(
+            e.ledger_append(&entry(2, "x", "1", None)).await,
+            Err(RepoError::Conflict)
+        );
+    }
+
+    #[tokio::test]
+    async fn caps_accept_exactly_the_maximum() {
+        let s = store().await;
+        let mut at_max = entry(1, &"k".repeat(MAX_KIND), "1", None);
+        at_max.ts_ist_rfc3339 = "t".repeat(MAX_TS);
+        assert_eq!(s.ledger_append(&at_max).await, Ok(()));
+        let mut over_ts = at_max.clone();
+        over_ts.ts_ist_rfc3339 = "t".repeat(MAX_TS + 1);
+        assert_eq!(s.ledger_append(&over_ts).await, Err(RepoError::TooLarge));
+        let batch = vec![entry(1, "k", "1", None); MAX_BATCH];
+        assert_eq!(s.ledger_append_many(&batch).await, Ok(()));
+        assert_eq!(s.ledger_current_epoch().await.unwrap().len(), MAX_BATCH + 1);
+    }
+
+    async fn raw(s: &SqliteStore, epoch: i64, amount: &str, ref_id: Option<&str>) {
+        sqlx::query(
+            "INSERT INTO paper_ledger (epoch, kind, amount, ref_id, ts_ist) \
+             VALUES (?, 'k', ?, ?, 't')",
+        )
+        .bind(epoch)
+        .bind(amount)
+        .bind(ref_id)
+        .execute(&s.pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn corrupt_stored_values_fail_closed() {
+        let bad_amount = store().await;
+        raw(&bad_amount, 1, "not-a-number", None).await;
+        assert_eq!(
+            bad_amount.ledger_current_epoch().await,
+            Err(RepoError::Corrupt)
+        );
+        let bad_ref = store().await;
+        raw(&bad_ref, 1, "1", Some("xyz")).await;
+        assert_eq!(
+            bad_ref.ledger_current_epoch().await,
+            Err(RepoError::Corrupt)
+        );
+        let big_epoch = store().await;
+        raw(&big_epoch, 4_294_967_296, "1", None).await;
+        assert_eq!(
+            big_epoch.ledger_current_epoch().await,
+            Err(RepoError::Corrupt)
+        );
+    }
+
+    #[tokio::test]
+    async fn new_epoch_failures_store_nothing() {
+        let s = store().await;
+        s.ledger_append(&entry(1, "opening", "5", None))
+            .await
+            .unwrap();
+        let bad = entry(0, "", "9", None);
+        assert_eq!(s.ledger_new_epoch(&bad).await, Err(RepoError::Other));
+        let cur = s.ledger_current_epoch().await.unwrap();
+        assert_eq!(cur.len(), 1);
+        assert_eq!(cur[0].epoch, 1);
+        // u32 overflow of the epoch counter is refused, not wrapped.
+        let o = store().await;
+        raw(&o, i64::from(u32::MAX), "1", None).await;
+        assert_eq!(
+            o.ledger_new_epoch(&entry(0, "opening", "1", None)).await,
+            Err(RepoError::Other)
+        );
+    }
+
+    #[tokio::test]
+    async fn sql_checks_back_the_app_caps() {
+        let s = store().await;
+        let ins = |kind: String| {
+            sqlx::query(
+                "INSERT INTO paper_ledger (epoch, kind, amount, ts_ist) VALUES (1, ?, '1', 't')",
+            )
+            .bind(kind)
+            .execute(&s.pool)
+        };
+        assert!(ins(String::new()).await.is_err());
+        assert!(ins("k".repeat(MAX_KIND + 1)).await.is_err());
+        assert!(ins("k".repeat(MAX_KIND)).await.is_ok());
     }
 
     #[tokio::test]
