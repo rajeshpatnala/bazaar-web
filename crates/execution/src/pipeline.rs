@@ -182,6 +182,19 @@ impl PipelineHandle {
     }
 }
 
+/// I/O timeout used when the supplied one is zero (RISK-109-11).
+pub const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// Ceiling for the I/O timeout: a larger value is clamped so a bad config cannot stall the writer.
+pub const MAX_IO_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn clamp_io(d: Duration) -> Duration {
+    if d.is_zero() {
+        DEFAULT_IO_TIMEOUT
+    } else {
+        d.min(MAX_IO_TIMEOUT)
+    }
+}
+
 /// The writer. Owns the queue, the executor and the order store.
 pub struct Pipeline<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo> {
     pub(crate) exec: X,
@@ -206,7 +219,8 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
     Pipeline<X, G, Q, O, A>
 {
     /// `io_timeout` bounds every quote read, gate run and send so one hung call cannot stall the
-    /// writer (the composition root supplies it from config).
+    /// writer (the composition root supplies it from config). A zero value becomes
+    /// `DEFAULT_IO_TIMEOUT`; anything above `MAX_IO_TIMEOUT` is clamped to it.
     #[allow(clippy::too_many_arguments)] // composition root wires every port once
     pub fn new(
         exec: X,
@@ -226,7 +240,7 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
             orders,
             queue: ApprovalQueue::new(approvals, approval_ttl_secs),
             clock,
-            io_timeout,
+            io_timeout: clamp_io(io_timeout),
         }
     }
 
@@ -396,9 +410,9 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
             return Ok(Outcome::Declined);
         }
         // Re-gate with a fresh quote; no quote means no approval-time gate, so it blocks.
-        let blocked = match self.quotes.quote(&p.intent.symbol).await {
-            Ok(q) => self.run_gate(&p.intent, Some(q)).await,
-            Err(_) => GateOutcome::Block("no fresh quote".into()),
+        let blocked = match self.bounded(self.quotes.quote(&p.intent.symbol)).await {
+            Some(Ok(q)) => self.run_gate(&p.intent, Some(q)).await,
+            _ => GateOutcome::Block("no fresh quote".into()),
         };
         if blocked != GateOutcome::Pass {
             p.track.advance(o, ExecEvent::GateBlocked, now).await?;
@@ -464,10 +478,12 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
         if stored == d {
             return Ok(None);
         }
+        // Whatever the stored decision, nothing is sent and the order must reach a terminal
+        // state: a click against a stored Approve declines it (fail closed, RISK-109-12).
+        p.track
+            .advance_as(&*self.orders, ExecEvent::Decline, now, actor)
+            .await?;
         let prior = if stored == ApprovalDecision::Decline {
-            p.track
-                .advance_as(&*self.orders, ExecEvent::Decline, now, actor)
-                .await?;
             Outcome::Declined
         } else {
             Outcome::Error(ExecError::InvalidInput("conflicting decision"))
@@ -896,6 +912,41 @@ mod tests {
             .unwrap();
         assert_eq!(h.expire_stale().await.unwrap(), 0);
         assert_eq!(rec.placed(), vec![]);
+    }
+
+    #[tokio::test]
+    async fn hung_approval_time_quote_blocks_instead_of_stalling() {
+        let mut r = rig(10, 0).await;
+        queued(&mut r, 1, false).await;
+        r.pipe
+            .quotes
+            .1
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let out = r.pipe.decide(IntentId(1), Approve, "u").await;
+        assert!(matches!(out, Outcome::GateBlocked(_)), "{out:?}");
+        assert_eq!(ids(&r), Vec::<u128>::new());
+    }
+
+    #[tokio::test]
+    async fn io_timeout_is_defaulted_and_clamped() {
+        assert_eq!(
+            clamp_io(Duration::from_millis(150)),
+            Duration::from_millis(150)
+        );
+        assert_eq!(clamp_io(Duration::ZERO), DEFAULT_IO_TIMEOUT);
+        assert_eq!(clamp_io(Duration::from_secs(3600)), MAX_IO_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn decline_against_stored_approve_finishes_the_order_declined() {
+        let seeded = MemApprovals::default();
+        seeded.0.lock().unwrap().insert(1, Approve);
+        let mut r = rig_with(10, 0, seeded).await;
+        queued(&mut r, 1, false).await;
+        let out = r.pipe.decide(IntentId(1), Decline, "u").await;
+        assert!(matches!(out, Outcome::AlreadyDecided(_)), "{out:?}");
+        assert_eq!(r.orders.0.lock().unwrap()[&1].1, "declined");
+        assert_eq!(ids(&r), Vec::<u128>::new());
     }
 
     #[tokio::test]
