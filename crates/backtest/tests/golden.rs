@@ -2,7 +2,9 @@
 //! falling cycles; the pinned numbers are snapshots of the engine, not derived by hand): the engine's charges follow the
 //! calculator's rounding rules (AC 1); the same run twice and on four threads is identical and
 //! net of charges, with provenance (AC 6); walk-forward folds never overlap, OOS runs only the set
-//! chosen in IS, and the trial count and thin-fold flag appear (AC 7).
+//! chosen in IS, and the trial count and thin-fold flag appear (AC 7). The baseline pins in
+//! `fixtures/backtest/golden_baseline.json` come from a synthetic series with 24 trades (low
+//! evidence, below the 30-trade bar): engine snapshots, never evidence of an edge.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -445,11 +447,14 @@ fn ac7_folds_do_not_overlap_oos_uses_the_is_choice_and_trials_are_counted() {
 fn golden_pins() -> serde_json::Value {
     let p =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/backtest/golden_baseline.json");
-    serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
+    serde_json::from_str(&std::fs::read_to_string(p).expect("golden_baseline.json: readable"))
+        .expect("golden_baseline.json: valid JSON")
 }
 
 fn pin(v: &serde_json::Value, k: &str) -> Decimal {
-    d(v[k].as_str().unwrap())
+    d(v[k]
+        .as_str()
+        .unwrap_or_else(|| panic!("golden_baseline.json: missing string key {k}")))
 }
 
 #[test]
@@ -470,6 +475,15 @@ fn ac6_baseline_stats_match_the_golden_fixture() {
     assert_eq!(m.profit_factor, Some(pin(b, "profit_factor")));
     assert_eq!(m.expectancy_r, Some(pin(b, "expectancy_r")));
     assert_eq!(m.drawdown.max_abs, pin(b, "max_drawdown_abs"));
+    // Synthetic and thin: 24 trades is below the 30-trade bar, so the evidence label is low.
+    let facts = bazaar_backtest::metrics::RunFacts {
+        folds: 1,
+        regimes: 1,
+        costs_approximate: false,
+        trials_in_run: 1,
+    };
+    let a = bazaar_backtest::metrics::assess(&e.cfg, &m, &facts).unwrap();
+    assert_eq!(a.label, EvidenceLabel::LowEvidence);
 }
 
 #[test]
@@ -478,7 +492,13 @@ fn ac6_cost_sensitivity_doubling_slippage_lowers_net_and_keeps_the_trades() {
     let bars = candles(120);
     let base = exec(&e, &bars, 5);
     let mut s = spec(&e, &bars, 0);
-    s.slippage_multiplier = d("2");
+    // The same multiple the engine's stress run uses (config key fills.stress_slippage_multiplier).
+    s.slippage_multiplier = e.cfg.fills.stress_slippage_multiplier;
+    assert_eq!(
+        s.slippage_multiplier,
+        d("2"),
+        "the fixture pins the x2 stress"
+    );
     let hi = run(&s, &mut every(5), &regimes(&bars), &mut ApproveAll).unwrap();
     let net = |o: &RunOutput| o.trades.iter().map(|t| t.net_pnl).sum::<Decimal>();
     let g = golden_pins();
@@ -490,14 +510,18 @@ fn ac6_cost_sensitivity_doubling_slippage_lowers_net_and_keeps_the_trades() {
     assert_eq!(net(&hi), pin(want, "net_pnl"));
     assert_eq!(hi.trades.len(), base.trades.len());
     assert!(net(&hi) < net(&base), "worse fills must cost P&L");
-    // Every trade is no better under heavier slippage.
+    // Same quantity on both runs (so a per-trade P&L comparison is like for like), and no trade
+    // is better under heavier slippage.
     for (a, b) in base.trades.iter().zip(&hi.trades) {
+        assert_eq!(a.entry.leg.qty, b.entry.leg.qty);
         assert!(b.net_pnl <= a.net_pnl);
     }
-    // Charges are not slippage: lines other than the price-driven ones stay positive on both.
-    assert!(
-        hi.trades
-            .iter()
-            .all(|t| t.entry.charges.total().unwrap() > Decimal::ZERO)
-    );
+    // Charges are levied on both legs of every trade in both runs (total positive).
+    for o in [&base, &hi] {
+        for t in &o.trades {
+            for f in [&t.entry, &t.exit] {
+                assert!(f.charges.total().unwrap() > Decimal::ZERO);
+            }
+        }
+    }
 }
