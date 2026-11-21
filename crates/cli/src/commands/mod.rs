@@ -8,6 +8,8 @@ mod import_instruments;
 
 use std::path::Path;
 
+use thiserror::Error;
+
 pub use check_connections::{CheckReport, check_connections};
 pub use import_instruments::{ImportSummary, import_instruments};
 

@@ -60,7 +60,10 @@ async fn check_fresh_after_import_then_stale_a_week_later() {
     assert_eq!(r.lines, ["OK sqlite", "OK duckdb", "OK instruments"]);
     assert!(r.ok);
     let later = check_connections(&config_dir(), tmp.path(), &clock(2026, 1, 20)).await;
-    assert_eq!(later.lines, ["OK sqlite", "FAILED instruments stale"]);
+    assert_eq!(
+        later.lines,
+        ["OK sqlite", "OK duckdb", "FAILED instruments stale"]
+    );
     assert!(!later.ok);
 }
 
@@ -68,7 +71,10 @@ async fn check_fresh_after_import_then_stale_a_week_later() {
 async fn check_on_empty_store_reports_empty() {
     let tmp = tempfile::tempdir().unwrap();
     let r = check_connections(&config_dir(), tmp.path(), &clock(2026, 1, 6)).await;
-    assert_eq!(r.lines, ["OK sqlite", "FAILED instruments empty"]);
+    assert_eq!(
+        r.lines,
+        ["OK sqlite", "OK duckdb", "FAILED instruments empty"]
+    );
 }
 
 #[tokio::test]

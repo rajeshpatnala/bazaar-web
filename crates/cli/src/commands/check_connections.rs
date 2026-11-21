@@ -1,10 +1,11 @@
-//! `check-connections`: SQLite, DuckDB and instrument-master freshness.
+//! `check-connections`: SQLite, `DuckDB` and instrument-master freshness.
 
 use std::path::Path;
 
 use bazaar_core::calendar::MarketCalendar;
 use bazaar_core::clock::Clock;
 use bazaar_core::config::{self, CalendarConfig};
+use bazaar_core::ports::InstrumentRepo;
 use bazaar_core::segment::Segment;
 use bazaar_store::{DuckStore, SqliteStore};
 
