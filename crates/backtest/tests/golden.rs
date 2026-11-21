@@ -441,3 +441,60 @@ fn ac7_folds_do_not_overlap_oos_uses_the_is_choice_and_trials_are_counted() {
     assert_eq!(res.pooled.trades, 80);
     assert_eq!(res.pooled.net_pnl, d("-7725.57"));
 }
+
+fn golden_pins() -> serde_json::Value {
+    let p =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/backtest/golden_baseline.json");
+    serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()
+}
+
+fn pin(v: &serde_json::Value, k: &str) -> Decimal {
+    d(v[k].as_str().unwrap())
+}
+
+#[test]
+fn ac6_baseline_stats_match_the_golden_fixture() {
+    let e = env();
+    let bars = candles(120);
+    let out = exec(&e, &bars, 5);
+    let m = Metrics::from_trades(&out.trades, d("100000"), &out.equity).unwrap();
+    let g = golden_pins();
+    let b = &g["baseline"];
+    assert_eq!(u64::from(m.trades), b["trades"].as_u64().unwrap());
+    assert_eq!(u64::from(m.wins), b["wins"].as_u64().unwrap());
+    assert_eq!(u64::from(m.losses), b["losses"].as_u64().unwrap());
+    assert_eq!(m.win_rate, pin(b, "win_rate"));
+    assert_eq!(m.net_pnl, pin(b, "net_pnl"));
+    assert_eq!(m.gross_profit, pin(b, "gross_profit"));
+    assert_eq!(m.gross_loss, pin(b, "gross_loss"));
+    assert_eq!(m.profit_factor, Some(pin(b, "profit_factor")));
+    assert_eq!(m.expectancy_r, Some(pin(b, "expectancy_r")));
+    assert_eq!(m.drawdown.max_abs, pin(b, "max_drawdown_abs"));
+}
+
+#[test]
+fn ac6_cost_sensitivity_doubling_slippage_lowers_net_and_keeps_the_trades() {
+    let e = env();
+    let bars = candles(120);
+    let base = exec(&e, &bars, 5);
+    let mut s = spec(&e, &bars, 0);
+    s.slippage_multiplier = d("2");
+    let hi = run(&s, &mut every(5), &regimes(&bars), &mut ApproveAll).unwrap();
+    let net = |o: &RunOutput| o.trades.iter().map(|t| t.net_pnl).sum::<Decimal>();
+    let g = golden_pins();
+    let want = &g["slippage_x2"];
+    assert_eq!(hi.trades.len(), want["trades"].as_u64().unwrap() as usize);
+    assert_eq!(net(&hi), pin(want, "net_pnl"));
+    assert_eq!(hi.trades.len(), base.trades.len());
+    assert!(net(&hi) < net(&base), "worse fills must cost P&L");
+    // Every trade is no better under heavier slippage.
+    for (a, b) in base.trades.iter().zip(&hi.trades) {
+        assert!(b.net_pnl <= a.net_pnl);
+    }
+    // Charges are not slippage: lines other than the price-driven ones stay positive on both.
+    assert!(
+        hi.trades
+            .iter()
+            .all(|t| t.entry.charges.total().unwrap() > Decimal::ZERO)
+    );
+}
