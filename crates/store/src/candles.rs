@@ -15,6 +15,18 @@ use sqlx::sqlite::SqliteRow;
 
 use crate::sqlite::{SqliteStore, map_err};
 
+/// Longest accepted symbol, most rows per write and per read (local memory/disk guard).
+const MAX_SYMBOL_LEN: usize = 64;
+const MAX_BATCH: usize = 100_000;
+const MAX_READ_ROWS: usize = 1_000_000;
+
+fn check_symbol(symbol: &str) -> Result<(), RepoError> {
+    if symbol.is_empty() || symbol.len() > MAX_SYMBOL_LEN {
+        return Err(RepoError::TooLarge);
+    }
+    Ok(())
+}
+
 const UPSERT: &str = "INSERT INTO candles (symbol, interval, adjusted, close_ns, open, high, \
     low, close, volume) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
     ON CONFLICT (symbol, interval, adjusted, close_ns) DO UPDATE SET open = excluded.open, \
@@ -22,7 +34,7 @@ const UPSERT: &str = "INSERT INTO candles (symbol, interval, adjusted, close_ns,
 
 const READ: &str = "SELECT interval, adjusted, close_ns, open, high, low, close, volume \
     FROM candles WHERE symbol = ? AND interval = ? AND adjusted = ? \
-    AND close_ns >= ? AND close_ns <= ? ORDER BY close_ns";
+    AND close_ns >= ? AND close_ns <= ? ORDER BY close_ns LIMIT ?";
 
 const LAST: &str = "SELECT MAX(close_ns) AS last FROM candles \
     WHERE symbol = ? AND interval = ? AND adjusted = ?";
@@ -92,6 +104,10 @@ fn to_candle(row: &SqliteRow) -> Result<Candle, RepoError> {
 
 impl CandleSink for SqliteStore {
     async fn write_candles(&self, symbol: &str, candles: &[Candle]) -> Result<u64, RepoError> {
+        check_symbol(symbol)?;
+        if candles.len() > MAX_BATCH {
+            return Err(RepoError::TooLarge);
+        }
         let Some(first) = candles.first() else {
             return Ok(0);
         };
@@ -124,21 +140,27 @@ impl CandleSink for SqliteStore {
                 .map_err(|e| map_err(&e))?;
         }
         tx.commit().await.map_err(|e| map_err(&e))?;
-        Ok(rows.len() as u64)
+        // Rows upserted (inserted or replaced), not net new rows.
+        u64::try_from(rows.len()).map_err(|_| RepoError::Other)
     }
 }
 
 impl CandleSource for SqliteStore {
     async fn read_candles(&self, range: &CandleRange) -> Result<Vec<Candle>, RepoError> {
+        check_symbol(&range.symbol)?;
         let rows = sqlx::query(READ)
             .bind(&range.symbol)
             .bind(interval_label(range.interval))
             .bind(i64::from(range.adjusted))
             .bind(to_ns(&range.from)?)
             .bind(to_ns(&range.to)?)
+            .bind(i64::try_from(MAX_READ_ROWS + 1).map_err(|_| RepoError::Other)?)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| map_err(&e))?;
+        if rows.len() > MAX_READ_ROWS {
+            return Err(RepoError::TooLarge);
+        }
         rows.iter().map(to_candle).collect()
     }
 

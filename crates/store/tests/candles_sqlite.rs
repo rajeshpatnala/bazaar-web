@@ -120,3 +120,54 @@ async fn corrupt_stored_values_fail_closed() {
         assert_eq!(damaged(sql).await, Err(RepoError::Corrupt), "{sql}");
     }
 }
+
+#[tokio::test]
+async fn db_level_failure_mid_transaction_rolls_back_earlier_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("c.db");
+    let s = SqliteStore::open(&path).await.unwrap();
+    let mut raw = SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+        .await
+        .unwrap();
+    // The trigger rejects the second row of the batch inside the transaction.
+    sqlx::query(
+        "CREATE TRIGGER no_999 BEFORE INSERT ON candles WHEN NEW.volume = 999 \
+         BEGIN SELECT RAISE(ABORT, 'boom'); END",
+    )
+    .execute(&mut raw)
+    .await
+    .unwrap();
+    let batch = [
+        bar(at(9, 20), "100.00", 1, false),
+        bar(at(9, 25), "100.00", 999, false),
+    ];
+    assert!(s.write_candles("ABC", &batch).await.is_err());
+    let got = s
+        .read_candles(&range("ABC", at(9, 0), at(15, 30), false))
+        .await
+        .unwrap();
+    assert_eq!(got, Vec::<Candle>::new());
+    assert_eq!(
+        s.last_candle_ts("ABC", Interval::Min5, false)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn oversized_symbol_and_batch_are_refused() {
+    let s = SqliteStore::open_in_memory().await.unwrap();
+    let one = [bar(at(9, 20), "100.00", 1, false)];
+    for sym in [String::new(), "A".repeat(65)] {
+        assert_eq!(s.write_candles(&sym, &one).await, Err(RepoError::TooLarge));
+        assert_eq!(
+            s.read_candles(&range(&sym, at(9, 0), at(15, 30), false))
+                .await,
+            Err(RepoError::TooLarge)
+        );
+    }
+    let big = vec![one[0].clone(); 100_001];
+    assert_eq!(s.write_candles("ABC", &big).await, Err(RepoError::TooLarge));
+    assert_eq!(s.write_candles(&"A".repeat(64), &one).await, Ok(1));
+}

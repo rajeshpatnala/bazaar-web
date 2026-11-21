@@ -24,6 +24,9 @@ pub enum RepoError {
     /// A uniqueness or optimistic-version check failed (the stale writer loses).
     #[error("store conflict")]
     Conflict,
+    /// Input or result over a size cap (symbol length, batch size, rows read).
+    #[error("store input or result too large")]
+    TooLarge,
     /// Any other storage failure.
     #[error("store error")]
     Other,
@@ -38,6 +41,7 @@ impl RepoError {
             Self::Schema => "schema",
             Self::Corrupt => "corrupt",
             Self::Conflict => "conflict",
+            Self::TooLarge => "too_large",
             Self::Other => "other",
         }
     }
