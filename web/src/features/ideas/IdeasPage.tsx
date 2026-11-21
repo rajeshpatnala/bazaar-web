@@ -1,4 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { ReviewOrderDialog } from "../orders/ReviewOrderDialog";
+import { Button } from "../../shared/ui/Button";
 import { Card } from "../../shared/ui/Card";
 import { Disclosure } from "../../shared/ui/Disclosure";
 import { Money } from "../../shared/ui/Money";
@@ -53,6 +56,7 @@ export function IdeaCard({ idea, action }: { idea: Idea; action?: React.ReactNod
 
 export function IdeasPage() {
   const q = useQuery(ideasQuery);
+  const [reviewing, setReviewing] = useState<string | null>(null);
   return (
     <section>
       <h2>Ideas to consider today</h2>
@@ -63,7 +67,14 @@ export function IdeasPage() {
       {q.data && q.data.ideas.length === 0 && (
         <EmptyView title="No high-quality setups today">Nothing met the checks. Waiting is a fine choice.</EmptyView>
       )}
-      {q.data?.ideas.map((i) => <IdeaCard key={i.id} idea={i} />)}
+      {q.data?.ideas.map((i) => (
+        <IdeaCard
+          key={i.id}
+          idea={i}
+          action={<Button variant="ghost" onClick={() => setReviewing(i.id)}>Review paper order</Button>}
+        />
+      ))}
+      {reviewing && <ReviewOrderDialog ideaId={reviewing} onClose={() => setReviewing(null)} />}
     </section>
   );
 }

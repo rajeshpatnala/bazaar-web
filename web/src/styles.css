@@ -62,6 +62,7 @@ body {
   color: var(--amber);
   border-top: 1px solid var(--hairline);
   overflow-wrap: anywhere;
+  z-index: 20; /* above the modal scrim (10): the disclaimer is never dimmed */
 }
 @media (prefers-reduced-motion: reduce) {
   * {

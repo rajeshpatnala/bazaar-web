@@ -14,11 +14,12 @@
 .idea-figures { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1.5rem; font-family: var(--font-ui); }
 .idea-figures dt { color: var(--muted); }
 .idea-figures dd { margin: 0; }
+.dialog-actions { display: flex; gap: 0.75rem; justify-content: flex-end; margin-top: 1rem; }
 .ui-money { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .ui-state { padding: 1.5rem; text-align: center; color: var(--muted); }
 .ui-state-title { font-size: 1.1rem; color: var(--ink); margin: 0 0 0.5rem; }
 .ui-state-error { color: var(--red); background: var(--red-bg); border-radius: var(--radius); }
-.ui-backdrop { position: fixed; inset: 0; background: var(--scrim); display: flex; align-items: center; justify-content: center; padding: 1rem; z-index: 10; }
+.ui-backdrop { position: fixed; inset: 0; background: var(--scrim); display: flex; align-items: center; justify-content: center; padding: 1rem 1rem 6rem; z-index: 10; }
 .ui-modal { background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow); padding: 1.5rem; max-width: 520px; width: 100%; max-height: 90vh; overflow: auto; }
 .ui-modal h2 { margin-top: 0; font-weight: 500; }
 @media (prefers-reduced-motion: no-preference) { .ui-btn { transition: background-color 0.15s; } }
