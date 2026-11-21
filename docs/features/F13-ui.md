@@ -14,6 +14,7 @@ Owner area: `web/` (nothing in `crates/`). Plan: `.agents/plans/F13-ui-slice1.md
 
 ## What was built
 - Slice 0: `web/src/styles/tokens.css` (CSS variables from preview B), `styles.css`, `app/AppShell.tsx`, `app/ModeBadge.tsx` (badge, read-only live note, server time in IST), `shared/ui/Disclaimer.tsx` (fixed footer), `formatIstIso`, aggregate `mocks/handlers.ts` with empty `ideas`/`orders`/`account` stubs, placeholder `/ideas` route.
+- Slice 1 (BZ-502): `shared/ui/` Card, Tag, Button, Disclosure, Modal (labelled, Esc, Tab trap, focus return), Money (via `formatInr`), StateViews (Loading/Empty/Error), styled by `shared/ui/ui.css` from tokens only.
 
 ## Disclaimer wording
 - Owner approved 2026-11-21: "For education and personal analysis. Not investment advice; not SEBI registered; markets carry risk. Past performance does not guarantee future results." Applied in `crates/core/src/disclaimer.rs`, `web/src/shared/disclaimer.ts`, README, the compliance skill reference and the regime doc comment; byte-equality pinned by `rust_and_ts_disclaimers_are_byte_equal`.
@@ -36,3 +37,4 @@ Owner area: `web/` (nothing in `crates/`). Plan: `.agents/plans/F13-ui-slice1.md
 
 ## History
 - 2026-11-21: slice 0 (shell, tokens, disclaimer, IST helper, stubs).
+- 2026-11-21: slice 1 (shared UI components, BZ-502).
