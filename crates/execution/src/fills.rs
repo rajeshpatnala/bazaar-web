@@ -1,15 +1,14 @@
 //! `FillHandler` (executor reports -> order state) and the `RecordingExecutor` test double.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use bazaar_core::ports::OrderRepo;
 use chrono::DateTime;
 use chrono_tz::Tz;
 
 use crate::approval::Track;
-use crate::executor::{ApprovedOrder, ExecAck, ExecError, Executor};
+use crate::executor::ExecError;
 use crate::state::ExecEvent;
-use crate::types::IntentId;
 
 /// Moves an order to `PartiallyFilled` or `Filled` from a cumulative filled quantity.
 #[derive(Debug)]
@@ -44,35 +43,57 @@ impl<O: OrderRepo> FillHandler<O> {
     }
 }
 
-/// Executor that places nothing real: records ids and fills in full. For tests of every layer.
-#[derive(Debug, Clone, Default)]
-pub struct RecordingExecutor {
-    placed: Arc<Mutex<Vec<IntentId>>>,
-}
+#[cfg(any(test, feature = "test-support"))]
+pub use recording::RecordingExecutor;
 
-impl RecordingExecutor {
-    /// Ids placed so far, in order.
-    #[must_use]
-    pub fn placed(&self) -> Vec<IntentId> {
-        self.placed
-            .lock()
-            .map_or_else(|_| Vec::new(), |v| v.clone())
+/// Test double; compiled only for tests or the off-by-default `test-support` feature.
+#[cfg(any(test, feature = "test-support"))]
+mod recording {
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    use std::sync::{Arc, Mutex};
+
+    use crate::executor::{ApprovedOrder, ExecAck, ExecError, Executor};
+    use crate::types::IntentId;
+
+    /// Executor that places nothing real: records ids and fills in full. For tests of every layer.
+    #[derive(Debug, Clone, Default)]
+    pub struct RecordingExecutor {
+        placed: Arc<Mutex<Vec<IntentId>>>,
+        hang: Arc<AtomicBool>,
     }
-}
 
-#[allow(clippy::unused_async_trait_impl)] // nothing to await
-impl Executor for RecordingExecutor {
-    async fn place(&self, order: &ApprovedOrder) -> Result<ExecAck, ExecError> {
-        self.placed
-            .lock()
-            .map_err(|_| ExecError::Storage)?
-            .push(order.intent().id);
-        Ok(ExecAck {
-            intent_id: order.intent().id,
-            external_id: "rec".into(),
-            filled_qty: order.intent().qty,
-            avg_price: None,
-        })
+    impl RecordingExecutor {
+        /// Make `place` never return (timeout tests).
+        pub fn set_hang(&self, on: bool) {
+            self.hang.store(on, SeqCst);
+        }
+
+        /// Ids placed so far, in order.
+        #[must_use]
+        pub fn placed(&self) -> Vec<IntentId> {
+            self.placed
+                .lock()
+                .map_or_else(|_| Vec::new(), |v| v.clone())
+        }
+    }
+
+    #[allow(clippy::unused_async_trait_impl)] // nothing to await
+    impl Executor for RecordingExecutor {
+        async fn place(&self, order: &ApprovedOrder) -> Result<ExecAck, ExecError> {
+            if self.hang.load(SeqCst) {
+                std::future::pending::<()>().await;
+            }
+            self.placed
+                .lock()
+                .map_err(|_| ExecError::Storage)?
+                .push(order.intent().id);
+            Ok(ExecAck {
+                intent_id: order.intent().id,
+                external_id: "rec".into(),
+                filled_qty: order.intent().qty,
+                avg_price: None,
+            })
+        }
     }
 }
 
@@ -81,6 +102,7 @@ mod tests {
     use super::*;
     use crate::pipeline::fakes::MemOrders;
     use crate::state::OrderState;
+    use crate::types::IntentId;
     use bazaar_core::ports::{AuditDraft, OrderRecord};
 
     async fn sent(o: &MemOrders) -> Track {

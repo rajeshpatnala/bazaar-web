@@ -1,7 +1,7 @@
 //! `ApprovalQueue`: intents waiting for a user decision, first decision wins, TTL expiry.
 //! Owned by the single-writer pipeline, so no lock is needed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use bazaar_core::ports::{ApprovalDecision, ApprovalRepo, OrderRepo, RepoError};
 use chrono::{DateTime, Duration};
@@ -28,6 +28,8 @@ pub enum Outcome {
     /// Kill switch, breaker or rate limiter refused the send.
     GuardBlocked(ExecError),
     Placed(ExecAck),
+    /// Sent, but the fill could not be written; reconciliation (F14) repairs the stored state.
+    PlacedUnrecorded(ExecAck),
     /// The executor refused or failed after the send.
     ExecFailed(ExecError),
     /// A second decision on a finished intent gets the first outcome.
@@ -54,12 +56,26 @@ impl Track {
         event: ExecEvent,
         now: DateTime<Tz>,
     ) -> Result<(), ExecError> {
+        self.advance_as(orders, event, now, "pipeline").await
+    }
+
+    /// Like [`Self::advance`], recording who caused the event (the approver for approve/decline).
+    ///
+    /// # Errors
+    /// `ExecError::Storage` for an illegal transition or a failed or stale write.
+    pub async fn advance_as<O: OrderRepo>(
+        &mut self,
+        orders: &O,
+        event: ExecEvent,
+        now: DateTime<Tz>,
+        actor: &str,
+    ) -> Result<(), ExecError> {
         let next = self.state.apply(event).map_err(|_| ExecError::Storage)?;
         let audit = bazaar_core::ports::AuditDraft {
             ts_ist_rfc3339: now.to_rfc3339(),
-            actor: "pipeline".into(),
+            actor: actor.to_owned(),
             kind: event.as_str().into(),
-            payload: serde_json::json!({ "intent": self.id.to_string(), "state": next.as_str() })
+            payload: serde_json::json!({ "intent": self.id.to_string(), "state": next.as_str(), "actor": actor, "at": now.to_rfc3339() })
                 .to_string(),
         };
         let version = orders
@@ -103,7 +119,12 @@ pub struct ApprovalQueue<A: ApprovalRepo> {
     ttl: Duration,
     pending: HashMap<IntentId, Pending>,
     done: HashMap<IntentId, Outcome>,
+    done_order: VecDeque<IntentId>,
+    pub(crate) done_cap: usize,
 }
+
+/// Finished outcomes kept for `AlreadyDecided` (oldest evicted first).
+pub const MAX_DONE: usize = 10_000;
 
 impl<A: ApprovalRepo> ApprovalQueue<A> {
     /// `ttl_secs` is `execution.approval_ttl_secs`.
@@ -113,6 +134,8 @@ impl<A: ApprovalRepo> ApprovalQueue<A> {
             ttl: Duration::seconds(i64::from(ttl_secs)),
             pending: HashMap::new(),
             done: HashMap::new(),
+            done_order: VecDeque::new(),
+            done_cap: MAX_DONE,
         }
     }
 
@@ -120,10 +143,10 @@ impl<A: ApprovalRepo> ApprovalQueue<A> {
         self.pending.insert(p.track.id, p);
     }
 
-    /// True when `p` is past the TTL at `now`.
+    /// True when `p` has reached the TTL at `now`.
     #[must_use]
     pub fn is_expired(&self, p: &Pending, now: DateTime<Tz>) -> bool {
-        now - p.queued_at > self.ttl
+        now - p.queued_at >= self.ttl
     }
 
     /// Take the intent out of the queue, or report its finished outcome.
@@ -138,7 +161,14 @@ impl<A: ApprovalRepo> ApprovalQueue<A> {
     }
 
     pub fn finish(&mut self, id: IntentId, outcome: Outcome) {
-        self.done.insert(id, outcome);
+        if self.done.insert(id, outcome).is_none() {
+            self.done_order.push_back(id);
+        }
+        while self.done_order.len() > self.done_cap {
+            if let Some(old) = self.done_order.pop_front() {
+                self.done.remove(&old);
+            }
+        }
     }
 
     /// Ids past the TTL at `now`, oldest id first.

@@ -5,6 +5,7 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bazaar_core::clock::Clock;
 use bazaar_core::ports::{
@@ -96,7 +97,7 @@ type Reply<T> = oneshot::Sender<T>;
 
 enum Cmd {
     Submit(OrderIntent, Reply<Outcome>),
-    Decide(IntentId, ApprovalDecision, Reply<Outcome>),
+    Decide(IntentId, ApprovalDecision, String, Reply<Outcome>),
     Kill {
         engage: bool,
         actor: String,
@@ -130,16 +131,22 @@ impl PipelineHandle {
         self.call(|r| Cmd::Submit(intent, r)).await
     }
 
-    /// Record the user's decision; a second one gets `AlreadyDecided`.
+    /// Record the user's decision (`actor` is the authenticated session user, audited); a second
+    /// one gets `AlreadyDecided`.
     ///
     /// # Errors
-    /// `Closed` when the pipeline stopped.
+    /// `TooLong` (actor over [`MAX_TEXT`]) or `Closed` when the pipeline stopped.
     pub async fn decide(
         &self,
         id: IntentId,
         d: ApprovalDecision,
+        actor: &str,
     ) -> Result<Outcome, PipelineError> {
-        self.call(|r| Cmd::Decide(id, d, r)).await
+        if actor.chars().count() > MAX_TEXT {
+            return Err(PipelineError::TooLong);
+        }
+        let actor = actor.to_owned();
+        self.call(|r| Cmd::Decide(id, d, actor, r)).await
     }
 
     /// Engage (`text` = reason) or release (`text` = typed phrase). `actor` and `text` are capped
@@ -184,6 +191,7 @@ pub struct Pipeline<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: Ap
     fills: FillHandler<O>,
     queue: ApprovalQueue<A>,
     clock: Arc<dyn Clock>,
+    io_timeout: Duration,
 }
 
 impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo> std::fmt::Debug
@@ -197,6 +205,8 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo> std
 impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
     Pipeline<X, G, Q, O, A>
 {
+    /// `io_timeout` bounds every quote read, gate run and send so one hung call cannot stall the
+    /// writer (the composition root supplies it from config).
     pub fn new(
         exec: X,
         gate: Arc<G>,
@@ -205,6 +215,7 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
         approvals: A,
         approval_ttl_secs: u32,
         clock: Arc<dyn Clock>,
+        io_timeout: Duration,
     ) -> Self {
         Self {
             exec,
@@ -214,6 +225,7 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
             orders,
             queue: ApprovalQueue::new(approvals, approval_ttl_secs),
             clock,
+            io_timeout,
         }
     }
 
@@ -229,7 +241,7 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
             while let Some(cmd) = rx.recv().await {
                 match cmd {
                     Cmd::Submit(i, r) => drop(r.send(me.submit(i).await)),
-                    Cmd::Decide(id, d, r) => drop(r.send(me.decide(id, d).await)),
+                    Cmd::Decide(id, d, who, r) => drop(r.send(me.decide(id, d, &who).await)),
                     Cmd::Kill {
                         engage,
                         actor,
@@ -258,13 +270,21 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
 
     async fn run_gate(&self, intent: &OrderIntent, quote: Option<QuoteSnapshot>) -> GateOutcome {
         let (g, i) = (self.gate.clone(), intent.clone());
-        tokio::task::spawn_blocking(move || g.gate(&i, quote.as_ref()))
-            .await
-            .unwrap_or_else(|_| GateOutcome::Block("gate task failed".into()))
+        let run = tokio::task::spawn_blocking(move || g.gate(&i, quote.as_ref()));
+        match self.bounded(run).await {
+            Some(Ok(g)) => g,
+            Some(Err(_)) => GateOutcome::Block("gate task failed".into()),
+            None => GateOutcome::Block("gate timed out".into()),
+        }
+    }
+
+    /// `None` when `f` did not finish within the I/O timeout.
+    async fn bounded<T>(&self, f: impl Future<Output = T>) -> Option<T> {
+        tokio::time::timeout(self.io_timeout, f).await.ok()
     }
 
     /// Insert, gate and queue one intent.
-    pub async fn submit(&mut self, intent: OrderIntent) -> Outcome {
+    pub(crate) async fn submit(&mut self, intent: OrderIntent) -> Outcome {
         self.try_submit(intent).await.unwrap_or_else(Outcome::Error)
     }
 
@@ -296,8 +316,12 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
             version: 0,
             state: OrderState::Proposed,
         };
-        let quote = self.quotes.quote(&intent.symbol).await.ok();
-        match self.run_gate(&intent, quote).await {
+        // No quote, or a late one, blocks explicitly: the gate never sees `None` (SEC-109-3).
+        let blocked = match self.bounded(self.quotes.quote(&intent.symbol)).await {
+            Some(Ok(q)) => self.run_gate(&intent, Some(q)).await,
+            _ => GateOutcome::Block("no fresh quote".into()),
+        };
+        match blocked {
             GateOutcome::Pass => {
                 track
                     .advance(&*self.orders, ExecEvent::GatePassed, now)
@@ -320,20 +344,41 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
         }
     }
 
-    /// Resolve a user decision. First wins; later calls get `AlreadyDecided`.
-    pub async fn decide(&mut self, id: IntentId, d: ApprovalDecision) -> Outcome {
+    /// Resolve a user decision. First wins; later calls get `AlreadyDecided`. A storage failure
+    /// before anything was persisted puts the intent back in the queue so the user can retry; after
+    /// that point the intent is finished as `Error` (its stored state is what reconciliation uses).
+    pub(crate) async fn decide(
+        &mut self,
+        id: IntentId,
+        d: ApprovalDecision,
+        actor: &str,
+    ) -> Outcome {
         match self.queue.begin(id) {
             Begin::Unknown => Outcome::Error(ExecError::InvalidInput("unknown intent")),
             Begin::Done(o) => Outcome::AlreadyDecided(Box::new(o)),
-            Begin::Live(mut p) => {
-                let out = self.resolve(&mut p, d).await.unwrap_or_else(Outcome::Error);
-                self.queue.finish(id, out.clone());
-                out
-            }
+            Begin::Live(mut p) => match self.resolve(&mut p, d, actor).await {
+                Ok(out) => {
+                    self.queue.finish(id, out.clone());
+                    out
+                }
+                Err(e) if p.track.state == OrderState::PendingApproval => {
+                    self.queue.enqueue(*p);
+                    Outcome::Error(e)
+                }
+                Err(e) => {
+                    self.queue.finish(id, Outcome::Error(e.clone()));
+                    Outcome::Error(e)
+                }
+            },
         }
     }
 
-    async fn resolve(&self, p: &mut Pending, d: ApprovalDecision) -> Result<Outcome, ExecError> {
+    async fn resolve(
+        &self,
+        p: &mut Pending,
+        d: ApprovalDecision,
+        actor: &str,
+    ) -> Result<Outcome, ExecError> {
         let now = self.clock.now_ist();
         let o = &*self.orders;
         if self.queue.is_expired(p, now) {
@@ -341,11 +386,12 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
             return Ok(Outcome::Expired);
         }
         if d == ApprovalDecision::Decline {
-            self.queue
-                .record(p.track.id, d, now)
-                .await
-                .map_err(|_| ExecError::Storage)?;
-            p.track.advance(o, ExecEvent::Decline, now).await?;
+            if let Some(prior) = self.first_wins(p, d, now, actor).await? {
+                return Ok(prior);
+            }
+            p.track
+                .advance_as(o, ExecEvent::Decline, now, actor)
+                .await?;
             return Ok(Outcome::Declined);
         }
         // Re-gate with a fresh quote; no quote means no approval-time gate, so it blocks.
@@ -357,22 +403,35 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
             p.track.advance(o, ExecEvent::GateBlocked, now).await?;
             return Ok(blocked_outcome(blocked));
         }
-        self.queue
-            .record(p.track.id, d, now)
-            .await
-            .map_err(|_| ExecError::Storage)?;
-        p.track.advance(o, ExecEvent::Approve, now).await?;
+        if let Some(prior) = self.first_wins(p, d, now, actor).await? {
+            return Ok(prior);
+        }
+        p.track
+            .advance_as(o, ExecEvent::Approve, now, actor)
+            .await?;
         if let Err(e) = self.exec.peek(&p.intent, now).await {
             p.track.advance(o, ExecEvent::GuardBlocked, now).await?;
             return Ok(Outcome::GuardBlocked(e));
         }
         p.track.advance(o, ExecEvent::Send, now).await?;
         let order = ApprovedOrder::new(p.intent.clone());
-        match self.exec.place(&order).await {
+        // A send that hangs is an unknown outcome, never a retry.
+        let sent = self
+            .bounded(self.exec.place(&order))
+            .await
+            .unwrap_or(Err(ExecError::Unknown));
+        match sent {
             Ok(ack) => {
-                self.fills
+                // The order is out: a failed fill write must not hide that (RISK-109-2).
+                if self
+                    .fills
                     .apply(&mut p.track, p.intent.qty, ack.filled_qty, now)
-                    .await?;
+                    .await
+                    .is_err()
+                {
+                    tracing::error!(intent = %p.track.id, "order sent but fill not recorded");
+                    return Ok(Outcome::PlacedUnrecorded(ack));
+                }
                 Ok(Outcome::Placed(ack))
             }
             Err(e) => {
@@ -385,6 +444,34 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
                 Ok(Outcome::ExecFailed(e))
             }
         }
+    }
+
+    /// Persist the decision. `Some(outcome)` when the repo already holds a different one: the
+    /// stored decision stands and nothing is sent (RISK-109-1, SEC-109-1).
+    async fn first_wins(
+        &self,
+        p: &mut Pending,
+        d: ApprovalDecision,
+        now: DateTime<Tz>,
+        actor: &str,
+    ) -> Result<Option<Outcome>, ExecError> {
+        let stored = self
+            .queue
+            .record(p.track.id, d, now)
+            .await
+            .map_err(|_| ExecError::Storage)?;
+        if stored == d {
+            return Ok(None);
+        }
+        let prior = if stored == ApprovalDecision::Decline {
+            p.track
+                .advance_as(&*self.orders, ExecEvent::Decline, now, actor)
+                .await?;
+            Outcome::Declined
+        } else {
+            Outcome::Error(ExecError::InvalidInput("conflicting decision"))
+        };
+        Ok(Some(Outcome::AlreadyDecided(Box::new(prior))))
     }
 
     /// Expire every queued intent past its TTL; returns how many.
@@ -430,7 +517,10 @@ pub(crate) mod fakes {
     use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 
     #[derive(Default)]
-    pub(crate) struct MemOrders(pub Mutex<HashMap<u128, (u32, String)>>);
+    pub(crate) struct MemOrders(
+        pub Mutex<HashMap<u128, (u32, String)>>,
+        pub Mutex<Option<String>>,
+    );
     impl OrderRepo for MemOrders {
         async fn insert(&self, o: OrderRecord, _: AuditDraft, _: ChainFn) -> Result<(), RepoError> {
             let mut m = self.0.lock().unwrap();
@@ -457,6 +547,9 @@ pub(crate) mod fakes {
             _: AuditDraft,
             _: ChainFn,
         ) -> Result<u32, RepoError> {
+            if self.1.lock().unwrap().as_deref() == Some(st.as_str()) {
+                return Err(RepoError::Other);
+            }
             let mut m = self.0.lock().unwrap();
             let e = m.get_mut(&id).ok_or(RepoError::Other)?;
             if e.0 != ver {
@@ -480,9 +573,12 @@ pub(crate) mod fakes {
         }
     }
 
-    pub(crate) struct Quotes(pub AtomicBool);
+    pub(crate) struct Quotes(pub AtomicBool, pub AtomicBool);
     impl QuoteSource for Quotes {
         async fn quote(&self, _: &str) -> Result<QuoteSnapshot, SourceError> {
+            if self.1.load(SeqCst) {
+                std::future::pending::<()>().await;
+            }
             if self.0.load(SeqCst) {
                 return Err(SourceError::Unavailable);
             }
@@ -546,6 +642,10 @@ pub(crate) mod fakes {
 
     /// Rig with `per_min` rate slots, `pnl` day P&L (rupees) and a 300 s approval TTL.
     pub(crate) async fn rig(per_min: u32, pnl: i64) -> Rig {
+        rig_with(per_min, pnl, MemApprovals::default()).await
+    }
+
+    pub(crate) async fn rig_with(per_min: u32, pnl: i64, approvals: MemApprovals) -> Rig {
         let repo = Arc::new(MemRepo::default());
         let clock = Arc::new(Tick(Mutex::new(start())));
         let kill = KillSwitch::new(
@@ -572,11 +672,12 @@ pub(crate) mod fakes {
         let pipe = Pipeline::new(
             exec,
             gate.clone(),
-            Quotes(AtomicBool::new(false)),
+            Quotes(AtomicBool::new(false), AtomicBool::new(false)),
             orders.clone(),
-            MemApprovals::default(),
+            approvals,
             300,
             clock.clone(),
+            Duration::from_millis(150),
         );
         Rig {
             pipe,
@@ -607,15 +708,15 @@ mod tests {
     async fn happy_path_places_once_and_second_approval_is_already_decided() {
         let mut r = rig(10, 0).await;
         queued(&mut r, 1, false).await;
-        let out = r.pipe.decide(IntentId(1), Approve).await;
+        let out = r.pipe.decide(IntentId(1), Approve, "u").await;
         assert!(matches!(&out, Outcome::Placed(a) if a.filled_qty == 2));
         assert_eq!(r.orders.0.lock().unwrap()[&1].1, "filled");
         assert_eq!(
-            r.pipe.decide(IntentId(1), Approve).await,
+            r.pipe.decide(IntentId(1), Approve, "u").await,
             Outcome::AlreadyDecided(Box::new(out))
         );
         assert!(matches!(
-            r.pipe.decide(IntentId(1), Decline).await,
+            r.pipe.decide(IntentId(1), Decline, "u").await,
             Outcome::AlreadyDecided(_)
         ));
         assert_eq!(ids(&r), vec![1]);
@@ -635,7 +736,7 @@ mod tests {
             new_risk: Decimal::from(9),
         };
         assert_eq!(
-            r.pipe.decide(IntentId(2), Approve).await,
+            r.pipe.decide(IntentId(2), Approve, "u").await,
             Outcome::QuoteDrifted {
                 new_risk: Decimal::from(9)
             }
@@ -653,7 +754,7 @@ mod tests {
             .0
             .store(true, std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
-            r.pipe.decide(IntentId(1), Approve).await,
+            r.pipe.decide(IntentId(1), Approve, "u").await,
             Outcome::GateBlocked("no fresh quote".into())
         );
         assert_eq!(ids(&r), Vec::<u128>::new());
@@ -665,13 +766,19 @@ mod tests {
         queued(&mut r, 1, false).await;
         queued(&mut r, 2, false).await;
         queued(&mut r, 3, false).await;
-        assert_eq!(r.pipe.decide(IntentId(3), Decline).await, Outcome::Declined);
+        assert_eq!(
+            r.pipe.decide(IntentId(3), Decline, "u").await,
+            Outcome::Declined
+        );
         *r.clock.0.lock().unwrap() += chrono::Duration::seconds(301);
-        assert_eq!(r.pipe.decide(IntentId(1), Approve).await, Outcome::Expired);
+        assert_eq!(
+            r.pipe.decide(IntentId(1), Approve, "u").await,
+            Outcome::Expired
+        );
         assert_eq!(r.pipe.expire_stale().await, 1);
         assert_eq!(r.orders.0.lock().unwrap()[&2].1, "expired");
         assert_eq!(
-            r.pipe.decide(IntentId(9), Approve).await,
+            r.pipe.decide(IntentId(9), Approve, "u").await,
             Outcome::Error(ExecError::InvalidInput("unknown intent"))
         );
         assert_eq!(ids(&r), Vec::<u128>::new());
@@ -693,7 +800,7 @@ mod tests {
         r.pipe.exec.engage("t", "test").await.unwrap();
         // Pipeline layer: refused before the executor is touched.
         assert_eq!(
-            r.pipe.decide(IntentId(1), Approve).await,
+            r.pipe.decide(IntentId(1), Approve, "u").await,
             Outcome::GuardBlocked(ExecError::KillSwitch)
         );
         assert_eq!(ids(&r), Vec::<u128>::new());
@@ -702,7 +809,7 @@ mod tests {
         assert_eq!(r.pipe.exec.place(&raw).await, Err(ExecError::KillSwitch));
         assert_eq!(ids(&r), Vec::<u128>::new());
         assert!(matches!(
-            r.pipe.decide(IntentId(2), Approve).await,
+            r.pipe.decide(IntentId(2), Approve, "u").await,
             Outcome::Placed(_)
         ));
         assert_eq!(ids(&r), vec![2]);
@@ -714,7 +821,7 @@ mod tests {
         queued(&mut r, 1, false).await;
         queued(&mut r, 2, true).await;
         assert_eq!(
-            r.pipe.decide(IntentId(1), Approve).await,
+            r.pipe.decide(IntentId(1), Approve, "u").await,
             Outcome::GuardBlocked(ExecError::BreakerTripped)
         );
         let raw = ApprovedOrder::new(intent(5, false));
@@ -723,7 +830,7 @@ mod tests {
             Err(ExecError::BreakerTripped)
         );
         assert!(matches!(
-            r.pipe.decide(IntentId(2), Approve).await,
+            r.pipe.decide(IntentId(2), Approve, "u").await,
             Outcome::Placed(_)
         ));
         assert_eq!(ids(&r), vec![2]);
@@ -737,12 +844,12 @@ mod tests {
         }
         // peek consumed nothing: the single slot is still there for the first order's place.
         assert!(matches!(
-            r.pipe.decide(IntentId(1), Approve).await,
+            r.pipe.decide(IntentId(1), Approve, "u").await,
             Outcome::Placed(_)
         ));
         // Pipeline layer refuses the second entry; guard layer would too.
         assert_eq!(
-            r.pipe.decide(IntentId(2), Approve).await,
+            r.pipe.decide(IntentId(2), Approve, "u").await,
             Outcome::GuardBlocked(ExecError::RateLimited)
         );
         assert_eq!(
@@ -753,7 +860,7 @@ mod tests {
             Err(ExecError::RateLimited)
         );
         assert!(matches!(
-            r.pipe.decide(IntentId(3), Approve).await,
+            r.pipe.decide(IntentId(3), Approve, "u").await,
             Outcome::Placed(_)
         ));
         assert_eq!(ids(&r), vec![1, 3]);
@@ -780,7 +887,7 @@ mod tests {
         h.set_kill_switch(true, "a", "why").await.unwrap();
         assert_eq!(h.submit(intent(1, false)).await.unwrap(), Outcome::Queued);
         assert_eq!(
-            h.decide(IntentId(1), Approve).await.unwrap(),
+            h.decide(IntentId(1), Approve, "u").await.unwrap(),
             Outcome::GuardBlocked(ExecError::KillSwitch)
         );
         h.set_kill_switch(false, "a", "RELEASE KILL SWITCH")
@@ -788,6 +895,114 @@ mod tests {
             .unwrap();
         assert_eq!(h.expire_stale().await.unwrap(), 0);
         assert_eq!(rec.placed(), vec![]);
+    }
+
+    #[tokio::test]
+    async fn stored_decline_beats_a_later_approve_and_nothing_is_sent() {
+        let seeded = MemApprovals::default();
+        seeded.0.lock().unwrap().insert(1, Decline);
+        let mut r = rig_with(10, 0, seeded).await;
+        queued(&mut r, 1, false).await;
+        let out = r.pipe.decide(IntentId(1), Approve, "u").await;
+        assert_eq!(out, Outcome::AlreadyDecided(Box::new(Outcome::Declined)));
+        assert_eq!(r.orders.0.lock().unwrap()[&1].1, "declined");
+        assert_eq!(ids(&r), Vec::<u128>::new());
+    }
+
+    #[tokio::test]
+    async fn fill_write_failure_after_send_is_reported_as_placed_unrecorded() {
+        let mut r = rig(10, 0).await;
+        queued(&mut r, 1, false).await;
+        *r.orders.1.lock().unwrap() = Some("filled".into());
+        let out = r.pipe.decide(IntentId(1), Approve, "u").await;
+        assert!(matches!(out, Outcome::PlacedUnrecorded(a) if a.filled_qty == 2));
+        assert_eq!(ids(&r), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn storage_failure_before_approval_keeps_the_intent_for_a_retry() {
+        let mut r = rig(10, 0).await;
+        queued(&mut r, 1, false).await;
+        *r.orders.1.lock().unwrap() = Some("approved".into());
+        assert_eq!(
+            r.pipe.decide(IntentId(1), Approve, "u").await,
+            Outcome::Error(ExecError::Storage)
+        );
+        *r.orders.1.lock().unwrap() = None;
+        assert!(matches!(
+            r.pipe.decide(IntentId(1), Approve, "u").await,
+            Outcome::Placed(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn ttl_boundary_expires_at_ttl_not_before() {
+        let mut r = rig(10, 0).await;
+        queued(&mut r, 1, false).await;
+        queued(&mut r, 2, false).await;
+        *r.clock.0.lock().unwrap() += chrono::Duration::seconds(299);
+        assert!(matches!(
+            r.pipe.decide(IntentId(1), Approve, "u").await,
+            Outcome::Placed(_)
+        ));
+        *r.clock.0.lock().unwrap() += chrono::Duration::seconds(1);
+        assert_eq!(
+            r.pipe.decide(IntentId(2), Approve, "u").await,
+            Outcome::Expired
+        );
+    }
+
+    #[tokio::test]
+    async fn hung_quote_and_hung_send_time_out() {
+        let mut r = rig(10, 0).await;
+        r.pipe
+            .quotes
+            .1
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            r.pipe.submit(intent(1, false)).await,
+            Outcome::GateBlocked("no fresh quote".into())
+        );
+        r.pipe
+            .quotes
+            .1
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        queued(&mut r, 2, false).await;
+        r.rec.set_hang(true);
+        assert_eq!(
+            r.pipe.decide(IntentId(2), Approve, "u").await,
+            Outcome::ExecFailed(ExecError::Unknown)
+        );
+        assert_eq!(r.orders.0.lock().unwrap()[&2].1, "unknown");
+    }
+
+    #[tokio::test]
+    async fn submit_without_a_quote_blocks_and_actor_is_audited_and_capped() {
+        let mut r = rig(10, 0).await;
+        r.pipe
+            .quotes
+            .0
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            r.pipe.submit(intent(1, false)).await,
+            Outcome::GateBlocked("no fresh quote".into())
+        );
+        let h = rig(10, 0).await.pipe.spawn();
+        assert_eq!(
+            h.decide(IntentId(1), Approve, &"x".repeat(501)).await,
+            Err(PipelineError::TooLong)
+        );
+    }
+
+    #[test]
+    fn finished_outcomes_are_capped() {
+        let mut q = ApprovalQueue::new(MemApprovals::default(), 300);
+        q.done_cap = 2;
+        for i in 1..=3 {
+            q.finish(IntentId(i), Outcome::Declined);
+        }
+        assert!(matches!(q.begin(IntentId(1)), Begin::Unknown));
+        assert!(matches!(q.begin(IntentId(3)), Begin::Done(_)));
     }
 
     #[derive(Debug, Clone)]
@@ -816,7 +1031,7 @@ mod tests {
         /// after expiry, or without an approval.
         #[test]
         fn nothing_is_placed_unless_every_condition_holds(ops in proptest::collection::vec(op(), 1..40)) {
-            let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+            let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
             rt.block_on(async {
                 let mut r = rig(1000, 0).await;
                 // (id, reduce_only, queued_at_secs, open)
@@ -833,15 +1048,15 @@ mod tests {
                         }
                         Op::Decline(i) => {
                             if let Some(it) = items.get_mut(i) {
-                                r.pipe.decide(IntentId(it.0), Decline).await;
+                                r.pipe.decide(IntentId(it.0), Decline, "u").await;
                                 it.3 = false;
                             }
                         }
                         Op::Approve(i) => {
                             if let Some(it) = items.get_mut(i) {
-                                let out = r.pipe.decide(IntentId(it.0), Approve).await;
+                                let out = r.pipe.decide(IntentId(it.0), Approve, "u").await;
                                 if it.3 {
-                                    let ok = secs - it.2 <= 300 && !blocked && (!killed || it.1);
+                                    let ok = secs - it.2 < 300 && !blocked && (!killed || it.1);
                                     if ok { expected.push(it.0); }
                                     prop_assert_eq!(matches!(out, Outcome::Placed(_)), ok);
                                     it.3 = false;

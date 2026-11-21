@@ -22,5 +22,9 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+[features]
+# Exposes `RecordingExecutor` to other crates' tests. Off by default.
+test-support = []
+
 [dev-dependencies]
 proptest.workspace = true
