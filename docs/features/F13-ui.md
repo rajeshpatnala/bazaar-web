@@ -15,6 +15,7 @@ Owner area: `web/` (nothing in `crates/`). Plan: `.agents/plans/F13-ui-slice1.md
 ## What was built
 - Slice 0: `web/src/styles/tokens.css` (CSS variables from preview B), `styles.css`, `app/AppShell.tsx`, `app/ModeBadge.tsx` (badge, read-only live note, server time in IST), `shared/ui/Disclaimer.tsx` (fixed footer), `formatIstIso`, aggregate `mocks/handlers.ts` with empty `ideas`/`orders`/`account` stubs, placeholder `/ideas` route.
 - Slice 1 (BZ-502): `shared/ui/` Card, Tag, Button, Disclosure, Modal (labelled, Esc, Tab trap, focus return), Money (via `formatInr`), StateViews (Loading/Empty/Error), styled by `shared/ui/ui.css` from tokens only.
+- Slice 2 (BZ-503): `/ideas` screen: `features/ideas/` (provisional `types.ts`, `queries.ts`, `IdeasPage.tsx` with `IdeaCard`), mock `GET /api/v1/ideas` in `mocks/ideas.ts`; shows symbol, Buy/Sell, max loss first, entry/stop/target, quantity, low-evidence, regime and data-delayed badges, Why panel; loading/empty/error states.
 
 ## Disclaimer wording
 - Owner approved 2026-11-21: "For education and personal analysis. Not investment advice; not SEBI registered; markets carry risk. Past performance does not guarantee future results." Applied in `crates/core/src/disclaimer.rs`, `web/src/shared/disclaimer.ts`, README, the compliance skill reference and the regime doc comment; byte-equality pinned by `rust_and_ts_disclaimers_are_byte_equal`.
@@ -33,8 +34,10 @@ Owner area: `web/` (nothing in `crates/`). Plan: `.agents/plans/F13-ui-slice1.md
 - DONE (PR 103): add "not SEBI registered" to the disclaimer in `crates/core/src/disclaimer.rs` and `web/src/shared/disclaimer.ts` together.
 - Swap provisional types for generated schema types (F13 server slice).
 - WebSocket events replacing polling mocks (F13 server slice).
+- CR-124-4: per-idea validation deferred to BZ-509 (generated types)
 - Owner to confirm the disclaimer wording, the read-only live note and the "Ideas to consider today" copy.
 
 ## History
 - 2026-11-21: slice 0 (shell, tokens, disclaimer, IST helper, stubs).
 - 2026-11-21: slice 1 (shared UI components, BZ-502).
+- 2026-11-22: slice 2 (ideas screen, BZ-503).

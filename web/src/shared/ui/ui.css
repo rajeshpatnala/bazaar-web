@@ -11,6 +11,9 @@
 .ui-btn:focus-visible, .ui-disclosure-btn:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
 .ui-disclosure-btn { background: none; border: 0; padding: 0.25rem 0; font: 0.9rem var(--font-ui); color: var(--green); text-decoration: underline; cursor: pointer; }
 .ui-disclosure-body { padding: 0.5rem 0; color: var(--ink); }
+.idea-figures { display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 1.5rem; font-family: var(--font-ui); }
+.idea-figures dt { color: var(--muted); }
+.idea-figures dd { margin: 0; }
 .ui-money { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .ui-state { padding: 1.5rem; text-align: center; color: var(--muted); }
 .ui-state-title { font-size: 1.1rem; color: var(--ink); margin: 0 0 0.5rem; }
