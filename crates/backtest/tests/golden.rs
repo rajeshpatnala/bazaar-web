@@ -463,18 +463,18 @@ fn ac6_baseline_stats_match_the_golden_fixture() {
     let bars = candles(120);
     let out = exec(&e, &bars, 5);
     let m = Metrics::from_trades(&out.trades, d("100000"), &out.equity).unwrap();
-    let g = golden_pins();
-    let b = &g["baseline"];
-    assert_eq!(u64::from(m.trades), b["trades"].as_u64().unwrap());
-    assert_eq!(u64::from(m.wins), b["wins"].as_u64().unwrap());
-    assert_eq!(u64::from(m.losses), b["losses"].as_u64().unwrap());
-    assert_eq!(m.win_rate, pin(b, "win_rate"));
-    assert_eq!(m.net_pnl, pin(b, "net_pnl"));
-    assert_eq!(m.gross_profit, pin(b, "gross_profit"));
-    assert_eq!(m.gross_loss, pin(b, "gross_loss"));
-    assert_eq!(m.profit_factor, Some(pin(b, "profit_factor")));
-    assert_eq!(m.expectancy_r, Some(pin(b, "expectancy_r")));
-    assert_eq!(m.drawdown.max_abs, pin(b, "max_drawdown_abs"));
+    let pins = golden_pins();
+    let base = &pins["baseline"];
+    assert_eq!(u64::from(m.trades), base["trades"].as_u64().unwrap());
+    assert_eq!(u64::from(m.wins), base["wins"].as_u64().unwrap());
+    assert_eq!(u64::from(m.losses), base["losses"].as_u64().unwrap());
+    assert_eq!(m.win_rate, pin(base, "win_rate"));
+    assert_eq!(m.net_pnl, pin(base, "net_pnl"));
+    assert_eq!(m.gross_profit, pin(base, "gross_profit"));
+    assert_eq!(m.gross_loss, pin(base, "gross_loss"));
+    assert_eq!(m.profit_factor, Some(pin(base, "profit_factor")));
+    assert_eq!(m.expectancy_r, Some(pin(base, "expectancy_r")));
+    assert_eq!(m.drawdown.max_abs, pin(base, "max_drawdown_abs"));
     // Synthetic and thin: 24 trades is below the 30-trade bar, so the evidence label is low.
     let facts = bazaar_backtest::metrics::RunFacts {
         folds: 1,
@@ -482,8 +482,8 @@ fn ac6_baseline_stats_match_the_golden_fixture() {
         costs_approximate: false,
         trials_in_run: 1,
     };
-    let a = bazaar_backtest::metrics::assess(&e.cfg, &m, &facts).unwrap();
-    assert_eq!(a.label, EvidenceLabel::LowEvidence);
+    let verdict = bazaar_backtest::metrics::assess(&e.cfg, &m, &facts).unwrap();
+    assert_eq!(verdict.label, EvidenceLabel::LowEvidence);
 }
 
 #[test]
