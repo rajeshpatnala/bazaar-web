@@ -4,9 +4,18 @@
 //!
 //! Score = 100 x (`w_conf` x confluence + `w_regime` x `regime_fit` + `w_liq` x liquidity + `w_evid` x
 //! evidence) minus the event penalty, clamped to 0..=100. A `low_evidence` name is capped at
-//! `low_evidence_cap` BEFORE ranking, so it never sits above a proven one on confluence alone.
-//! Ties break on tradingsymbol ascending, then instrument token. Every weight and the floor are
+//! `low_evidence_cap` for display, and the ranking is structural: every proven name sorts above
+//! every low-evidence one (rule R1), then score descending, tradingsymbol ascending, instrument
+//! token. "Proven" means at least `min_trades_evidence` trades, out of sample, net of costs, with
+//! profit factor above 1 and positive average R. Evidence with a non-finite metric (a zero-loss
+//! profit factor is infinite) is unusable and counts as none. Confluence is 0 when fewer than two
+//! families are enabled (one family cannot agree with anything). Every weight and the floor are
 //! UNVERIFIED proposals (`docs/strategy/F11-scanner-defaults.md`).
+//!
+//! Deferred: `EVENT_WINDOW_DAYS` and `PF_FULL_SCORE` stay code constants for now; they move to
+//! `[scanner]` (window 1..=30, full-score PF > 1) with the owner's confirmation, tracked in
+//! `docs/features/F11-scanner.md`. Step 4 must derive `families_total` from the enabled
+//! strategies' families in config, never from the hits.
 
 use bazaar_core::config::{ScannerConfig, ScannerWeights};
 use bazaar_regime::Fit;
@@ -64,7 +73,8 @@ pub struct Scored {
     pub score: u8,
     /// The primary hit (best fit, then reward:risk) lacks adequate evidence.
     pub low_evidence: bool,
-    /// Evidence behind the primary hit, as read from the source (`None` = no evidence).
+    /// Usable evidence behind the primary hit (`None` = none, or unusable: in sample, gross,
+    /// non-finite).
     pub evidence: Option<Evidence>,
     /// Warnings known at scoring time (events near, calendar not checked, low evidence).
     pub warnings: Vec<Warning>,
@@ -77,6 +87,8 @@ fn usable(e: &Evidence) -> bool {
         && e.profit_factor.is_finite()
         && e.profit_factor >= 0.0
         && e.win_rate.is_finite()
+        && e.avg_r.is_finite()
+        && e.max_drawdown_pct.is_finite()
 }
 
 /// Profit factor mapped to 0..=1: 1.0 (break-even) is 0, `PF_FULL_SCORE` is 1.
@@ -94,14 +106,20 @@ fn evidence_component(own: Option<&Evidence>, wide: Option<&Evidence>, cfg: &Sca
     let prior = wide
         .filter(|w| usable(w) && w.trades >= cfg.min_trades_evidence)
         .map_or(1.0, |w| w.profit_factor);
+    if own.avg_r <= 0.0 {
+        return 0.0; // no positive expectancy: no evidence credit
+    }
     let n = f64::from(own.trades);
     let weight = n / (n + f64::from(cfg.shrink_k));
     quality(weight.mul_add(own.profit_factor, (1.0 - weight) * prior))
 }
 
-/// Enough trades, out of sample, net of costs.
+/// Enough trades, out of sample, net of costs, and the edge is positive (profit factor above 1,
+/// average R above 0). Thin or losing evidence is low evidence.
 fn proven(e: Option<&Evidence>, cfg: &ScannerConfig) -> bool {
-    e.is_some_and(|e| usable(e) && e.trades >= cfg.min_trades_evidence)
+    e.is_some_and(|e| {
+        usable(e) && e.trades >= cfg.min_trades_evidence && e.profit_factor > 1.0 && e.avg_r > 0.0
+    })
 }
 
 /// Absolute log scale: 0 at the floor, 1 at `liquidity_full_score_multiple` times the floor.
@@ -111,7 +129,10 @@ fn liquidity_component(median: Decimal, cfg: &ScannerConfig) -> f64 {
     if floor <= Decimal::ZERO || !mult.is_finite() || mult <= 1.0 {
         return 0.0;
     }
-    let ratio = (median / floor).to_f64().unwrap_or(0.0);
+    let ratio = median
+        .checked_div(floor)
+        .and_then(|r| r.to_f64())
+        .unwrap_or(0.0);
     if ratio <= 1.0 {
         return 0.0;
     }
@@ -181,7 +202,11 @@ fn to_score(x: f64) -> u8 {
     if !x.is_finite() {
         return 0;
     }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to 0..=100 and finite-checked"
+    )]
     let v = x.clamp(0.0, 100.0).round() as u8;
     v
 }
@@ -205,6 +230,12 @@ pub fn score(c: Candidate, cx: &ScoreContext<'_>) -> Scored {
     fams.dedup();
     let agreeing = u32::try_from(fams.len()).unwrap_or(u32::MAX);
     let total = cx.families_total.max(agreeing).max(1);
+    // One enabled family gives every name full confluence for nothing: score it 0.
+    let confluence = if cx.families_total < 2 {
+        0.0
+    } else {
+        f64::from(agreeing) / f64::from(total)
+    };
     let (own, wide) = primary(&c.hits).map_or((None, None), |h| {
         let id = h.signal.strategy_id;
         (
@@ -215,7 +246,7 @@ pub fn score(c: Candidate, cx: &ScoreContext<'_>) -> Scored {
     });
     let (penalty, mut warnings) = event_penalty(&c, cx);
     let components = Components {
-        confluence: f64::from(agreeing) / f64::from(total),
+        confluence,
         regime_fit: regime_component(&c.hits),
         liquidity: liquidity_component(c.median_traded_value, cfg),
         evidence: evidence_component(own.as_ref(), wide.as_ref(), cfg),
@@ -235,18 +266,20 @@ pub fn score(c: Candidate, cx: &ScoreContext<'_>) -> Scored {
         raw_score,
         score,
         low_evidence,
-        evidence: own,
+        evidence: own.filter(usable),
         warnings,
     }
 }
 
-/// Rank: score (capped) descending, then tradingsymbol ascending, then instrument token. The
-/// order depends on nothing else, so the same inputs give the same list.
+/// Rank: proven above low-evidence (rule R1, whatever the scores), then score (capped)
+/// descending, tradingsymbol ascending, instrument token. The order depends on nothing else, so
+/// the same inputs give the same list.
 pub fn rank(scored: &mut [Scored]) {
     scored.sort_by(|a, b| {
         let (ia, ib) = (&a.candidate.instrument, &b.candidate.instrument);
-        b.score
-            .cmp(&a.score)
+        a.low_evidence
+            .cmp(&b.low_evidence)
+            .then(b.score.cmp(&a.score))
             .then_with(|| ia.tradingsymbol.cmp(&ib.tradingsymbol))
             .then_with(|| ia.instrument_token.cmp(&ib.instrument_token))
     });

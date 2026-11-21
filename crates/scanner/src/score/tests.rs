@@ -336,7 +336,8 @@ fn golden_ranks_on_the_fixture() {
     );
     // ALPHA: conf 2/3, regime 1, liq 1, evid q(0.667*2+0.333*1=1.667)=0.667 -> 100*(0.2+0.25+0.15+0.2)=80.
     // BETA:  conf 1/3, regime 1, liq 1, evid q(0.5*1.6+0.5=1.3)=0.3 -> 100*(0.1+0.25+0.15+0.09)=59 (proven).
-    // GAMMA: conf 1/3, regime .5, liq 1, no evid -> 100*(0.1+0.125+0.15)=37.5 -> 38.
+    // GAMMA: conf 1/3, regime .5, liq 1, no evid -> 100*(0.1+0.125+0.15)=37.5 -> 38. NOTE: this
+    // sits exactly on a .5 boundary and relies on round-half-away-from-zero (IEEE-exact today).
     assert_eq!(names(&r), vec!["ALPHA", "BETA", "GAMMA"]);
     assert_eq!(
         r.iter().map(|s| s.score).collect::<Vec<_>>(),
@@ -446,4 +447,152 @@ fn proven_evidence_is_not_capped() {
     assert!(!r[0].low_evidence);
     assert_eq!(r[0].score, r[0].raw_score);
     assert!(r[0].score > cfg().low_evidence_cap);
+}
+
+fn three_family_low() -> Candidate {
+    cand(
+        "AAA",
+        1,
+        vec![
+            hit("a", "breakout", false),
+            hit("b", "trend", false),
+            hit("c", "reversion", false),
+        ],
+        100,
+    )
+}
+
+#[test]
+fn weak_but_proven_still_ranks_above_strong_looking_low_evidence() {
+    // PROV: PF 1.1, 30 trades, thin liquidity: scores well below the cap. LOW: no evidence.
+    let prov = cand("ZZZ", 2, vec![hit("d", "trend", false)], 1);
+    let evidence = FakeEvidence {
+        own: vec![(2, ev(30, 1.1))],
+        ..FakeEvidence::default()
+    };
+    let r = run(
+        vec![three_family_low(), prov],
+        &evidence,
+        &FakeEvents::default(),
+    );
+    let p = r
+        .iter()
+        .find(|s| s.candidate.instrument.instrument_token == 2)
+        .unwrap();
+    assert!(!p.low_evidence);
+    assert!(
+        p.score < cfg().low_evidence_cap,
+        "proven score {} below the cap",
+        p.score
+    );
+    let l = r
+        .iter()
+        .find(|s| s.candidate.instrument.instrument_token == 1)
+        .unwrap();
+    assert!(
+        l.low_evidence && l.score > p.score,
+        "capped low still scores higher"
+    );
+    assert_eq!(names(&r), vec!["ZZZ", "AAA"]);
+}
+
+#[test]
+fn pf_at_or_below_one_or_non_positive_avg_r_is_not_proven() {
+    let c = cfg();
+    assert!(!proven(Some(&ev(100, 1.0)), &c));
+    assert!(!proven(Some(&ev(100, 0.8)), &c));
+    let mut neg = ev(100, 2.0);
+    neg.avg_r = 0.0;
+    assert!(!proven(Some(&neg), &c));
+    assert!(evidence_component(Some(&neg), None, &c).abs() < 1e-12);
+    assert!(proven(Some(&ev(100, 1.01)), &c));
+    let evidence = FakeEvidence {
+        own: vec![(1, ev(100, 0.8))],
+        ..FakeEvidence::default()
+    };
+    let r = run(vec![three_family_low()], &evidence, &FakeEvents::default());
+    assert!(r[0].low_evidence && r[0].score <= c.low_evidence_cap);
+}
+
+#[test]
+fn non_finite_metrics_and_zero_loss_pf_are_unusable_and_not_shown() {
+    let c = cfg();
+    let mutations: [fn(&mut Evidence); 3] = [
+        |e| e.avg_r = f64::NAN,
+        |e| e.max_drawdown_pct = f64::NAN,
+        |e| e.profit_factor = f64::INFINITY,
+    ];
+    for mutate in mutations {
+        let mut e = ev(100, 2.0);
+        mutate(&mut e);
+        assert!(!usable(&e));
+        assert!(!proven(Some(&e), &c));
+        let evidence = FakeEvidence {
+            own: vec![(1, e)],
+            ..FakeEvidence::default()
+        };
+        let r = run(vec![three_family_low()], &evidence, &FakeEvents::default());
+        assert!(r[0].low_evidence);
+        assert!(
+            r[0].evidence.is_none(),
+            "unusable evidence is not passed on"
+        );
+    }
+}
+
+#[test]
+fn single_enabled_family_gives_zero_confluence() {
+    let c = cfg();
+    let (ev, events) = (FakeEvidence::default(), FakeEvents::default());
+    let cx = |n: u32| ScoreContext {
+        cfg: &c,
+        evidence: &ev,
+        events: &events,
+        decision_date: date(),
+        as_of: at(),
+        families_total: n,
+    };
+    let mk = || cand("AAA", 1, vec![hit("a", "trend", false)], 10);
+    assert!(score(mk(), &cx(1)).components.confluence.abs() < 1e-12);
+    assert!(score(mk(), &cx(0)).components.confluence.abs() < 1e-12);
+    assert!((score(mk(), &cx(2)).components.confluence - 0.5).abs() < 1e-12);
+}
+
+#[test]
+fn tiny_floor_does_not_panic_and_scores_zero_liquidity() {
+    let mut c = cfg();
+    c.min_median_traded_value = Decimal::new(1, 28);
+    assert!(liquidity_component(Decimal::MAX, &c).abs() < 1e-12);
+}
+
+#[test]
+fn primary_prefers_allowed_fit_then_reward_risk_then_id() {
+    let mut pen = hit("a", "trend", true);
+    pen.signal.reference_rr = Decimal::from(5);
+    let mut ok_low = hit("c", "trend", false);
+    ok_low.signal.reference_rr = Decimal::from(1);
+    let mut ok_high = hit("d", "trend", false);
+    ok_high.signal.reference_rr = Decimal::from(2);
+    let mut ok_high_b = hit("b", "trend", false);
+    ok_high_b.signal.reference_rr = Decimal::from(2);
+    let hits = vec![pen, ok_low, ok_high, ok_high_b];
+    assert_eq!(primary(&hits).unwrap().signal.strategy_id, "b");
+    assert!(primary(&[]).is_none());
+}
+
+#[test]
+fn event_on_day_five_penalises_and_day_six_does_not() {
+    let max = cfg().event_penalty_max_points;
+    let run_with = |d: i64| {
+        run(
+            vec![cand("AAA", 1, vec![hit("a", "trend", false)], 10)],
+            &FakeEvidence::default(),
+            &FakeEvents {
+                rows: vec![event(d, "AAA")],
+                empty: false,
+            },
+        )
+    };
+    assert!((run_with(5)[0].components.event_penalty - max / 6.0).abs() < 1e-9);
+    assert!(run_with(6)[0].components.event_penalty.abs() < 1e-12);
 }
