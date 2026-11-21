@@ -237,7 +237,7 @@ impl Config {
         Ok(cfg)
     }
 
-    /// RISK-102-1: the scanner's ban-list age may not exceed the G06 ceiling in `risk.toml`
+    /// The scanner's ban-list age may not exceed the G06 ceiling in `risk.toml`
     /// (`hard_limits.max_ban_list_age_hours`), so it cannot loosen the gate's bound.
     fn check_scanner_ceilings(&self) -> Result<(), ConfigError> {
         let ceiling = self.risk.hard_limits.max_ban_list_age_hours;
@@ -248,7 +248,7 @@ impl Config {
                 "scanner.max_ban_list_age_hours",
                 format!("is above the risk.toml hard_limits ceiling ({ceiling})"),
             )),
-            // RISK-102-2: the badge may not call a thinner record "enough" than the gate (G01).
+            // The badge may not call a thinner record "enough" than the gate (G01).
             Some(s) if s.min_trades_evidence < min_oos => Err(ConfigError::invalid(
                 StrategiesConfig::FILE,
                 "scanner.min_trades_evidence",

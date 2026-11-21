@@ -18,7 +18,7 @@ pub trait EvidenceSource: Send + Sync {
         as_of: DateTime<Tz>,
     ) -> Option<Evidence>;
     /// Strategy-wide stats (same `as_of` cutoff); the shrink prior only when they hold enough
-    /// trades, else neutral.
+    /// trades, else `None` (no evidence).
     fn for_strategy(&self, strategy_id: &str, as_of: DateTime<Tz>) -> Option<Evidence>;
 }
 

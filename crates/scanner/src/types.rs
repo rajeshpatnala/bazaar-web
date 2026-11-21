@@ -61,7 +61,7 @@ pub struct Evidence {
 }
 
 impl Evidence {
-    /// Finite numbers in range (QUAN-102-5, SEC-102-1).
+    /// Finite numbers in range.
     fn is_sane(&self) -> bool {
         let finite = self.profit_factor.is_finite()
             && self.avg_r.is_finite()
