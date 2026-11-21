@@ -57,10 +57,13 @@ async fn check_fresh_after_import_then_stale_a_week_later() {
     let c = clock(2026, 1, 6);
     import(tmp.path(), &good(), &c).await.unwrap();
     let r = check_connections(&config_dir(), tmp.path(), &c).await;
-    assert_eq!(r.lines, ["OK sqlite", "OK instruments"]);
+    assert_eq!(r.lines, ["OK sqlite", "OK duckdb", "OK instruments"]);
     assert!(r.ok);
     let later = check_connections(&config_dir(), tmp.path(), &clock(2026, 1, 20)).await;
-    assert_eq!(later.lines, ["OK sqlite", "FAILED instruments stale"]);
+    assert_eq!(
+        later.lines,
+        ["OK sqlite", "OK duckdb", "FAILED instruments stale"]
+    );
     assert!(!later.ok);
 }
 
@@ -68,7 +71,10 @@ async fn check_fresh_after_import_then_stale_a_week_later() {
 async fn check_on_empty_store_reports_empty() {
     let tmp = tempfile::tempdir().unwrap();
     let r = check_connections(&config_dir(), tmp.path(), &clock(2026, 1, 6)).await;
-    assert_eq!(r.lines, ["OK sqlite", "FAILED instruments empty"]);
+    assert_eq!(
+        r.lines,
+        ["OK sqlite", "OK duckdb", "FAILED instruments empty"]
+    );
 }
 
 #[tokio::test]
@@ -85,7 +91,11 @@ async fn placeholder_calendar_is_never_fresh() {
     let r = check_connections(cfg.path(), tmp.path(), &c).await;
     assert_eq!(
         r.lines,
-        ["OK sqlite", "FAILED instruments calendar_placeholder"]
+        [
+            "OK sqlite",
+            "OK duckdb",
+            "FAILED instruments calendar_placeholder"
+        ]
     );
 }
 
@@ -96,9 +106,9 @@ async fn missing_calendar_and_uncovered_year_fail_with_categories() {
     let c = clock(2026, 1, 6);
     import(tmp.path(), &good(), &c).await.unwrap();
     let r = check_connections(empty_cfg.path(), tmp.path(), &c).await;
-    assert_eq!(r.lines[1], "FAILED instruments calendar_unreadable");
+    assert_eq!(r.lines[2], "FAILED instruments calendar_unreadable");
     let r = check_connections(&config_dir(), tmp.path(), &clock(2031, 6, 2)).await;
-    assert_eq!(r.lines[1], "FAILED instruments calendar_out_of_range");
+    assert_eq!(r.lines[2], "FAILED instruments calendar_out_of_range");
 }
 
 #[tokio::test]
@@ -186,4 +196,15 @@ async fn existing_data_dir_keeps_its_mode() {
         .unwrap();
     let mode = std::fs::metadata(tmp.path()).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o755);
+}
+
+#[tokio::test]
+async fn unusable_candle_root_reports_failed_duckdb() {
+    // A quote in the path is refused by the candle store root check (it is spliced into SQL).
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("it's");
+    let r = check_connections(&config_dir(), &dir, &clock(2026, 1, 6)).await;
+    assert_eq!(r.lines[0], "OK sqlite");
+    assert!(r.lines[1].starts_with("FAILED duckdb "), "{:?}", r.lines);
+    assert!(!r.ok);
 }

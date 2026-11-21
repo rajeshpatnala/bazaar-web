@@ -51,6 +51,7 @@ fn check_on_empty_store_prints_ok_sqlite_then_failed_instruments_and_exits_1() {
     let text = out(&o);
     let mut lines = text.lines();
     assert_eq!(lines.next(), Some("OK sqlite"));
+    assert_eq!(lines.next(), Some("OK duckdb"));
     assert!(lines.next().unwrap().starts_with("FAILED instruments "));
 }
 
