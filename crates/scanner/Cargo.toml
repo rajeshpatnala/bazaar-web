@@ -14,6 +14,7 @@ workspace = true
 bazaar-core = { path = "../core" }
 bazaar-regime = { path = "../regime" }
 bazaar-risk = { path = "../risk" }
+bazaar-strategies = { path = "../strategies" }
 chrono.workspace = true
 chrono-tz.workspace = true
 rust_decimal.workspace = true
