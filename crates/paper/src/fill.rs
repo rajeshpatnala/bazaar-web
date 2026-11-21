@@ -19,6 +19,7 @@ use bazaar_execution::types::{IntentId, OrderKind, Product, Side};
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 
 /// Marker bit for ids of simulated square-off orders (never collides with a real intent id).
 pub const SYNTH_BASE: u128 = 1 << 127;
@@ -71,7 +72,8 @@ impl SimConfig {
     }
 }
 
-/// One market tick. `session_open` comes from [`session_open`] (calendar), never guessed.
+/// One market tick. Whether the session is open is decided by the simulator from the calendar
+/// and each order's instrument; the caller cannot assert it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tick {
     pub symbol: String,
@@ -80,7 +82,6 @@ pub struct Tick {
     pub at: DateTime<Tz>,
     pub lower_circuit: Option<Decimal>,
     pub upper_circuit: Option<Decimal>,
-    pub session_open: bool,
 }
 
 /// True only in the normal session. A calendar error (date outside the covered years) is closed.
@@ -254,18 +255,22 @@ impl FillSimulator {
         let steps = raw.checked_div(o.spec.tick_size)?;
         let steps = if buy { steps.ceil() } else { steps.floor() };
         let mut p = steps.checked_mul(o.spec.tick_size)?;
-        if let Some(u) = tick.upper_circuit {
-            p = p.min(u);
+        // A price beyond a circuit is pulled back to the nearest valid tick inside it (the
+        // circuit is the worst price the trader can get; it is never better than the slipped one).
+        if let Some(u) = tick.upper_circuit.filter(|u| p > *u) {
+            p = u.checked_div(o.spec.tick_size)?.floor() * o.spec.tick_size;
         }
-        if let Some(l) = tick.lower_circuit {
-            p = p.max(l);
+        if let Some(l) = tick.lower_circuit.filter(|l| p < *l) {
+            p = l.checked_div(o.spec.tick_size)?.ceil() * o.spec.tick_size;
         }
         (p > Decimal::ZERO).then_some(p)
     }
 
     fn take(&mut self, remaining: u32, tick: &Tick) -> u32 {
-        let cap = (Decimal::from(tick.volume) * self.cfg.max_participation).floor();
-        let cap = u32::try_from(cap.mantissa()).unwrap_or(u32::MAX);
+        let cap = Decimal::from(tick.volume)
+            .checked_mul(self.cfg.max_participation)
+            .map_or(Decimal::ZERO, |c| c.trunc());
+        let cap = cap.to_u32().unwrap_or(u32::MAX);
         if cap == 0 {
             return 0;
         }
@@ -279,6 +284,7 @@ impl FillSimulator {
         &mut self,
         tick: &Tick,
         now: DateTime<Tz>,
+        cal: &MarketCalendar,
         book: &mut WorkingBook,
     ) -> Vec<SimFill> {
         let mut out = Vec::new();
@@ -293,7 +299,9 @@ impl FillSimulator {
                 o.stale_flagged = true;
                 continue;
             }
-            if !tick.session_open || Self::at_circuit(o.side, tick) {
+            if !session_open(cal, tick.at, o.spec.segment, o.spec.kind)
+                || Self::at_circuit(o.side, tick)
+            {
                 continue;
             }
             let (price, reason) = match o.kind {
@@ -357,6 +365,16 @@ pub(crate) mod tests {
     use chrono::TimeZone;
     use chrono_tz::Asia::Kolkata;
 
+    pub(crate) fn cal() -> MarketCalendar {
+        let cfg: bazaar_core::config::CalendarConfig =
+            bazaar_core::config::load(std::path::Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/config"
+            )))
+            .unwrap();
+        MarketCalendar::from_config(&cfg)
+    }
+
     pub(crate) fn d(s: &str) -> Decimal {
         s.parse().unwrap()
     }
@@ -411,12 +429,11 @@ pub(crate) mod tests {
             at: at(10, 0, s),
             lower_circuit: Some(d("90")),
             upper_circuit: Some(d("110")),
-            session_open: true,
         }
     }
 
     fn run(book: &mut WorkingBook, t: &Tick) -> Vec<SimFill> {
-        FillSimulator::new(cfg()).on_tick(t, t.at, book)
+        FillSimulator::new(cfg()).on_tick(t, t.at, &cal(), book)
     }
 
     fn book_with(o: WorkingOrder) -> WorkingBook {
@@ -480,24 +497,99 @@ pub(crate) mod tests {
         let mut b = book_with(order(1, Side::Buy, 5, OrderKind::Market));
         let t = tick("100", 1000, 1);
         let late = t.at + chrono::Duration::seconds(6);
-        assert_eq!(FillSimulator::new(cfg()).on_tick(&t, late, &mut b).len(), 0);
+        assert_eq!(
+            FillSimulator::new(cfg())
+                .on_tick(&t, late, &cal(), &mut b)
+                .len(),
+            0
+        );
         assert!(b.orders[0].stale_flagged);
         let early = t.at - chrono::Duration::seconds(1);
         assert_eq!(
-            FillSimulator::new(cfg()).on_tick(&t, early, &mut b).len(),
+            FillSimulator::new(cfg())
+                .on_tick(&t, early, &cal(), &mut b)
+                .len(),
             0
         );
         // exactly at the bound still fills
         let edge = t.at + chrono::Duration::seconds(5);
-        assert_eq!(FillSimulator::new(cfg()).on_tick(&t, edge, &mut b).len(), 1);
+        assert_eq!(
+            FillSimulator::new(cfg())
+                .on_tick(&t, edge, &cal(), &mut b)
+                .len(),
+            1
+        );
     }
 
     #[test]
     fn no_fill_outside_the_session() {
+        let mut o = order(1, Side::Buy, 5, OrderKind::Market);
+        o.accepted_at = at(8, 0, 0);
+        let mut b = book_with(o);
+        let mut t = tick("100", 1000, 1);
+        t.at = at(9, 0, 1); // before the open
+        assert_eq!(run(&mut b, &t).len(), 0);
+        t.at = at(20, 0, 0); // after the close
+        assert_eq!(run(&mut b, &t).len(), 0);
+        t.at = at(10, 0, 1);
+        assert_eq!(run(&mut b, &t).len(), 1, "same order fills in session");
+    }
+
+    #[test]
+    fn date_outside_the_calendar_never_fills() {
+        let far = |h| Kolkata.with_ymd_and_hms(2030, 1, 7, h, 0, 0).unwrap();
+        let mut o = order(1, Side::Buy, 5, OrderKind::Market);
+        o.accepted_at = far(10);
+        let mut b = book_with(o);
+        let mut t = tick("100", 1000, 0);
+        t.at = far(11);
+        assert_eq!(run(&mut b, &t).len(), 0);
+    }
+
+    #[test]
+    fn participation_cap_is_exact_per_tick() {
+        // volume 100 x 0.1 = 10: every fill is 5..=10 (the Decimal scale must not inflate it)
+        let mut b = book_with(order(1, Side::Buy, 1000, OrderKind::Market));
+        let mut sim = FillSimulator::new(cfg());
+        for s in 1..30 {
+            let t = tick("100", 100, s);
+            for f in sim.on_tick(&t, t.at, &cal(), &mut b) {
+                assert!((5..=10).contains(&f.qty), "qty {}", f.qty);
+            }
+        }
+    }
+
+    #[test]
+    fn off_tick_circuit_is_pulled_back_inside_to_a_valid_tick() {
         let mut b = book_with(order(1, Side::Buy, 5, OrderKind::Market));
         let mut t = tick("100", 1000, 1);
-        t.session_open = false;
-        assert_eq!(run(&mut b, &t).len(), 0);
+        t.upper_circuit = Some(d("100.12")); // not a 0.05 multiple; slipped 100.10 is inside
+        assert_eq!(run(&mut b, &t)[0].price, d("100.10"));
+        let mut b = book_with(order(2, Side::Buy, 5, OrderKind::Market));
+        t.price = d("100.08"); // slipped to 100.18, beyond the circuit
+        assert_eq!(run(&mut b, &t)[0].price, d("100.10"));
+    }
+
+    #[test]
+    fn sim_config_from_the_real_config_maps_every_segment() {
+        let r: bazaar_core::config::RiskConfig = bazaar_core::config::load(std::path::Path::new(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/config"),
+        ))
+        .unwrap();
+        let c = SimConfig::from_section(&r.execution, 7);
+        assert_eq!(
+            (
+                c.slippage_equity_bps,
+                c.slippage_equity_derivatives_bps,
+                c.slippage_currency_bps,
+                c.slippage_commodity_bps
+            ),
+            (5, 5, 2, 5)
+        );
+        assert_eq!(
+            (c.max_participation, c.stale_after_secs, c.seed),
+            (d("0.1"), 5, 7)
+        );
     }
 
     #[test]
@@ -508,7 +600,7 @@ pub(crate) mod tests {
         let mut parts = 0;
         for s in 1..60 {
             let t = tick("100", 40, s); // cap = 4
-            for f in sim.on_tick(&t, t.at, &mut b) {
+            for f in sim.on_tick(&t, t.at, &cal(), &mut b) {
                 assert!(f.qty <= 4 && f.qty >= 1);
                 total += f.qty;
                 parts += 1;
@@ -540,7 +632,7 @@ pub(crate) mod tests {
             (1..30)
                 .flat_map(|s| {
                     let t = tick("100", 400, s);
-                    sim.on_tick(&t, t.at, &mut b)
+                    sim.on_tick(&t, t.at, &cal(), &mut b)
                 })
                 .map(|f| f.qty)
                 .collect::<Vec<_>>()

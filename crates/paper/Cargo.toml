@@ -18,6 +18,7 @@ chrono-tz.workspace = true
 rust_decimal.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 bazaar-core = { path = "../core", features = ["test-util"] }

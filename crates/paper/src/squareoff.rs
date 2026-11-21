@@ -49,6 +49,38 @@ pub fn check_square_off_time(
     }
 }
 
+/// A square-off time proven (against the calendar) to lie inside the normal session of every
+/// segment and kind in use. The only way to build one is [`Self::new`], so a mis-set
+/// `paper_mis_square_off_ist` (00:00, 23:59, a holiday-only time, an uncovered year) is refused at
+/// construction instead of silently disabling the square-off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValidatedSquareOffTime(NaiveTime);
+
+impl ValidatedSquareOffTime {
+    /// # Errors
+    /// `OutsideSession` when `at` is not in the normal session of any listed segment (or the list
+    /// is empty); `Calendar` when `date` is not covered (fail closed).
+    pub fn new(
+        cal: &MarketCalendar,
+        date: NaiveDate,
+        at: NaiveTime,
+        segments: &[(Segment, InstrumentKind)],
+    ) -> Result<Self, SquareOffError> {
+        if segments.is_empty() {
+            return Err(SquareOffError::OutsideSession);
+        }
+        for (seg, kind) in segments {
+            check_square_off_time(cal, date, at, *seg, *kind)?;
+        }
+        Ok(Self(at))
+    }
+
+    #[must_use]
+    pub const fn time(self) -> NaiveTime {
+        self.0
+    }
+}
+
 /// What one `on_clock` call did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SquareOffRun {
@@ -56,28 +88,40 @@ pub struct SquareOffRun {
     pub cancelled: Vec<IntentId>,
     /// Square-off orders queued: (id, symbol, qty).
     pub queued: Vec<(IntentId, String, u32)>,
+    /// Symbols that could not be queued (no spec, or quantity too large). Not final: the run is
+    /// repeated on the next clock call until none fail, and the caller must alarm.
+    pub failed: Vec<String>,
 }
 
-/// Square-off trigger; holds only the configured time and the last date it ran.
+/// Square-off trigger; holds only the configured time and the dates it last ran / was called.
 #[derive(Debug, Clone)]
 pub struct SquareOff {
     at: NaiveTime,
     done_on: Option<NaiveDate>,
+    last_seen: Option<NaiveDate>,
 }
 
 impl SquareOff {
     #[must_use]
-    pub const fn new(at: NaiveTime) -> Self {
-        Self { at, done_on: None }
+    pub const fn new(at: ValidatedSquareOffTime) -> Self {
+        Self {
+            at: at.0,
+            done_on: None,
+            last_seen: None,
+        }
     }
 
-    /// Run once per IST date when `now` has reached the configured time.
+    /// Run once per IST date when `now` has reached the configured time (repeated while a symbol
+    /// fails). On the first call of a new IST date any MIS position still open was carried over
+    /// and is overdue: it is queued at once (it fills on the first in-session tick).
     pub fn on_clock(&mut self, now: DateTime<Tz>, book: &mut WorkingBook) -> SquareOffRun {
         let today = now.date_naive();
-        if now.time() < self.at || self.done_on == Some(today) {
+        let new_day = self.last_seen.is_some_and(|d| d < today);
+        self.last_seen = Some(today);
+        let due = now.time() >= self.at && self.done_on != Some(today);
+        if !due && !new_day {
             return SquareOffRun::default();
         }
-        self.done_on = Some(today);
         let is_working_mis =
             |o: &crate::fill::WorkingOrder| o.product == Product::Mis && !o.square_off;
         let mut run = SquareOffRun {
@@ -91,10 +135,19 @@ impl SquareOff {
         };
         book.orders.retain(|o| !is_working_mis(o));
         for (symbol, net) in book.open_positions(Product::Mis) {
+            if book
+                .orders
+                .iter()
+                .any(|o| o.square_off && o.symbol == symbol)
+            {
+                continue; // already queued
+            }
             let Some(spec) = book.specs.get(&symbol).cloned() else {
+                run.failed.push(symbol);
                 continue;
             };
             let Ok(qty) = u32::try_from(net.unsigned_abs()) else {
+                run.failed.push(symbol);
                 continue;
             };
             let side = if net > 0 { Side::Sell } else { Side::Buy };
@@ -113,6 +166,9 @@ impl SquareOff {
                 square_off: true,
             });
             run.queued.push((id, symbol, qty));
+        }
+        if due && run.failed.is_empty() {
+            self.done_on = Some(today);
         }
         run
     }
@@ -144,11 +200,22 @@ mod tests {
         NaiveTime::from_hms_opt(h, m, 0).unwrap()
     }
 
+    fn vt(h: u32, m: u32) -> ValidatedSquareOffTime {
+        let day = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        ValidatedSquareOffTime::new(
+            &crate::fill::tests::cal(),
+            day,
+            t(h, m),
+            &[(Segment::Equity, InstrumentKind::CashNonFno)],
+        )
+        .unwrap()
+    }
+
     #[test]
     fn queues_opposite_order_once_per_day_at_the_configured_time() {
         let mut b = WorkingBook::default();
         mis_long(&mut b, 7);
-        let mut so = SquareOff::new(t(13, 30));
+        let mut so = SquareOff::new(vt(13, 30));
         assert_eq!(so.on_clock(at(13, 29, 59), &mut b), SquareOffRun::default());
         let run = so.on_clock(at(13, 30, 0), &mut b);
         assert_eq!(run.queued.len(), 1);
@@ -166,7 +233,7 @@ mod tests {
         m.product = Product::Mis;
         b.orders.push(m);
         b.orders.push(order(6, Side::Buy, 3, OrderKind::Market));
-        let run = SquareOff::new(t(13, 30)).on_clock(at(14, 0, 0), &mut b);
+        let run = SquareOff::new(vt(13, 30)).on_clock(at(14, 0, 0), &mut b);
         assert_eq!(run.cancelled, vec![IntentId(5)]);
         assert_eq!(b.orders.len(), 1);
         assert_eq!(b.orders[0].id, IntentId(6));
@@ -176,11 +243,11 @@ mod tests {
     fn squareoff_fills_on_next_tick_with_slippage_and_flat_position() {
         let mut b = WorkingBook::default();
         mis_long(&mut b, 4);
-        SquareOff::new(t(13, 30)).on_clock(at(13, 30, 0), &mut b);
+        SquareOff::new(vt(13, 30)).on_clock(at(13, 30, 0), &mut b);
         let mut sim = FillSimulator::new(crate::fill::tests::cfg());
         let mut tk = crate::fill::tests::tick("100", 1000, 0);
         tk.at = at(13, 30, 1);
-        let fills = sim.on_tick(&tk, tk.at, &mut b);
+        let fills = sim.on_tick(&tk, tk.at, &crate::fill::tests::cal(), &mut b);
         assert_eq!(fills.len(), 1);
         assert_eq!(fills[0].reason, FillReason::SquareOff);
         assert_eq!(fills[0].price, d("99.90"));
@@ -191,7 +258,7 @@ mod tests {
     #[test]
     fn no_open_mis_position_queues_nothing() {
         let mut b = WorkingBook::default();
-        let run = SquareOff::new(t(13, 30)).on_clock(at(14, 0, 0), &mut b);
+        let run = SquareOff::new(vt(13, 30)).on_clock(at(14, 0, 0), &mut b);
         assert_eq!(run, SquareOffRun::default());
     }
 
@@ -223,5 +290,58 @@ mod tests {
             check_square_off_time(&cal, far, t(13, 30), s, k),
             Err(SquareOffError::Calendar(_))
         ));
+    }
+
+    #[test]
+    fn validated_time_refuses_out_of_session_and_empty_lists() {
+        let cal = crate::fill::tests::cal();
+        let day = NaiveDate::from_ymd_opt(2026, 1, 5).unwrap();
+        let eq = [(Segment::Equity, InstrumentKind::CashNonFno)];
+        for bad in [t(0, 0), t(23, 59), t(15, 45)] {
+            assert_eq!(
+                ValidatedSquareOffTime::new(&cal, day, bad, &eq),
+                Err(SquareOffError::OutsideSession)
+            );
+        }
+        assert_eq!(
+            ValidatedSquareOffTime::new(&cal, day, t(13, 30), &[]),
+            Err(SquareOffError::OutsideSession)
+        );
+        assert_eq!(
+            ValidatedSquareOffTime::new(&cal, day, t(13, 30), &eq)
+                .unwrap()
+                .time(),
+            t(13, 30)
+        );
+    }
+
+    #[test]
+    fn missing_spec_is_reported_and_retried_not_marked_done() {
+        let mut b = WorkingBook::default();
+        mis_long(&mut b, 3);
+        b.specs.clear();
+        let mut so = SquareOff::new(vt(13, 30));
+        let run = so.on_clock(at(13, 30, 0), &mut b);
+        assert_eq!(
+            (run.failed.clone(), run.queued.len()),
+            (vec!["ABC".to_owned()], 0)
+        );
+        b.specs.insert("ABC".into(), spec());
+        let run = so.on_clock(at(13, 31, 0), &mut b);
+        assert_eq!((run.failed.len(), run.queued.len()), (0, 1));
+        assert_eq!(so.on_clock(at(13, 32, 0), &mut b), SquareOffRun::default());
+    }
+
+    #[test]
+    fn carried_mis_position_is_queued_at_the_first_clock_call_of_the_next_date() {
+        let mut b = WorkingBook::default();
+        mis_long(&mut b, 3);
+        let mut so = SquareOff::new(vt(13, 30));
+        assert_eq!(so.on_clock(at(10, 0, 0), &mut b), SquareOffRun::default());
+        let next = at(8, 0, 0) + chrono::Duration::days(1);
+        let run = so.on_clock(next, &mut b);
+        assert_eq!(run.queued.len(), 1, "carried position is overdue");
+        let run = so.on_clock(next + chrono::Duration::minutes(5), &mut b);
+        assert_eq!(run, SquareOffRun::default(), "not queued twice");
     }
 }

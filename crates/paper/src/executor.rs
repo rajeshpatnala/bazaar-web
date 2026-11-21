@@ -9,8 +9,10 @@
 //! check repeats at every fill, where a failure drops the order. AMO is not modelled: outside
 //! the normal session nothing fills, and a DAY order expires on the next IST date.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use bazaar_core::calendar::MarketCalendar;
 use bazaar_core::clock::Clock;
 use bazaar_core::ports::{AuditDraft, AuditRepo, PaperLedgerRepo};
 use bazaar_execution::audit::chain_hash;
@@ -24,7 +26,7 @@ use crate::account::{AccountError, ChargeSource, FillBooking, PaperAccount};
 use crate::fill::{
     FillReason, FillSimulator, InstrumentSpec, SimConfig, SimFill, Tick, WorkingBook, WorkingOrder,
 };
-use crate::squareoff::{SquareOff, SquareOffRun};
+use crate::squareoff::{SquareOff, SquareOffRun, ValidatedSquareOffTime};
 
 /// Instrument master lookup (lot, tick, freeze, segment).
 pub trait SpecSource: Send + Sync {
@@ -35,8 +37,13 @@ pub trait SpecSource: Send + Sync {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TickOutcome {
     pub fills: Vec<SimFill>,
-    /// Orders dropped because the account refused or the audit write failed (reason attached).
+    /// User orders dropped because the account refused (reason attached).
     pub rejected: Vec<(IntentId, ExecError)>,
+    /// Square-off fills that could not be booked (audit write failed, or the ledger or charge
+    /// source refused). Fail closed: the order stays working and retries on the next tick, so a
+    /// position stays open until this clears. The caller must alarm on any entry here; each one
+    /// is also logged at error level on every tick.
+    pub blocked_square_offs: Vec<(IntentId, ExecError)>,
 }
 
 /// What one clock call did.
@@ -44,6 +51,8 @@ pub struct TickOutcome {
 pub struct ClockOutcome {
     pub square_off: SquareOffRun,
     pub expired: Vec<IntentId>,
+    /// Cancelled or expired orders whose audit row could not be written.
+    pub audit_failed: Vec<IntentId>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -60,9 +69,12 @@ pub struct PaperExecutor<R, C, A, S> {
     audit: A,
     specs: S,
     clock: Arc<dyn Clock>,
+    cal: Arc<MarketCalendar>,
     sim: Mutex<FillSimulator>,
     book: Mutex<WorkingBook>,
     square: Mutex<SquareOff>,
+    /// Orders whose failure was already audited (one row per failure, not one per retry).
+    failed_audited: Mutex<HashSet<IntentId>>,
     /// Serialises tick and clock handling so fills book in order.
     driver: tokio::sync::Mutex<()>,
 }
@@ -79,17 +91,20 @@ impl<R: PaperLedgerRepo, C: ChargeSource, A: AuditRepo, S: SpecSource> PaperExec
         audit: A,
         specs: S,
         clock: Arc<dyn Clock>,
+        cal: Arc<MarketCalendar>,
         cfg: SimConfig,
-        square_off_at: chrono::NaiveTime,
+        square_off_at: ValidatedSquareOffTime,
     ) -> Self {
         Self {
             account,
             audit,
             specs,
             clock,
+            cal,
             sim: Mutex::new(FillSimulator::new(cfg)),
             book: Mutex::new(WorkingBook::default()),
             square: Mutex::new(SquareOff::new(square_off_at)),
+            failed_audited: Mutex::new(HashSet::new()),
             driver: tokio::sync::Mutex::new(()),
         }
     }
@@ -106,14 +121,15 @@ impl<R: PaperLedgerRepo, C: ChargeSource, A: AuditRepo, S: SpecSource> PaperExec
         lock(&self.book).orders.len()
     }
 
-    /// Validate and accept one order into the working book (no fill). `place` calls this; it is
-    /// public so the paper crate can be driven in tests without an `ApprovedOrder`.
+    /// Validate and accept one order into the working book (no fill). Crate-private on purpose:
+    /// the only public entry is `Executor::place(&ApprovedOrder)`, so nothing outside this crate
+    /// can put an order on the paper book without the gate and the approval.
     ///
     /// # Errors
     /// `InvalidInput` (lot, tick, freeze, quantity, position, unknown instrument, duplicate),
     /// `MarginUnavailable` (no reference price or no charge estimate), `InsufficientFunds`,
     /// `Storage`.
-    pub async fn accept(&self, i: &OrderIntent) -> Result<ExecAck, ExecError> {
+    pub(crate) async fn accept(&self, i: &OrderIntent) -> Result<ExecAck, ExecError> {
         let spec = self
             .specs
             .spec(&i.symbol)
@@ -130,6 +146,18 @@ impl<R: PaperLedgerRepo, C: ChargeSource, A: AuditRepo, S: SpecSource> PaperExec
                 held_qty: 0,
             };
             self.account.check_funds(&b).await.map_err(map_account)?;
+            // Funds already promised to other working buys are not available (a broker blocks
+            // them at placement); released automatically when those orders fill or end.
+            let reserved = self.reserved_for_working_buys();
+            let need = reserved.checked_add(
+                reference
+                    .checked_mul(Decimal::from(i.qty))
+                    .ok_or(ExecError::MarginUnavailable)?,
+            );
+            let cash = self.account.balances().await.map_err(map_account)?.cash;
+            if need.is_none_or(|n| n > cash) {
+                return Err(ExecError::InsufficientFunds);
+            }
         }
         let now = self.clock.now_ist();
         let mut book = lock(&self.book);
@@ -156,6 +184,24 @@ impl<R: PaperLedgerRepo, C: ChargeSource, A: AuditRepo, S: SpecSource> PaperExec
             filled_qty: 0,
             avg_price: None,
         })
+    }
+
+    /// Notional of the unfilled part of every working buy (limit price, else the last tick).
+    fn reserved_for_working_buys(&self) -> Decimal {
+        let book = lock(&self.book);
+        book.orders
+            .iter()
+            .filter(|o| o.side == Side::Buy)
+            .filter_map(|o| {
+                let px = match o.kind {
+                    OrderKind::Limit(p) => p,
+                    OrderKind::Market => *book.last_price.get(&o.symbol)?,
+                };
+                px.checked_mul(Decimal::from(o.qty - o.filled))
+            })
+            .fold(Decimal::ZERO, |a, n| {
+                a.checked_add(n).unwrap_or(Decimal::MAX)
+            })
     }
 
     /// Broker-style rejects; returns the reference price for the funds estimate.
@@ -192,59 +238,114 @@ impl<R: PaperLedgerRepo, C: ChargeSource, A: AuditRepo, S: SpecSource> PaperExec
         Ok(reference)
     }
 
-    /// Feed one tick; books the fills it produces.
+    /// Feed one tick; books the fills it produces. Whether the session is open is decided here
+    /// from the calendar (a calendar error is closed), never by the caller.
     pub async fn on_tick(&self, tick: &Tick) -> TickOutcome {
         let _d = self.driver.lock().await;
         let now = self.clock.now_ist();
         let fills = {
             let mut book = lock(&self.book);
-            lock(&self.sim).on_tick(tick, now, &mut book)
+            lock(&self.sim).on_tick(tick, now, &self.cal, &mut book)
         };
         let mut out = TickOutcome::default();
         for f in fills {
+            let square_off = f.reason == FillReason::SquareOff;
             match self.book_fill(&f, now).await {
                 Ok(()) => out.fills.push(f),
+                Err(e) if square_off => {
+                    tracing::error!(
+                        id = %f.id, symbol = %f.symbol, error = ?e,
+                        "MIS square-off blocked; position stays open and the fill retries"
+                    );
+                    out.blocked_square_offs.push((f.id, e));
+                }
                 Err(e) => out.rejected.push((f.id, e)),
             }
         }
         out
     }
 
-    /// Feed the clock: MIS square-off and DAY expiry.
+    /// Feed the clock: DAY expiry and MIS square-off. Cancelled and expired orders are audited
+    /// (after the book change: they move no money); square-off fills are audited write-ahead.
     pub async fn on_clock(&self) -> ClockOutcome {
         let _d = self.driver.lock().await;
         let now = self.clock.now_ist();
-        let mut book = lock(&self.book);
-        let expired = lock(&self.sim).on_clock(now, &mut book);
-        let square_off = lock(&self.square).on_clock(now, &mut book);
+        let (expired, square_off) = {
+            let mut book = lock(&self.book);
+            let expired = lock(&self.sim).on_clock(now, &mut book);
+            (expired, lock(&self.square).on_clock(now, &mut book))
+        };
+        for s in &square_off.failed {
+            tracing::error!(symbol = %s, "MIS square-off could not be queued; retrying on the next clock call");
+        }
+        let mut audit_failed = Vec::new();
+        let events = square_off
+            .cancelled
+            .iter()
+            .map(|id| (*id, "paper_order_cancelled", "mis_square_off"))
+            .chain(
+                expired
+                    .iter()
+                    .map(|id| (*id, "paper_order_expired", "day_validity")),
+            );
+        for (id, kind, reason) in events {
+            let payload = format!("{{\"id\":\"{id}\",\"reason\":\"{reason}\"}}");
+            if self.audit_event(kind, payload, now).await.is_err() {
+                tracing::error!(id = %id, kind, "audit write failed for a paper order change");
+                audit_failed.push(id);
+            }
+        }
         ClockOutcome {
             square_off,
             expired,
+            audit_failed,
         }
     }
 
-    /// Audit (square-off only, write-ahead), then ledger, then position. On failure the order is
-    /// dropped (account refused) or the fill is undone (audit failed; the order keeps working).
+    async fn audit_event(
+        &self,
+        kind: &str,
+        payload: String,
+        now: DateTime<Tz>,
+    ) -> Result<(), ExecError> {
+        let draft = AuditDraft {
+            ts_ist_rfc3339: now.to_rfc3339(),
+            actor: "paper-broker".to_owned(),
+            kind: kind.to_owned(),
+            payload,
+        };
+        self.audit
+            .append(draft, chain_hash)
+            .await
+            .map(|_| ())
+            .map_err(|_| ExecError::Storage)
+    }
+
+    /// Undo the simulator's fill count so the order keeps working and retries.
+    fn undo_fill(&self, f: &SimFill) {
+        if let Some(o) = lock(&self.book).orders.iter_mut().find(|o| o.id == f.id) {
+            o.filled = o.filled.saturating_sub(f.qty);
+        }
+    }
+
+    /// Audit (square-off only, write-ahead), then ledger, then position. A square-off is never
+    /// dropped: on any failure the fill is undone and retried. A user order the account refuses
+    /// is dropped. The first failure per order is audited (`auto_square_off_failed` /
+    /// `paper_order_dropped`). Ordinary fills are audited by the pipeline, not here.
     async fn book_fill(&self, f: &SimFill, now: DateTime<Tz>) -> Result<(), ExecError> {
-        if f.reason == FillReason::SquareOff {
-            let draft = AuditDraft {
-                ts_ist_rfc3339: now.to_rfc3339(),
-                actor: "paper-broker".to_owned(),
-                kind: "auto_square_off".to_owned(),
-                payload: format!(
-                    "{{\"id\":\"{}\",\"price\":\"{}\",\"qty\":{},\"side\":\"{}\",\"symbol\":\"{}\"}}",
-                    f.id,
-                    f.price,
-                    f.qty,
-                    if f.side == Side::Buy { "buy" } else { "sell" },
-                    esc(&f.symbol)
-                ),
-            };
-            if self.audit.append(draft, chain_hash).await.is_err() {
-                if let Some(o) = lock(&self.book).orders.iter_mut().find(|o| o.id == f.id) {
-                    o.filled -= f.qty;
-                }
-                return Err(ExecError::Storage);
+        let square_off = f.reason == FillReason::SquareOff;
+        if square_off {
+            let payload = format!(
+                "{{\"id\":\"{}\",\"price\":\"{}\",\"qty\":{},\"side\":\"{}\",\"symbol\":\"{}\"}}",
+                f.id,
+                f.price,
+                f.qty,
+                if f.side == Side::Buy { "buy" } else { "sell" },
+                esc(&f.symbol)
+            );
+            if let Err(e) = self.audit_event("auto_square_off", payload, now).await {
+                self.undo_fill(f);
+                return Err(e);
             }
         }
         let held = lock(&self.book).position(&f.symbol, f.product).max(0);
@@ -259,11 +360,33 @@ impl<R: PaperLedgerRepo, C: ChargeSource, A: AuditRepo, S: SpecSource> PaperExec
         };
         match self.account.apply_fill(&booking).await {
             Ok(_) => {
+                lock(&self.failed_audited).remove(&f.id);
                 lock(&self.book).record(f);
                 Ok(())
             }
             Err(e) => {
-                lock(&self.book).drop_order(f.id);
+                if square_off {
+                    self.undo_fill(f);
+                } else {
+                    lock(&self.book).drop_order(f.id);
+                }
+                let first = lock(&self.failed_audited).insert(f.id);
+                if first {
+                    let kind = if square_off {
+                        "auto_square_off_failed"
+                    } else {
+                        "paper_order_dropped"
+                    };
+                    let payload = format!(
+                        "{{\"id\":\"{}\",\"reason\":\"{:?}\",\"symbol\":\"{}\"}}",
+                        f.id,
+                        e,
+                        esc(&f.symbol)
+                    );
+                    if self.audit_event(kind, payload, now).await.is_err() {
+                        lock(&self.failed_audited).remove(&f.id);
+                    }
+                }
                 Err(map_account(e))
             }
         }
@@ -291,7 +414,7 @@ impl<R: PaperLedgerRepo, C: ChargeSource, A: AuditRepo, S: SpecSource> Executor
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fill::tests::{at, cfg, d, tick};
+    use crate::fill::tests::{at, cal, cfg, d, tick};
     use bazaar_core::ports::{AuditRow, LedgerEntry, RepoError, SourceError};
     use bazaar_core::segment::{InstrumentKind, Segment};
     use bazaar_core::testutil::FakeClock;
@@ -322,7 +445,8 @@ mod tests {
         }
     }
 
-    struct Flat;
+    #[derive(Default, Clone)]
+    struct Flat(Arc<AtomicBool>);
     impl ChargeSource for Flat {
         fn charge(
             &self,
@@ -332,6 +456,9 @@ mod tests {
             _: Decimal,
             _: &str,
         ) -> Result<Decimal, SourceError> {
+            if self.0.load(Ordering::SeqCst) {
+                return Err(SourceError::Unavailable);
+            }
             Ok(d("1"))
         }
     }
@@ -387,15 +514,18 @@ mod tests {
         ledger: Ledger,
         audit: Audit,
         clock: Arc<FakeClock>,
+        charge_fail: Arc<AtomicBool>,
     }
 
     async fn rig(cash: &str) -> Rig {
         let ledger = Ledger::default();
         let audit = Audit::default();
         let clock = Arc::new(FakeClock::at(at(10, 0, 0)));
+        let flat = Flat::default();
+        let charge_fail = flat.0.clone();
         let acct = Arc::new(PaperAccount::new(
             ledger.clone(),
-            Flat,
+            flat,
             clock.clone(),
             d(cash),
         ));
@@ -405,14 +535,22 @@ mod tests {
             audit.clone(),
             Specs,
             clock.clone(),
+            Arc::new(cal()),
             cfg(),
-            chrono::NaiveTime::from_hms_opt(13, 30, 0).unwrap(),
+            ValidatedSquareOffTime::new(
+                &cal(),
+                at(10, 0, 0).date_naive(),
+                chrono::NaiveTime::from_hms_opt(13, 30, 0).unwrap(),
+                &[(Segment::Equity, InstrumentKind::CashNonFno)],
+            )
+            .unwrap(),
         );
         Rig {
             ex,
             ledger,
             audit,
             clock,
+            charge_fail,
         }
     }
 
@@ -517,18 +655,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fill_time_funds_failure_drops_the_order_without_ledger_change() {
+    async fn working_buys_reserve_funds_at_placement() {
         let r = rig("600").await;
         let a = intent(1, Side::Buy, 5, OrderKind::Limit(d("100")), Product::Cnc);
         let b = intent(2, Side::Buy, 5, OrderKind::Limit(d("100")), Product::Cnc);
         r.ex.accept(&a).await.unwrap();
-        r.ex.accept(&b).await.unwrap();
-        let o = tick_at(&r, "99.95", 1000, 1).await;
-        // each fill is 5 x 100 + 1: the first leaves 99, the second is refused and dropped
-        assert_eq!((o.fills.len(), o.rejected.len()), (1, 1));
+        assert_eq!(r.ex.accept(&b).await, Err(ExecError::InsufficientFunds));
+        assert_eq!(r.ex.working_count(), 1);
+        // the reservation is released once the first order fills or ends
+        tick_at(&r, "99.95", 1000, 1).await;
+        let c = intent(3, Side::Buy, 5, OrderKind::Limit(d("10")), Product::Cnc);
+        r.ex.accept(&c).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fill_time_funds_failure_drops_the_order_audits_it_and_leaves_the_ledger() {
+        let r = rig("501").await;
+        tick_at(&r, "100", 1000, 0).await;
+        // placement estimate 5 x 100 + 1 = 501 passes; the fill slips to 100.10 and is refused
+        r.ex.accept(&intent(1, Side::Buy, 5, OrderKind::Market, Product::Cnc))
+            .await
+            .unwrap();
+        let o = tick_at(&r, "100", 1000, 1).await;
+        assert_eq!((o.fills.len(), o.rejected.len()), (0, 1));
         assert_eq!(o.rejected[0].1, ExecError::InsufficientFunds);
-        assert_eq!(r.ex.account.balances().await.unwrap().cash, d("99"));
+        assert_eq!(r.ex.account.balances().await.unwrap().cash, d("501"));
         assert_eq!(r.ex.working_count(), 0);
+        let rows = lock(&r.audit.rows).clone();
+        assert_eq!(rows[0].draft.kind, "paper_order_dropped");
     }
 
     #[tokio::test]
@@ -605,8 +759,12 @@ mod tests {
         r.clock.set(t.at);
         let o = r.ex.on_tick(&t).await;
         assert_eq!(
-            (o.fills.len(), o.rejected[0].1.clone()),
-            (0, ExecError::Storage)
+            (
+                o.fills.len(),
+                o.blocked_square_offs[0].1.clone(),
+                o.rejected.len()
+            ),
+            (0, ExecError::Storage, 0)
         );
         assert_eq!((cnt(&r), r.ex.position("ABC", Product::Mis)), (before, 10));
         r.audit.fail.store(false, Ordering::SeqCst);
@@ -661,5 +819,127 @@ mod tests {
             ExecError::Storage
         );
         assert_eq!(esc("a\"b"), "a\\\"b");
+    }
+
+    async fn open_mis_and_reach_square_off(r: &Rig) {
+        tick_at(r, "100", 1000, 0).await;
+        r.ex.accept(&intent(1, Side::Buy, 10, OrderKind::Market, Product::Mis))
+            .await
+            .unwrap();
+        tick_at(r, "100", 10_000, 1).await;
+        r.clock.set(at(13, 30, 0));
+        r.ex.on_clock().await;
+    }
+
+    fn so_tick(r: &Rig, s: u32) -> Tick {
+        let mut t = tick("100", 10_000, 0);
+        t.at = at(13, 30, s);
+        r.clock.set(t.at);
+        t
+    }
+
+    #[tokio::test]
+    async fn square_off_is_never_dropped_on_a_ledger_or_charge_error_and_retries() {
+        let r = rig("100000").await;
+        open_mis_and_reach_square_off(&r).await;
+        r.charge_fail.store(true, Ordering::SeqCst);
+        for s in 1..4 {
+            let o = r.ex.on_tick(&so_tick(&r, s)).await;
+            assert_eq!((o.fills.len(), o.blocked_square_offs.len()), (0, 1));
+            assert_eq!(o.blocked_square_offs[0].1, ExecError::MarginUnavailable);
+            assert_eq!(r.ex.position("ABC", Product::Mis), 10);
+            assert_eq!(r.ex.working_count(), 1, "still working");
+        }
+        let kinds: Vec<String> = lock(&r.audit.rows)
+            .iter()
+            .map(|x| x.draft.kind.clone())
+            .collect();
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| *k == "auto_square_off_failed")
+                .count(),
+            1,
+            "failure audited once, not per retry"
+        );
+        r.charge_fail.store(false, Ordering::SeqCst);
+        let o = r.ex.on_tick(&so_tick(&r, 5)).await;
+        assert_eq!(o.fills.len(), 1);
+        assert_eq!(r.ex.position("ABC", Product::Mis), 0);
+        verify_chain(&lock(&r.audit.rows).clone()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn blocked_square_off_by_audit_outage_fills_once_audit_recovers() {
+        let r = rig("100000").await;
+        open_mis_and_reach_square_off(&r).await;
+        r.audit.fail.store(true, Ordering::SeqCst);
+        let o = r.ex.on_tick(&so_tick(&r, 1)).await;
+        assert_eq!(o.blocked_square_offs.len(), 1);
+        assert_eq!(r.ex.position("ABC", Product::Mis), 10);
+        r.audit.fail.store(false, Ordering::SeqCst);
+        let o = r.ex.on_tick(&so_tick(&r, 2)).await;
+        assert_eq!((o.fills.len(), o.blocked_square_offs.len()), (1, 0));
+        assert_eq!(r.ex.position("ABC", Product::Mis), 0);
+    }
+
+    #[tokio::test]
+    async fn out_of_session_ticks_never_fill_even_when_the_caller_is_wrong() {
+        let r = rig("100000").await;
+        tick_at(&r, "100", 1000, 0).await;
+        r.ex.accept(&intent(1, Side::Buy, 5, OrderKind::Market, Product::Cnc))
+            .await
+            .unwrap();
+        let mut t = tick("100", 1000, 0);
+        t.at = at(20, 0, 0);
+        r.clock.set(t.at);
+        assert_eq!(r.ex.on_tick(&t).await.fills.len(), 0);
+        assert_eq!(r.ex.working_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn clock_audits_mis_cancellation_and_day_expiry() {
+        let r = rig("100000").await;
+        r.ex.accept(&intent(
+            1,
+            Side::Buy,
+            5,
+            OrderKind::Limit(d("50")),
+            Product::Mis,
+        ))
+        .await
+        .unwrap();
+        r.ex.accept(&intent(
+            2,
+            Side::Buy,
+            5,
+            OrderKind::Limit(d("50")),
+            Product::Cnc,
+        ))
+        .await
+        .unwrap();
+        r.clock.set(at(13, 30, 0));
+        let c = r.ex.on_clock().await;
+        assert_eq!(c.square_off.cancelled, vec![IntentId(1)]);
+        r.clock.set(at(10, 0, 0) + chrono::Duration::days(1));
+        let c = r.ex.on_clock().await;
+        assert_eq!(c.expired, vec![IntentId(2)]);
+        assert_eq!(c.audit_failed.len(), 0);
+        let rows = lock(&r.audit.rows).clone();
+        let kinds: Vec<&str> = rows.iter().map(|x| x.draft.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["paper_order_cancelled", "paper_order_expired"]);
+        verify_chain(&rows).unwrap();
+        r.audit.fail.store(true, Ordering::SeqCst);
+        r.ex.accept(&intent(
+            3,
+            Side::Buy,
+            5,
+            OrderKind::Limit(d("50")),
+            Product::Cnc,
+        ))
+        .await
+        .unwrap();
+        r.clock.set(at(10, 0, 0) + chrono::Duration::days(2));
+        assert_eq!(r.ex.on_clock().await.audit_failed, vec![IntentId(3)]);
     }
 }
