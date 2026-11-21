@@ -41,6 +41,7 @@ impl SqliteStore {
     }
 
     /// Set the state if the stored version is still `expected_version`; returns the new version.
+    /// The change and its append-only event row commit together or not at all.
     pub async fn kill_switch_set(
         &self,
         expected_version: u64,
@@ -49,11 +50,15 @@ impl SqliteStore {
         reason: &str,
         at_ns: i64,
     ) -> Result<u64, RepoError> {
+        if actor.is_empty() || reason.is_empty() {
+            return Err(RepoError::Other);
+        }
         if actor.len() > MAX_TEXT || reason.len() > MAX_TEXT {
             return Err(RepoError::TooLarge);
         }
         let expected = i64::try_from(expected_version).map_err(|_| RepoError::Other)?;
         let next = expected.checked_add(1).ok_or(RepoError::Other)?;
+        let mut tx = self.pool.begin().await.map_err(|e| map_err(&e))?;
         let done = sqlx::query(
             "UPDATE kill_switch SET engaged = ?, version = ?, actor = ?, reason = ?, \
              changed_ns = ? WHERE id = 1 AND version = ?",
@@ -64,12 +69,25 @@ impl SqliteStore {
         .bind(reason)
         .bind(at_ns)
         .bind(expected)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| map_err(&e))?;
         if done.rows_affected() != 1 {
             return Err(RepoError::Conflict);
         }
+        sqlx::query(
+            "INSERT INTO kill_switch_events (version, engaged, actor, reason, changed_ns) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(next)
+        .bind(i64::from(engaged))
+        .bind(actor)
+        .bind(reason)
+        .bind(at_ns)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| map_err(&e))?;
+        tx.commit().await.map_err(|e| map_err(&e))?;
         u64::try_from(next).map_err(|_| RepoError::Other)
     }
 }
@@ -115,19 +133,133 @@ mod tests {
         assert_eq!(k.actor, "me");
     }
 
+    async fn event_count(s: &SqliteStore) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM kill_switch_events")
+            .fetch_one(&s.pool)
+            .await
+            .unwrap()
+    }
+
     #[tokio::test]
-    async fn missing_table_and_oversize_are_errors() {
+    async fn oversize_and_empty_text_are_errors() {
         let s = SqliteStore::open_in_memory().await.unwrap();
         let long = "x".repeat(MAX_TEXT + 1);
         assert_eq!(
             s.kill_switch_set(1, true, &long, "r", 1).await,
             Err(RepoError::TooLarge)
         );
+        assert_eq!(
+            s.kill_switch_set(1, true, "a", &long, 1).await,
+            Err(RepoError::TooLarge)
+        );
+        assert_eq!(
+            s.kill_switch_set(1, true, "", "r", 1).await,
+            Err(RepoError::Other)
+        );
+        assert_eq!(
+            s.kill_switch_set(1, true, "a", "", 1).await,
+            Err(RepoError::Other)
+        );
+        assert_eq!(event_count(&s).await, 0);
+    }
+
+    #[tokio::test]
+    async fn missing_table_is_an_error() {
+        let s = SqliteStore::open_in_memory().await.unwrap();
         sqlx::query("DROP TABLE kill_switch")
             .execute(&s.pool)
             .await
             .unwrap();
         assert!(s.kill_switch_get().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn missing_row_is_corrupt_not_released() {
+        let s = SqliteStore::open_in_memory().await.unwrap();
+        sqlx::query("DROP TRIGGER kill_switch_no_delete")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM kill_switch")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        assert_eq!(s.kill_switch_get().await, Err(RepoError::Corrupt));
+    }
+
+    #[tokio::test]
+    async fn each_set_writes_an_event_row() {
+        let s = SqliteStore::open_in_memory().await.unwrap();
+        s.kill_switch_set(1, true, "me", "halt", 5).await.unwrap();
+        s.kill_switch_set(2, false, "me", "resume", 6)
+            .await
+            .unwrap();
+        assert_eq!(event_count(&s).await, 2);
+        let last: (i64, i64, String) = sqlx::query_as(
+            "SELECT version, engaged, reason FROM kill_switch_events ORDER BY version DESC LIMIT 1",
+        )
+        .fetch_one(&s.pool)
+        .await
+        .unwrap();
+        assert_eq!(last, (3, 0, "resume".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn stale_set_writes_no_event() {
+        let s = SqliteStore::open_in_memory().await.unwrap();
+        assert_eq!(
+            s.kill_switch_set(7, true, "me", "x", 1).await,
+            Err(RepoError::Conflict)
+        );
+        assert_eq!(event_count(&s).await, 0);
+        assert!(!s.kill_switch_get().await.unwrap().engaged);
+    }
+
+    #[tokio::test]
+    async fn failed_event_insert_rolls_back_the_state_change() {
+        let s = SqliteStore::open_in_memory().await.unwrap();
+        sqlx::query(
+            "CREATE TRIGGER boom BEFORE INSERT ON kill_switch_events \
+             BEGIN SELECT RAISE(ABORT, 'boom'); END",
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        assert!(s.kill_switch_set(1, true, "me", "halt", 1).await.is_err());
+        let k = s.kill_switch_get().await.unwrap();
+        assert_eq!((k.engaged, k.version), (false, 1));
+    }
+
+    #[tokio::test]
+    async fn concurrent_sets_have_one_winner() {
+        let s = SqliteStore::open_in_memory().await.unwrap();
+        let (a, b) = tokio::join!(
+            s.kill_switch_set(1, true, "a", "r", 1),
+            s.kill_switch_set(1, true, "b", "r", 2)
+        );
+        let mut r = [a, b];
+        r.sort_by_key(Result::is_err);
+        assert_eq!(r[0], Ok(2));
+        assert_eq!(r[1], Err(RepoError::Conflict));
+        assert_eq!(event_count(&s).await, 1);
+    }
+
+    #[tokio::test]
+    async fn events_are_append_only() {
+        let s = SqliteStore::open_in_memory().await.unwrap();
+        s.kill_switch_set(1, true, "me", "halt", 5).await.unwrap();
+        assert!(
+            sqlx::query("UPDATE kill_switch_events SET reason='x'")
+                .execute(&s.pool)
+                .await
+                .is_err()
+        );
+        assert!(
+            sqlx::query("DELETE FROM kill_switch_events")
+                .execute(&s.pool)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

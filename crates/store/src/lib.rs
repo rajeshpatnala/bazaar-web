@@ -2,6 +2,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod approvals;
+mod audit;
 mod candles;
 mod duck;
 mod killswitch;
@@ -12,6 +13,6 @@ mod sqlite;
 pub use approvals::{ApprovalDecision, ApprovalRow};
 pub use duck::DuckStore;
 pub use killswitch::KillSwitchRow;
-pub use orders::{OrderEvent, OrderRow};
+pub use orders::{OrderEvent, OrderRow, OrderTransition};
 pub use parquet::ParquetStore;
 pub use sqlite::SqliteStore;

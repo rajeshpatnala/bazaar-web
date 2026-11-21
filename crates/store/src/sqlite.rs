@@ -84,6 +84,20 @@ fn migrator() -> Migrator {
             SqlStr::from_static(include_str!("../migrations/0005_killswitch.sql")),
             false,
         ),
+        Migration::new(
+            6,
+            Cow::Borrowed("audit_log"),
+            MigrationType::Simple,
+            SqlStr::from_static(include_str!("../migrations/0006_audit_log.sql")),
+            false,
+        ),
+        Migration::new(
+            7,
+            Cow::Borrowed("kill_switch_events"),
+            MigrationType::Simple,
+            SqlStr::from_static(include_str!("../migrations/0007_kill_switch_events.sql")),
+            false,
+        ),
     ])
 }
 
