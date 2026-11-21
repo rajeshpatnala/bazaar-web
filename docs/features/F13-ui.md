@@ -34,6 +34,7 @@ Owner area: `web/` (nothing in `crates/`). Plan: `.agents/plans/F13-ui-slice1.md
 - DONE (PR 103): add "not SEBI registered" to the disclaimer in `crates/core/src/disclaimer.rs` and `web/src/shared/disclaimer.ts` together.
 - Swap provisional types for generated schema types (F13 server slice).
 - WebSocket events replacing polling mocks (F13 server slice).
+- CR-124-4: per-idea validation deferred to BZ-509 (generated types)
 - Owner to confirm the disclaimer wording, the read-only live note and the "Ideas to consider today" copy.
 
 ## History
