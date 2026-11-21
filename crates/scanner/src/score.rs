@@ -2,7 +2,7 @@
 //! of profit. f64 lives only inside this module; money is read once (`Decimal` to f64 for the
 //! liquidity ratio) and the result leaves as a `u8`. The ranking sorts on integers only.
 //!
-//! Score = 100 x (w_conf x confluence + w_regime x regime_fit + w_liq x liquidity + w_evid x
+//! Score = 100 x (`w_conf` x confluence + `w_regime` x `regime_fit` + `w_liq` x liquidity + `w_evid` x
 //! evidence) minus the event penalty, clamped to 0..=100. A `low_evidence` name is capped at
 //! `low_evidence_cap` BEFORE ranking, so it never sits above a proven one on confluence alone.
 //! Ties break on tradingsymbol ascending, then instrument token. Every weight and the floor are
