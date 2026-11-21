@@ -73,11 +73,19 @@ impl Strategy for Fake {
     }
 }
 
-fn fake(
+type Seen = Arc<Mutex<Vec<(usize, NaiveDate)>>>;
+
+fn fake(id: &'static str, rr: i64, stock_trend: Trend, seen: &Seen) -> Box<dyn Strategy> {
+    fake_with(id, rr, stock_trend, false, seen)
+}
+
+/// `weak`: every declared stock cell is also a weak cell (a `Fit::Penalised` hit).
+fn fake_with(
     id: &'static str,
     rr: i64,
     stock_trend: Trend,
-    seen: &Arc<Mutex<Vec<(usize, NaiveDate)>>>,
+    weak: bool,
+    seen: &Seen,
 ) -> Box<dyn Strategy> {
     let cells: Vec<_> = [VolState::Low, VolState::Normal, VolState::High]
         .into_iter()
@@ -91,8 +99,8 @@ fn fake(
             min_history_bars: 1,
             regime_fit: RegimeFit {
                 market_trends: vec![Trend::Up, Trend::Range],
+                weak_cells: if weak { cells.clone() } else { vec![] },
                 stock_cells: cells,
-                weak_cells: vec![],
             },
             penalty_weight: 0.5,
         },
@@ -133,7 +141,7 @@ fn entry(sym: &str, bars: Vec<Candle>) -> UniverseEntry {
             lot_size: 1,
         },
         bars,
-        circuit_locked: false,
+        circuit: CircuitState::Free,
     }
 }
 
@@ -169,14 +177,27 @@ fn scan(
     uni: &[UniverseEntry],
     market: &[Candle],
 ) -> Result<ScanOutput, ScanError> {
+    scan_at(e, ban, 24, day(N - 1), strategies, uni, market)
+}
+
+fn scan_at(
+    e: &Env,
+    ban: &FakeBan,
+    max_age_hours: u32,
+    now: DateTime<Tz>,
+    strategies: &mut [Box<dyn Strategy>],
+    uni: &[UniverseEntry],
+    market: &[Candle],
+) -> Result<ScanOutput, ScanError> {
     let pf = PortfolioView::default();
-    let clock = FixedClock(day(N - 1));
+    let clock = FixedClock(now);
     let cx = ScanContext {
         cfg: e.cfg.scanner.as_ref().unwrap(),
         regime: &e.regime,
         calendar: &e.cal,
         portfolio: &pf,
         ban_list: ban,
+        ban_list_max_age_hours: max_age_hours,
         clock: &clock,
     };
     run(&cx, strategies, uni, market, day(N - 1).date_naive())
@@ -212,7 +233,7 @@ fn banned_illiquid_locked_short_and_dateless_names_never_appear() {
     let mut s = vec![fake("a", 2, Trend::Up, &seen)];
     let m = rising(N, 1);
     let mut locked = entry("LOCK", rising(N, 1_000_000));
-    locked.circuit_locked = true;
+    locked.circuit = CircuitState::Locked;
     let uni = [
         entry("good", rising(N, 1_000_000)),
         entry("BAN", rising(N, 1_000_000)),
@@ -369,4 +390,194 @@ fn run_errors_without_a_market_bar_and_build_needs_the_scanner_table() {
     assert!(build(&cfg).is_ok());
     cfg.scanner = None;
     assert!(matches!(build(&cfg), Err(ScanError::NoScannerConfig)));
+}
+
+fn falling(n: usize) -> Vec<Candle> {
+    (0..n)
+        .map(|i| {
+            let c = Decimal::from(1000) - Decimal::from(i64::try_from(i).unwrap()) / Decimal::TWO;
+            let (h, l) = (c + Decimal::ONE, c - Decimal::ONE);
+            Candle::new(day(i), Interval::Day, [c, h, l, c], 1, true).unwrap()
+        })
+        .collect()
+}
+
+fn dropped(o: &ScanOutput, sym: &str) -> DropReason {
+    o.dropped
+        .iter()
+        .find(|(s, _)| s == sym)
+        .map(|(_, r)| r.clone())
+        .unwrap()
+}
+
+#[test]
+fn a_weak_cell_is_kept_as_penalised_with_its_penalty_weight() {
+    let (e, seen) = (env(), Seen::default());
+    let mut s = vec![fake_with("a", 2, Trend::Up, true, &seen)];
+    let o = scan(
+        &e,
+        &fresh_ban(&[]),
+        &mut s,
+        &[entry("AAA", rising(N, 1_000_000))],
+        &rising(N, 1),
+    )
+    .unwrap();
+    let h = &o.candidates[0].hits[0];
+    assert!(matches!(h.fit, Fit::Penalised(_)));
+    assert!((h.penalty_weight - 0.5).abs() < f64::EPSILON);
+}
+
+#[test]
+fn an_allowed_hit_beats_a_penalised_one_of_the_same_family_even_with_lower_rr() {
+    let (e, seen) = (env(), Seen::default());
+    let mut s = vec![
+        fake_with("x", 4, Trend::Up, true, &seen),
+        fake_with("x", 1, Trend::Up, false, &seen),
+    ];
+    let o = scan(
+        &e,
+        &fresh_ban(&[]),
+        &mut s,
+        &[entry("AAA", rising(N, 1_000_000))],
+        &rising(N, 1),
+    )
+    .unwrap();
+    let h = &o.candidates[0].hits[0];
+    assert!(matches!(h.fit, Fit::Allowed(_)));
+    assert_eq!(h.signal.reference_rr, Decimal::from(1));
+}
+
+#[test]
+fn a_falling_market_gives_no_candidates_and_no_strategy_call() {
+    let (e, seen) = (env(), Seen::default());
+    let mut s = vec![fake("a", 2, Trend::Up, &seen)];
+    let o = scan(
+        &e,
+        &fresh_ban(&[]),
+        &mut s,
+        &[entry("AAA", rising(N, 1_000_000))],
+        &falling(N),
+    )
+    .unwrap();
+    assert_eq!(o.candidates.len(), 0);
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_series_that_cannot_be_classified_is_dropped_as_regime_failed() {
+    let (e, seen) = (env(), Seen::default());
+    let mut s = vec![fake("a", 2, Trend::Up, &seen)];
+    let mut bars = rising(N, 1_000_000);
+    bars.swap(10, 11);
+    let o = scan(
+        &e,
+        &fresh_ban(&[]),
+        &mut s,
+        &[entry("BAD", bars)],
+        &rising(N, 1),
+    )
+    .unwrap();
+    assert!(matches!(dropped(&o, "BAD"), DropReason::RegimeFailed(_)));
+}
+
+#[test]
+fn circuit_unknown_and_locked_drop_the_name_and_free_passes() {
+    let (e, seen) = (env(), Seen::default());
+    let mut s = vec![fake("a", 2, Trend::Up, &seen)];
+    let mut unknown = entry("UNK", rising(N, 1_000_000));
+    unknown.circuit = CircuitState::Unknown;
+    let mut locked = entry("LCK", rising(N, 1_000_000));
+    locked.circuit = CircuitState::Locked;
+    let uni = [unknown, locked, entry("FRE", rising(N, 1_000_000))];
+    let o = scan(&e, &fresh_ban(&[]), &mut s, &uni, &rising(N, 1)).unwrap();
+    assert_eq!(syms(&o), ["FRE"]);
+    assert_eq!(dropped(&o, "UNK"), DropReason::CircuitStatusUnknown);
+    assert_eq!(dropped(&o, "LCK"), DropReason::CircuitLocked);
+}
+
+#[test]
+fn the_scanner_key_cannot_loosen_the_ban_list_age_limit() {
+    assert_eq!(effective_ban_age_hours(720, 24, 24), 24);
+    assert_eq!(effective_ban_age_hours(12, 24, 24), 12);
+    let (mut e, seen) = (env(), Seen::default());
+    e.cfg.scanner.as_mut().unwrap().max_ban_list_age_hours = 720;
+    let age = effective_ban_age_hours(720, 24, 24);
+    let mut s = vec![fake("a", 2, Trend::Up, &seen)];
+    let uni = [entry("AAA", rising(N, 1_000_000))];
+    let list = |h| {
+        FakeBan(BanListStatus::Available {
+            symbols: vec![],
+            as_of: Some(day(N - 1) - chrono::Duration::hours(h)),
+        })
+    };
+    let m = rising(N, 1);
+    let o = scan_at(&e, &list(25), age, day(N - 1), &mut s, &uni, &m).unwrap();
+    assert!(matches!(
+        dropped(&o, "AAA"),
+        DropReason::BanListStale { .. }
+    ));
+    let o = scan_at(&e, &list(24), age, day(N - 1), &mut s, &uni, &m).unwrap();
+    assert_eq!(syms(&o), ["AAA"]);
+}
+
+#[test]
+fn liquidity_floor_is_inclusive_at_the_median() {
+    // Last 20 closes run 250.0..=259.5, so the median close is 254.75; volume 4 gives 1019.
+    let (mut e, seen) = (env(), Seen::default());
+    let mut s = vec![fake("a", 2, Trend::Up, &seen)];
+    let uni = [entry("AAA", rising(N, 4))];
+    let m = rising(N, 1);
+    e.cfg.scanner.as_mut().unwrap().min_median_traded_value = Decimal::from(1019);
+    assert_eq!(
+        syms(&scan(&e, &fresh_ban(&[]), &mut s, &uni, &m).unwrap()),
+        ["AAA"]
+    );
+    e.cfg.scanner.as_mut().unwrap().min_median_traded_value = Decimal::from(1020);
+    let o = scan(&e, &fresh_ban(&[]), &mut s, &uni, &m).unwrap();
+    assert!(matches!(dropped(&o, "AAA"), DropReason::Illiquid { .. }));
+}
+
+#[test]
+fn a_decision_bar_after_the_clock_is_not_closed() {
+    let (env_, seen) = (env(), Seen::default());
+    let mut strats = vec![fake("a", 2, Trend::Up, &seen)];
+    let universe = [entry("AAA", rising(N, 1_000_000))];
+    let mkt = rising(N, 1);
+    let before = day(N - 1) - chrono::Duration::hours(1);
+    let ban = FakeBan(BanListStatus::Available {
+        symbols: vec![],
+        as_of: Some(before),
+    });
+    assert!(matches!(
+        scan_at(&env_, &ban, 24, before, &mut strats, &universe, &mkt),
+        Err(ScanError::DecisionBarOpen)
+    ));
+    // Market bar closed, stock bar stamped after the clock.
+    let mut late = rising(N, 1_000_000);
+    late.pop();
+    let px = Decimal::from(200);
+    let cndl = Candle::new(
+        day(N - 1) + chrono::Duration::hours(8),
+        Interval::Day,
+        [px, px, px, px],
+        1,
+        true,
+    );
+    late.push(cndl.unwrap());
+    let o = scan(
+        &env_,
+        &fresh_ban(&[]),
+        &mut strats,
+        &[entry("LATE", late)],
+        &mkt,
+    )
+    .unwrap();
+    assert_eq!(dropped(&o, "LATE"), DropReason::DecisionBarNotClosed);
+}
+
+#[test]
+fn every_registered_strategy_has_an_explicit_family() {
+    for f in bazaar_strategies::registry::factories() {
+        assert_ne!(family_of(f.id()), f.id(), "{} needs a family arm", f.id());
+    }
 }

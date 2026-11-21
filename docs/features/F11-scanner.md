@@ -32,4 +32,5 @@ Evidence is empty until F9 runs (all recs `low_evidence`), no options structures
 - Steps 2-4 will be re-cut so each fits `max_slice_changed_lines` (step 1 carried the shared types).
 
 ## Slice 2 note
-Universe filters (ban list fail closed, liquidity, circuit lock, history) and the runner (regimes to the closed bar, `DataView::ending_at`, per-family merge, `lookahead_` test) landed in `crates/scanner/src/{universe,runner}.rs`; accepted as one PR over the line budget (807 lines, tests about 55%).
+Universe filters (ban list fail closed, liquidity, circuit lock, history) and the runner (regimes to the closed bar, `DataView::ending_at`, per-family merge, `lookahead_` test) landed in `crates/scanner/src/{universe,runner}.rs`; accepted as one PR over the line budget.
+Fix round (PR 114): the runner takes one effective ban-list age (`min` of the scanner key, risk.toml events and hard_limits) and a tri-state `CircuitState` (the caller passes `Unknown` until a data source exists, which drops the name). The market regime uses no India VIX or breadth yet (`Extras::default()`); the output does not flag it. Deferred to steps 3-4: a `StaleDecisionDate` check of `decision_date` against the calendar (RISK-114-4), Sell/conflicting-signal handling (CR-114-3; only Buy is accepted today), the `family_of` move to config or `StrategyMeta`, and RISK-114-7 (owner item).

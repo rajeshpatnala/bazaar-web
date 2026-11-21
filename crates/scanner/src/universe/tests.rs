@@ -66,10 +66,22 @@ fn bar(d: u32, close: i64, vol: u64) -> Candle {
 fn median_traded_value_odd_even_and_window() {
     assert_eq!(median_traded_value(&[], 20), None);
     let odd = [bar(2, 10, 1), bar(3, 10, 5), bar(4, 10, 3)];
-    assert_eq!(median_traded_value(&odd, 20), Some(Decimal::from(30)));
+    assert_eq!(median_traded_value(&odd, 3), Some(Decimal::from(30)));
     let even = [bar(2, 10, 1), bar(3, 10, 3)];
-    assert_eq!(median_traded_value(&even, 20), Some(Decimal::from(20)));
+    assert_eq!(median_traded_value(&even, 2), Some(Decimal::from(20)));
     // Only the last 2 bars count: 50 and 30 -> 40.
     let win = [bar(2, 10, 900), bar(3, 10, 5), bar(4, 10, 3)];
     assert_eq!(median_traded_value(&win, 2), Some(Decimal::from(40)));
+}
+
+#[test]
+fn median_needs_a_full_window_excludes_older_spikes_and_survives_overflow() {
+    // 25 bars: an old spike in the first 5 is outside the 20-bar window.
+    let mut bars: Vec<Candle> = (0..25).map(|i| bar(1 + (i % 28), 10, 1)).collect();
+    bars[0] = bar(1, 10, 1_000_000);
+    assert_eq!(median_traded_value(&bars, 20), Some(Decimal::from(10)));
+    assert_eq!(median_traded_value(&bars[..19], 20), None);
+    let big = Decimal::MAX / Decimal::TWO;
+    let c = Candle::new(at(2, 15), Interval::Day, [big, big, big, big], 10, true).unwrap();
+    assert_eq!(median_traded_value(&[c], 1), None);
 }

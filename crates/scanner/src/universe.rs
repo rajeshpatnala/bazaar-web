@@ -22,6 +22,9 @@ pub enum DropReason {
     Banned,
     Illiquid { median_traded_value: Decimal },
     CircuitLocked,
+    CircuitStatusUnknown,
+    DecisionBarNotClosed,
+    ViewUnavailable,
     ShortHistory { bars: usize, needed: usize },
     NoBarOnDecisionDate,
     RegimeFailed(String),
@@ -63,14 +66,15 @@ pub fn banned_set(
     }
 }
 
-/// Median of `close * volume` over the last `window` bars; `None` with no bars.
+/// Median of `close * volume` over the last `window` bars; `None` with fewer than `window` bars
+/// or on overflow (the caller drops the name). Volumes must be adjusted like the prices.
 #[must_use]
 pub fn median_traded_value(bars: &[Candle], window: usize) -> Option<Decimal> {
-    let tail = bars.get(bars.len().saturating_sub(window)..)?;
+    let tail = bars.get(bars.len().checked_sub(window)?..)?;
     let mut v: Vec<Decimal> = tail
         .iter()
-        .map(|b| b.close() * Decimal::from(b.volume()))
-        .collect();
+        .map(|b| b.close().checked_mul(Decimal::from(b.volume())))
+        .collect::<Option<_>>()?;
     v.sort();
     let n = v.len();
     if n == 0 {

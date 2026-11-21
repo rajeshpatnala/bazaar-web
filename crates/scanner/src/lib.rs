@@ -12,7 +12,8 @@ pub mod universe;
 
 pub use ports::{BanList, BanListStatus, EventCalendar, EvidenceSource};
 pub use runner::{
-    Candidate, Hit, ScanContext, ScanError, ScanOutput, UniverseEntry, build, family_of, run,
+    Candidate, CircuitState, Hit, ScanContext, ScanError, ScanOutput, UniverseEntry, build,
+    effective_ban_age_hours, family_of, run,
 };
 pub use types::{
     Action, Evidence, GateSummary, Horizon, InstrumentRef, PositionSize, RecError, Recommendation,
