@@ -6,10 +6,17 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod ports;
+pub mod runner;
 pub mod types;
+pub mod universe;
 
 pub use ports::{BanList, BanListStatus, EventCalendar, EvidenceSource};
+pub use runner::{
+    Candidate, CircuitState, Hit, ScanContext, ScanError, ScanOutput, UniverseEntry, build,
+    effective_ban_age_hours, family_of, run,
+};
 pub use types::{
     Action, Evidence, GateSummary, Horizon, InstrumentRef, PositionSize, RecError, Recommendation,
     RecommendationParts, Warning, WhyFactor,
 };
+pub use universe::DropReason;

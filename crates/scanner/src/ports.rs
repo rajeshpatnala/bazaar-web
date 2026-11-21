@@ -26,7 +26,9 @@ pub trait EvidenceSource: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BanListStatus {
     /// Names (tradingsymbols) in the ban period, compared trimmed and upper-case. Adapters (F13)
-    /// must cap the list and event sizes; `as_of` is the source's date, if it gave one.
+    /// must cap the list and event sizes; `as_of` is the instant the source published the list. Its
+    /// age is measured against the clock, not the decision date, so a Friday-evening list is stale on a
+    /// Monday-morning scan (fails closed; owner to confirm, RISK-102-10).
     Available {
         symbols: Vec<String>,
         as_of: Option<DateTime<Tz>>,

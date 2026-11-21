@@ -590,6 +590,7 @@ dependencies = [
  "bazaar-core",
  "bazaar-regime",
  "bazaar-risk",
+ "bazaar-strategies",
  "chrono",
  "chrono-tz",
  "rust_decimal",

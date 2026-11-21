@@ -25,7 +25,12 @@ Evidence is empty until F9 runs (all recs `low_evidence`), no options structures
 - QUAN-102-7: round or reject entry, stop and targets to the instrument-master tick (test the stop 96.0333 case): step 4 (the tick comes from the instrument master the sizing step reads).
 - QUAN-102-6 remainder: charges-inclusive `risk_rupees` formula and the `reward_risk`-to-first-target check: step 4 (`risk::size` caller, tested there).
 - RISK-102-10: all `[scanner]` values stay UNVERIFIED, owner to confirm (with `docs/strategy/F11-scanner-defaults.md`) and to confirm G12 `min_adv_inr` is not looser than `min_median_traded_value` before step 4.
-- RISK-102-8 tests (ban list unavailable, undated, 25 h stale, 24 h fresh, case-normalised match) land with the step 2 code that reads the ban list.
+- ~~RISK-102-8 tests~~ done in step 2 (`universe::tests`: unavailable, undated, 25 h stale, 24 h fresh, case-normalised, future-dated).
+- `family_of` (scanner runner) is a hardcoded strategy-label map (F8 table); move it to config or `StrategyMeta` later. `circuit_locked` is a caller-supplied flag until a data source exists.
 - SEC-102-3: size caps on ban-list symbols and event lists belong to the F13 adapters (documented on the ports).
 - RISK-102-5 remainder: `GateSummary` fields stay public (checked for consistency in `new`); a per-failure rule level so the UI does not offer an override the mode forbids (G01 is Paper level) comes with the UI/step 4.
 - Steps 2-4 will be re-cut so each fits `max_slice_changed_lines` (step 1 carried the shared types).
+
+## Slice 2 note
+Universe filters (ban list fail closed, liquidity, circuit lock, history) and the runner (regimes to the closed bar, `DataView::ending_at`, per-family merge, `lookahead_` test) landed in `crates/scanner/src/{universe,runner}.rs`; accepted as one PR over the line budget.
+Fix round (PR 114): the runner takes one effective ban-list age (`min` of the scanner key, risk.toml events and hard_limits) and a tri-state `CircuitState` (the caller passes `Unknown` until a data source exists, which drops the name). The market regime uses no India VIX or breadth yet (`Extras::default()`); the output does not flag it. Deferred to steps 3-4: a `StaleDecisionDate` check of `decision_date` against the calendar (RISK-114-4), Sell/conflicting-signal handling (CR-114-3; only Buy is accepted today), the `family_of` move to config or `StrategyMeta`, and RISK-114-7 (owner item).
