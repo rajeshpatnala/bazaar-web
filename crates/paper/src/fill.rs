@@ -185,7 +185,7 @@ impl WorkingBook {
 
     /// Next id for a simulated order.
     pub fn synth_id(&mut self) -> IntentId {
-        self.next_synth += 1;
+        self.next_synth = self.next_synth.saturating_add(1);
         IntentId(SYNTH_BASE | self.next_synth)
     }
 
@@ -193,10 +193,11 @@ impl WorkingBook {
     pub fn record(&mut self, f: &SimFill) {
         let signed = i64::from(f.qty);
         let delta = if f.side == Side::Buy { signed } else { -signed };
-        *self
+        let p = self
             .positions
             .entry((f.symbol.clone(), f.product.as_str()))
-            .or_insert(0) += delta;
+            .or_insert(0);
+        *p = p.saturating_add(delta);
         if f.complete {
             self.orders.retain(|o| o.id != f.id);
         }
@@ -258,10 +259,16 @@ impl FillSimulator {
         // A price beyond a circuit is pulled back to the nearest valid tick inside it (the
         // circuit is the worst price the trader can get; it is never better than the slipped one).
         if let Some(u) = tick.upper_circuit.filter(|u| p > *u) {
-            p = u.checked_div(o.spec.tick_size)?.floor() * o.spec.tick_size;
+            p = u
+                .checked_div(o.spec.tick_size)?
+                .floor()
+                .checked_mul(o.spec.tick_size)?;
         }
         if let Some(l) = tick.lower_circuit.filter(|l| p < *l) {
-            p = l.checked_div(o.spec.tick_size)?.ceil() * o.spec.tick_size;
+            p = l
+                .checked_div(o.spec.tick_size)?
+                .ceil()
+                .checked_mul(o.spec.tick_size)?;
         }
         (p > Decimal::ZERO).then_some(p)
     }
@@ -321,7 +328,7 @@ impl FillSimulator {
             if qty == 0 {
                 continue;
             }
-            o.filled += qty;
+            o.filled = o.filled.saturating_add(qty);
             out.push(SimFill {
                 id: o.id,
                 symbol: o.symbol.clone(),
@@ -687,5 +694,115 @@ pub(crate) mod tests {
         // 2030 is outside covered_years: fail closed.
         let far = Kolkata.with_ymd_and_hms(2030, 1, 7, 11, 0, 0).unwrap();
         assert!(!session_open(&cal, far, s, k));
+    }
+
+    #[test]
+    fn stale_boundary_age_zero_and_stale_after_fill_one_second_more_does_not() {
+        let t = tick("100", 1000, 1);
+        for (extra, fills) in [(0, 1), (5, 1), (6, 0)] {
+            let mut b = book_with(order(1, Side::Buy, 5, OrderKind::Market));
+            let now = t.at + chrono::Duration::seconds(extra);
+            let n = FillSimulator::new(cfg())
+                .on_tick(&t, now, &cal(), &mut b)
+                .len();
+            assert_eq!(n, fills, "age {extra}s");
+            assert_eq!(
+                b.orders.first().is_some_and(|o| o.stale_flagged),
+                fills == 0
+            );
+        }
+    }
+
+    #[test]
+    fn sell_slipped_below_the_lower_circuit_is_pulled_up_to_a_valid_tick() {
+        let mut b = book_with(order(1, Side::Sell, 5, OrderKind::Market));
+        // 90.05 * 0.999 = 89.95995 -> floor 89.95, below the 90 circuit -> 90
+        assert_eq!(run(&mut b, &tick("90.05", 1000, 1))[0].price, d("90"));
+        let mut b = book_with(order(2, Side::Sell, 5, OrderKind::Market));
+        let mut t = tick("90", 1000, 1);
+        t.lower_circuit = Some(d("89.97")); // off-tick: slipped 89.90 -> ceil(89.97) = 90.00
+        assert_eq!(run(&mut b, &t)[0].price, d("90.00"));
+    }
+
+    #[test]
+    fn limit_orders_at_a_circuit() {
+        let mut b = book_with(order(1, Side::Buy, 5, OrderKind::Limit(d("110"))));
+        assert_eq!(
+            run(&mut b, &tick("110", 1000, 1)).len(),
+            0,
+            "at the upper circuit"
+        );
+        assert_eq!(run(&mut b, &tick("109.95", 1000, 2))[0].price, d("110"));
+        let mut b = book_with(order(2, Side::Sell, 5, OrderKind::Limit(d("90"))));
+        assert_eq!(
+            run(&mut b, &tick("90", 1000, 1)).len(),
+            0,
+            "at the lower circuit"
+        );
+        assert_eq!(run(&mut b, &tick("90.05", 1000, 2))[0].price, d("90"));
+    }
+
+    #[test]
+    fn partial_limit_fill_has_the_exact_per_tick_quantity() {
+        // volume 10 * 0.1 = cap 1, so every tick fills exactly 1
+        let mut b = book_with(order(1, Side::Buy, 3, OrderKind::Limit(d("100"))));
+        let mut sim = FillSimulator::new(cfg());
+        for (s, left) in [(1, 2), (2, 1), (3, 0)] {
+            let t = tick("99.95", 10, s);
+            let f = sim.on_tick(&t, t.at, &cal(), &mut b);
+            assert_eq!((f.len(), f[0].qty, f[0].price), (1, 1, d("100")));
+            assert_eq!(f[0].complete, left == 0);
+            b.record(&f[0]);
+        }
+        assert_eq!(b.orders.len(), 0);
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 64,
+            failure_persistence: None,
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+        #[test]
+        fn simulator_invariants(
+            buy in proptest::prelude::any::<bool>(),
+            qty in 1u32..500,
+            volume in 0u64..5000,
+            lo in 1700i64..2000,
+            span in 1i64..400,
+            off in 0i64..400,
+        ) {
+            let tick_size = d("0.05");
+            let hi = lo + span;
+            let px = lo + off % (span + 1);
+            let side = if buy { Side::Buy } else { Side::Sell };
+            let mut b = book_with(order(1, side, qty, OrderKind::Market));
+            let mut c = cfg();
+            c.seed = 7;
+            let cap = u32::try_from(volume / 10).unwrap_or(u32::MAX);
+            let mut sim = FillSimulator::new(c);
+            let mut total = 0u32;
+            for s in 1..9u32 {
+                let mut t = tick("100", volume, s);
+                t.price = Decimal::from(px) * tick_size;
+                t.lower_circuit = Some(Decimal::from(lo) * tick_size);
+                t.upper_circuit = Some(Decimal::from(hi) * tick_size);
+                for f in sim.on_tick(&t, t.at, &cal(), &mut b) {
+                    proptest::prop_assert!(volume > 0 && f.qty <= cap, "per-tick cap");
+                    total += f.qty;
+                    proptest::prop_assert!(total <= qty, "sum of fills");
+                    proptest::prop_assert!(f.price >= t.lower_circuit.unwrap_or(f.price));
+                    proptest::prop_assert!(f.price <= t.upper_circuit.unwrap_or(f.price));
+                    proptest::prop_assert_eq!(f.price % tick_size, Decimal::ZERO);
+                    // trader-adverse: never better than the print
+                    if buy {
+                        proptest::prop_assert!(f.price >= t.price);
+                    } else {
+                        proptest::prop_assert!(f.price <= t.price);
+                    }
+                    b.record(&f);
+                }
+            }
+        }
     }
 }

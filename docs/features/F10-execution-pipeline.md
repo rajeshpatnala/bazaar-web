@@ -60,3 +60,6 @@ Limits: MIS/NRML use full cash (no margin, no leverage), intraday short selling 
 - Slice 5: MIS/NRML margin from a `MarginSource` and intraday shorting (no source exists, so refused); AMO queue; session-end (not date-change) DAY expiry; the wiring supplies the `SimConfig::from_section` seed from the app; real-store ledger/audit adapters are slice 7.
 - RISK-119-6: server wiring raises the alarm on `blocked_square_offs` and the UI shows a banner (BZ-511, BZ-516 status).
 - RISK-119-6: live path design question, exits must not depend on audit availability (back-filled row); decided with the owner in BZ-602.
+- Slice 5 (CR-119-2): a limit order fills at its limit only when the tick trades strictly through it, with no price-versus-participation check beyond the volume cap; documented simplification.
+- TS-119-2 / BZ-205: position and cash never negative across random order streams needs the real ledger; belongs in the composition test (BZ-205).
+- TS-119-4: `Executor::place(&ApprovedOrder)` is not covered here (tests cannot mint `ApprovedOrder`); carry a `place` test (error mapping) into slice 8 or a `test-util` constructor in `execution`.

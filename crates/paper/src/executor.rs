@@ -17,7 +17,7 @@ use bazaar_core::clock::Clock;
 use bazaar_core::ports::{AuditDraft, AuditRepo, PaperLedgerRepo};
 use bazaar_execution::audit::chain_hash;
 use bazaar_execution::executor::{ApprovedOrder, ExecAck, ExecError, Executor};
-use bazaar_execution::types::{IntentId, OrderIntent, OrderKind, Side};
+use bazaar_execution::types::{IntentId, OrderIntent, OrderKind, Product, Side};
 use chrono::DateTime;
 use chrono_tz::Tz;
 use rust_decimal::Decimal;
@@ -111,7 +111,7 @@ impl<R: PaperLedgerRepo, C: ChargeSource, A: AuditRepo, S: SpecSource> PaperExec
 
     /// Net position for a symbol and product label, as the simulated broker holds it.
     #[must_use]
-    pub fn position(&self, symbol: &str, product: bazaar_execution::types::Product) -> i64 {
+    pub fn position(&self, symbol: &str, product: Product) -> i64 {
         lock(&self.book).position(symbol, product)
     }
 
@@ -130,6 +130,9 @@ impl<R: PaperLedgerRepo, C: ChargeSource, A: AuditRepo, S: SpecSource> PaperExec
     /// `MarginUnavailable` (no reference price or no charge estimate), `InsufficientFunds`,
     /// `Storage`.
     pub(crate) async fn accept(&self, i: &OrderIntent) -> Result<ExecAck, ExecError> {
+        // One driver at a time: validate, funds check and push are atomic against other `place`
+        // calls and against ticks, so two orders cannot both pass the position or reserve check.
+        let _d = self.driver.lock().await;
         let spec = self
             .specs
             .spec(&i.symbol)
@@ -195,6 +198,8 @@ impl<R: PaperLedgerRepo, C: ChargeSource, A: AuditRepo, S: SpecSource> PaperExec
             .filter_map(|o| {
                 let px = match o.kind {
                     OrderKind::Limit(p) => p,
+                    // A working market buy always has a last price (its spec and a reference
+                    // price were required at accept), so this skip is unreachable in practice.
                     OrderKind::Market => *book.last_price.get(&o.symbol)?,
                 };
                 px.checked_mul(Decimal::from(o.qty - o.filled))
@@ -378,9 +383,9 @@ impl<R: PaperLedgerRepo, C: ChargeSource, A: AuditRepo, S: SpecSource> PaperExec
                         "paper_order_dropped"
                     };
                     let payload = format!(
-                        "{{\"id\":\"{}\",\"reason\":\"{:?}\",\"symbol\":\"{}\"}}",
+                        "{{\"id\":\"{}\",\"reason\":\"{}\",\"symbol\":\"{}\"}}",
                         f.id,
-                        e,
+                        reason_str(e),
                         esc(&f.symbol)
                     );
                     if self.audit_event(kind, payload, now).await.is_err() {
@@ -390,6 +395,19 @@ impl<R: PaperLedgerRepo, C: ChargeSource, A: AuditRepo, S: SpecSource> PaperExec
                 Err(map_account(e))
             }
         }
+    }
+}
+
+/// Stable audit reason per account error (never the wrapped repo error text).
+const fn reason_str(e: AccountError) -> &'static str {
+    match e {
+        AccountError::InsufficientFunds => "insufficient_funds",
+        AccountError::NoPosition => "no_position",
+        AccountError::InvalidFill => "invalid_fill",
+        AccountError::ChargesUnavailable => "charges_unavailable",
+        AccountError::BadCharge => "bad_charge",
+        AccountError::NotOpened => "not_opened",
+        AccountError::Ledger(_) => "ledger_error",
     }
 }
 
@@ -419,7 +437,6 @@ mod tests {
     use bazaar_core::segment::{InstrumentKind, Segment};
     use bazaar_core::testutil::FakeClock;
     use bazaar_execution::audit::verify_chain;
-    use bazaar_execution::types::Product;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     #[derive(Default, Clone)]
@@ -669,6 +686,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_placements_cannot_both_reserve_the_same_funds() {
+        let rig = rig("600").await;
+        let first = intent(1, Side::Buy, 5, OrderKind::Limit(d("100")), Product::Cnc);
+        let second = intent(2, Side::Buy, 5, OrderKind::Limit(d("100")), Product::Cnc);
+        let (one, two) = tokio::join!(rig.ex.accept(&first), rig.ex.accept(&second));
+        assert_eq!(usize::from(one.is_ok()) + usize::from(two.is_ok()), 1);
+        assert_eq!(rig.ex.working_count(), 1);
+    }
+
+    #[tokio::test]
     async fn fill_time_funds_failure_drops_the_order_audits_it_and_leaves_the_ledger() {
         let r = rig("501").await;
         tick_at(&r, "100", 1000, 0).await;
@@ -683,6 +710,12 @@ mod tests {
         assert_eq!(r.ex.working_count(), 0);
         let rows = lock(&r.audit.rows).clone();
         assert_eq!(rows[0].draft.kind, "paper_order_dropped");
+        assert!(
+            rows[0]
+                .draft
+                .payload
+                .contains("\"reason\":\"insufficient_funds\"")
+        );
     }
 
     #[tokio::test]
