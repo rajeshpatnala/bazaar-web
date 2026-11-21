@@ -2,7 +2,9 @@
 //! falling cycles; the pinned numbers are snapshots of the engine, not derived by hand): the engine's charges follow the
 //! calculator's rounding rules (AC 1); the same run twice and on four threads is identical and
 //! net of charges, with provenance (AC 6); walk-forward folds never overlap, OOS runs only the set
-//! chosen in IS, and the trial count and thin-fold flag appear (AC 7).
+//! chosen in IS, and the trial count and thin-fold flag appear (AC 7). The baseline pins in
+//! `fixtures/backtest/golden_baseline.json` come from a synthetic series with 24 trades (low
+//! evidence, below the 30-trade bar): engine snapshots, never evidence of an edge.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -440,4 +442,86 @@ fn ac7_folds_do_not_overlap_oos_uses_the_is_choice_and_trials_are_counted() {
     assert_eq!((res.folds.len(), oos_seen, res.trials), (5, 3, 2));
     assert_eq!(res.pooled.trades, 80);
     assert_eq!(res.pooled.net_pnl, d("-7725.57"));
+}
+
+fn golden_pins() -> serde_json::Value {
+    let p =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/backtest/golden_baseline.json");
+    serde_json::from_str(&std::fs::read_to_string(p).expect("golden_baseline.json: readable"))
+        .expect("golden_baseline.json: valid JSON")
+}
+
+fn pin(v: &serde_json::Value, k: &str) -> Decimal {
+    d(v[k]
+        .as_str()
+        .unwrap_or_else(|| panic!("golden_baseline.json: missing string key {k}")))
+}
+
+#[test]
+fn ac6_baseline_stats_match_the_golden_fixture() {
+    let e = env();
+    let bars = candles(120);
+    let out = exec(&e, &bars, 5);
+    let m = Metrics::from_trades(&out.trades, d("100000"), &out.equity).unwrap();
+    let pins = golden_pins();
+    let base = &pins["baseline"];
+    assert_eq!(u64::from(m.trades), base["trades"].as_u64().unwrap());
+    assert_eq!(u64::from(m.wins), base["wins"].as_u64().unwrap());
+    assert_eq!(u64::from(m.losses), base["losses"].as_u64().unwrap());
+    assert_eq!(m.win_rate, pin(base, "win_rate"));
+    assert_eq!(m.net_pnl, pin(base, "net_pnl"));
+    assert_eq!(m.gross_profit, pin(base, "gross_profit"));
+    assert_eq!(m.gross_loss, pin(base, "gross_loss"));
+    assert_eq!(m.profit_factor, Some(pin(base, "profit_factor")));
+    assert_eq!(m.expectancy_r, Some(pin(base, "expectancy_r")));
+    assert_eq!(m.drawdown.max_abs, pin(base, "max_drawdown_abs"));
+    // Synthetic and thin: 24 trades is below the 30-trade bar, so the evidence label is low.
+    let facts = bazaar_backtest::metrics::RunFacts {
+        folds: 1,
+        regimes: 1,
+        costs_approximate: false,
+        trials_in_run: 1,
+    };
+    let verdict = bazaar_backtest::metrics::assess(&e.cfg, &m, &facts).unwrap();
+    assert_eq!(verdict.label, EvidenceLabel::LowEvidence);
+}
+
+#[test]
+fn ac6_cost_sensitivity_doubling_slippage_lowers_net_and_keeps_the_trades() {
+    let e = env();
+    let bars = candles(120);
+    let base = exec(&e, &bars, 5);
+    let mut s = spec(&e, &bars, 0);
+    // The same multiple the engine's stress run uses (config key fills.stress_slippage_multiplier).
+    s.slippage_multiplier = e.cfg.fills.stress_slippage_multiplier;
+    assert_eq!(
+        s.slippage_multiplier,
+        d("2"),
+        "the fixture pins the x2 stress"
+    );
+    let hi = run(&s, &mut every(5), &regimes(&bars), &mut ApproveAll).unwrap();
+    let net = |o: &RunOutput| o.trades.iter().map(|t| t.net_pnl).sum::<Decimal>();
+    let g = golden_pins();
+    let want = &g["slippage_x2"];
+    assert_eq!(
+        hi.trades.len(),
+        usize::try_from(want["trades"].as_u64().unwrap()).unwrap()
+    );
+    assert_eq!(net(&hi), pin(want, "net_pnl"));
+    assert_eq!(hi.trades.len(), base.trades.len());
+    assert!(net(&hi) < net(&base), "worse fills must cost P&L");
+    // Same quantity on both runs (so a per-trade P&L comparison is like for like), and no trade
+    // is better under heavier slippage.
+    for (a, b) in base.trades.iter().zip(&hi.trades) {
+        assert_eq!(a.entry.leg.qty, b.entry.leg.qty);
+        assert!(b.net_pnl <= a.net_pnl);
+    }
+    // Charges are levied on both legs of every trade in both runs (total positive).
+    for o in [&base, &hi] {
+        for t in &o.trades {
+            for f in [&t.entry, &t.exit] {
+                assert!(f.charges.total().unwrap() > Decimal::ZERO);
+            }
+        }
+    }
 }
