@@ -22,6 +22,8 @@ export const setCsrfToken = (t: string | null) => {
   csrf = t;
 };
 
+export const getCsrfToken = (): string | null => csrf;
+
 let sessionEndedListener: (() => void) | null = null;
 export const onSessionEnded = (fn: (() => void) | null) => {
   sessionEndedListener = fn;
