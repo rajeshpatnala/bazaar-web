@@ -39,6 +39,11 @@ Cash is derived by replaying the current epoch's append-only ledger (kinds openi
 RISK-119-6 decision: paper keeps the audit write-ahead and fails closed (no reduce-only bypass). A square-off blocked by an audit outage appears in `TickOutcome::blocked_square_offs`, is logged at error each tick, and fills on the first tick after the audit recovers; the wiring must alarm on any entry.
 Limits: MIS/NRML use full cash (no margin, no leverage), intraday short selling is refused, AMO is not modelled, DAY expiry is by date change only. Tests cannot mint `ApprovedOrder` outside `execution`, so `place` itself is covered through `accept`. `execution::types` now re-exports `Side` (paper may not depend on `risk`).
 
+## Slice 6 (store repos, BZ-203)
+- Migrations 0003 orders (+ append-only `order_events`), 0004 approvals (unique index on `order_id`, first decision wins, append-only), 0005 kill_switch (single row, seeded released, undeletable). 0002 was taken by candles.
+- `SqliteStore` methods (labels are opaque text; store depends on core only): `order_create/get/advance/orders_in_state/order_events`, `approval_record/get`, `kill_switch_get/set`. Stale version or duplicate decision is `RepoError::Conflict`; a missing kill-switch row is `Corrupt` (callers fail closed).
+- Not in this slice: the audit-row write inside `order_advance`'s transaction (slice 7 owns the audit table; wire it there or in slice 8). Gate not run when written: DuckDB build was blocked (BZ-106); run `just dev-gate` after it merges.
+
 ## Deferred
 - Slice 3 review (PR 109) carry-overs for slice 8: RISK-109-3 - the real `Gate` adapter must check `reduce_only` against the live position and Block otherwise (adapter test: an entry with the flag set is blocked while killed); the flag stays unreachable from any endpoint until then. RISK-109-7 - the adapter and its test must treat a `None` quote as Block for entries (G15). TS-109-1 - add Drift and ExpireStale ops to the AC1 property test if cheap.
 - Slice 4 follow-ups (RISK-113-3, RISK-113-6): the wiring slice must audit and journal every `PaperAccount::reset` with a typed reason, and keep daily/weekly loss-limit state across an epoch reset (or refuse reset during a lockout). Slice 5 owns MIS/NRML margin and intraday short selling (an explicit acceptance item). The store slice (7) implements `append_many` in one SQL transaction.
