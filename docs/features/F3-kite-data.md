@@ -17,7 +17,7 @@ Owner area: `crates/data`, `config/data.toml`, `core/src/{config/data,secret,por
 
 ## What was built
 - BZ-404 (contracts): `core::config::DataConfig` (typed `[kite]`, `[nse]`, `[staleness]`, `[history]`; loader rejects missing `verified_on`, non-https URLs, hosts off the allowlist, userinfo/port in a host, zero timeouts/limits/spans, oversize caps). `core::secret::{Secret, AccessToken}` (redacting Debug, no Display/Serialize/Clone). `core::ports::{TokenStore, TokenError}`.
-- Config keys: `data.toml` `kite.*`, `kite.span_days.*`, `nse.*`, `staleness.*`, `history.*`, `unverified`. `config/data.toml` is no longer a placeholder; `fixtures/config/data.toml` carries the same shape.
+- Config keys: `data.toml` `kite.*`, `kite.span_days.*`, `nse.*`, `staleness.*`, `history.*`, `unverified`. `config/data.toml` is no longer a placeholder.
 
 ## Decisions
 - Token storage: file under `secrets/`, 0600, atomic write, never read by agents: `docs/adr/0002-kite-token-storage.md`.

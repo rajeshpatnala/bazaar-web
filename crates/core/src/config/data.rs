@@ -13,11 +13,11 @@ use crate::candle::Interval;
 
 const FILE: &str = "data.toml";
 /// Longest allowed timeout, in seconds (every outbound call needs a bounded one).
-pub const MAX_TIMEOUT_SECS: u32 = 300;
+const MAX_TIMEOUT_SECS: u32 = 300;
 /// Largest response body an adapter may be configured to read (64 MiB).
-pub const MAX_RESPONSE_BYTES_CEILING: u64 = 64 * 1024 * 1024;
+const MAX_RESPONSE_BYTES_CEILING: u64 = 64 * 1024 * 1024;
 /// Most hosts in one allowlist.
-pub const MAX_ALLOWED_HOSTS: usize = 8;
+const MAX_ALLOWED_HOSTS: usize = 8;
 
 /// Maximum days of data per historical call, by interval (Kite protocol limits).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

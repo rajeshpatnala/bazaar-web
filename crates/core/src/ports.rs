@@ -415,6 +415,7 @@ pub trait TokenStore: Send + Sync {
 }
 
 #[cfg(test)]
+#[allow(clippy::unused_async_trait_impl)] // the fake has nothing to await
 mod token_store_tests {
     use super::*;
     use crate::secret::{AccessToken, Secret};
