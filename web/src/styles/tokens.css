@@ -11,6 +11,8 @@
   --red-bg: #f8e7e5;
   --amber: #7a5c2e;
   --amber-bg: #faf7f1;
+  --on-accent: #ffffff; /* text on --green; AA tested */
+  --scrim: #2b2a2880; /* modal backdrop */
   --radius: 18px;
   --radius-pill: 99px;
   --shadow: 0 8px 30px #0001;
