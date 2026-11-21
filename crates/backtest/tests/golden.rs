@@ -483,7 +483,10 @@ fn ac6_cost_sensitivity_doubling_slippage_lowers_net_and_keeps_the_trades() {
     let net = |o: &RunOutput| o.trades.iter().map(|t| t.net_pnl).sum::<Decimal>();
     let g = golden_pins();
     let want = &g["slippage_x2"];
-    assert_eq!(hi.trades.len(), want["trades"].as_u64().unwrap() as usize);
+    assert_eq!(
+        hi.trades.len(),
+        usize::try_from(want["trades"].as_u64().unwrap()).unwrap()
+    );
     assert_eq!(net(&hi), pin(want, "net_pnl"));
     assert_eq!(hi.trades.len(), base.trades.len());
     assert!(net(&hi) < net(&base), "worse fills must cost P&L");
