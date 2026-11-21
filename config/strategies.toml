@@ -85,3 +85,23 @@ stop_buffer_atr = 0.25      # room under the lows, in ATR (0.1-0.5)
 max_stop_atr = 2.0          # skip if the stop is too far (1.5-2.5)
 max_hold_bars = 8           # time stop (5-12)
 min_rr = 1.2                # reward:risk floor (1.2-2.0)
+
+# [scanner] (F11, .agents/plans/F11-scanner.md "Owner inputs"). All values are PROPOSALS, UNVERIFIED for this
+# app (source: F11 plan 2026-11-21 + docs/strategy/F11-scanner-defaults.md; verified_on: not verified, confirm with the owner and market-strategist).
+# weights: each 0-1, sum 1. The event penalty is subtractive (score points), not a weight.
+# min_median_traded_value is rupees as a string (Rs 10 crore, median 20-day traded value).
+[scanner]
+event_penalty_max_points = 15.0   # UNVERIFIED
+min_median_traded_value = "100000000"  # UNVERIFIED, Rs 10 crore
+min_history_bars = 250            # UNVERIFIED, about one year, matches regime vol lookback
+min_trades_evidence = 30          # UNVERIFIED, matches F9 policy and risk.toml
+shrink_k = 30                     # UNVERIFIED, pseudo-trades for n/(n+k)
+low_evidence_cap = 55             # UNVERIFIED, confidence ceiling when low_evidence
+max_results = 5                   # UNVERIFIED, strategist F11 spec (owner max 3 open positions); blocked ones listed apart
+max_ban_list_age_hours = 24       # UNVERIFIED, ban list older than this or undated fails closed (matches G06)
+liquidity_full_score_multiple = 10.0  # UNVERIFIED, liquidity 0 at the floor, 1 at 10x, log scale
+[scanner.weights]
+confluence = 0.30                 # UNVERIFIED
+regime_fit = 0.25                 # UNVERIFIED
+liquidity = 0.15                  # UNVERIFIED
+evidence = 0.30                   # UNVERIFIED
