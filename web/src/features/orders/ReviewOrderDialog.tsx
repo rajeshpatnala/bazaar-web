@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiError } from "../../api/client";
 import { formatIstIso } from "../../shared/lib/format-ist";
 import { Button } from "../../shared/ui/Button";
@@ -19,10 +19,22 @@ const isAmbiguous = (e: unknown) =>
  */
 export function ReviewOrderDialog({ ideaId, onClose }: { ideaId: string; onClose: () => void }) {
   const preview = useQuery(previewQuery(ideaId));
-  const [key] = useState(() => crypto.randomUUID()); // one per dialog open, reused on retry
+  const keys = useRef(new Map<string, string>()); // one idempotency key per approval_id, reused on retry
+  const [unconfirmed, setUnconfirmed] = useState(false); // stays until an approval is confirmed
   const [now, setNow] = useState(() => Date.now());
   const p = preview.data;
-  const approve = useMutation({ mutationFn: () => approvePaperOrder(p!, key), retry: false });
+  const approve = useMutation({
+    mutationFn: () => {
+      const id = p!.approval_id;
+      if (!keys.current.has(id)) keys.current.set(id, crypto.randomUUID());
+      return approvePaperOrder(p!, keys.current.get(id)!);
+    },
+    retry: false,
+    onSuccess: () => setUnconfirmed(false),
+    onError: (e) => {
+      if (isAmbiguous(e)) setUnconfirmed(true);
+    },
+  });
   const expiresMs = p ? Date.parse(p.expires_at) : null;
 
   useEffect(() => {
@@ -113,15 +125,10 @@ export function ReviewOrderDialog({ ideaId, onClose }: { ideaId: string; onClose
           {approve.data.message}
         </p>
       )}
-      {approve.isError && (
-        <ErrorView
-          message={
-            isAmbiguous(err)
-              ? "Could not confirm the result. Check Orders before trying again; retrying sends the same request, so it cannot place a second order."
-              : (err as ApiError).message
-          }
-        />
+      {unconfirmed && (
+        <ErrorView message="Could not confirm the result of an earlier attempt. Check Orders before approving again." />
       )}
+      {approve.isError && !isAmbiguous(err) && <ErrorView message={(err as ApiError).message} />}
       <div className="dialog-actions">
         <Button variant="ghost" onClick={onClose}>
           {approve.data ? "Close" : "Not now"}

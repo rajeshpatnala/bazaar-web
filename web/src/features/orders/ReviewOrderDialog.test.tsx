@@ -212,4 +212,39 @@ describe("Review paper order dialog", () => {
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).toBeNull();
   });
+
+  it("Review again uses a new key for the new approval and keeps the could-not-confirm warning", async () => {
+    const seen: { id: string; idem: string | null }[] = [];
+    let previews = 0;
+    server.use(
+      http.post(PREVIEW, () => {
+        previews += 1;
+        return HttpResponse.json(
+          previews === 1
+            ? makePreview({ approval_id: "appr-1", expires_at: new Date(Date.now() + 700).toISOString() })
+            : makePreview({ approval_id: "appr-2" }),
+        );
+      }),
+      http.post(APPROVE, ({ request, params }) => {
+        seen.push({ id: String(params.id), idem: request.headers.get("Idempotency-Key") });
+        return seen.length === 1 ? new HttpResponse(null, { status: 500 }) : HttpResponse.json({ status: "paper_filled", message: "ok" });
+      }),
+    );
+    const d = await openDialog();
+    await userEvent.click(await approveBtn(d));
+    await within(d).findByText(/Could not confirm the result/);
+    await userEvent.click(await within(d).findByRole("button", { name: "Review again" }, { timeout: 3000 }));
+    await waitFor(() => expect(previews).toBe(2));
+    expect(within(d).getByText(/Could not confirm the result/)).toBeInTheDocument();
+    const again = await waitFor(() => {
+      const b = within(d).getByRole("button", { name: "Approve paper order" });
+      expect(b).toBeEnabled();
+      return b;
+    });
+    await userEvent.click(again);
+    await within(d).findByRole("status");
+    expect(seen.map((s) => s.id)).toEqual(["appr-1", "appr-2"]);
+    expect(seen[0]?.idem).not.toBe(seen[1]?.idem);
+    expect(within(d).queryByText(/Could not confirm the result/)).toBeNull();
+  });
 });
