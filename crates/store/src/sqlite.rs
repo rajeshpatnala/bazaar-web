@@ -63,6 +63,27 @@ fn migrator() -> Migrator {
             SqlStr::from_static(include_str!("../migrations/0002_candles.sql")),
             false,
         ),
+        Migration::new(
+            3,
+            Cow::Borrowed("orders"),
+            MigrationType::Simple,
+            SqlStr::from_static(include_str!("../migrations/0003_orders.sql")),
+            false,
+        ),
+        Migration::new(
+            4,
+            Cow::Borrowed("approvals"),
+            MigrationType::Simple,
+            SqlStr::from_static(include_str!("../migrations/0004_approvals.sql")),
+            false,
+        ),
+        Migration::new(
+            5,
+            Cow::Borrowed("killswitch"),
+            MigrationType::Simple,
+            SqlStr::from_static(include_str!("../migrations/0005_killswitch.sql")),
+            false,
+        ),
     ])
 }
 
