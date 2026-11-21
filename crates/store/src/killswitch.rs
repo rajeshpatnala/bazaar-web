@@ -1,9 +1,10 @@
 //! Kill-switch state: a single durable row. Callers treat any error as engaged (fail closed).
 //! Writes bump an optimistic version, so a stale writer loses with `RepoError::Conflict`.
 
-use bazaar_core::ports::RepoError;
+use bazaar_core::ports::{AuditDraft, ChainFn, RepoError};
 use sqlx::Row;
 
+use crate::audit::append_in_tx;
 use crate::sqlite::{SqliteStore, map_err};
 
 const MAX_TEXT: usize = 500;
@@ -89,6 +90,62 @@ impl SqliteStore {
         .map_err(|e| map_err(&e))?;
         tx.commit().await.map_err(|e| map_err(&e))?;
         u64::try_from(next).map_err(|_| RepoError::Other)
+    }
+
+    /// Set the state from the current version, with the audit row in the same transaction
+    /// (port `set`). A concurrent writer that moved the version first is `Conflict`.
+    pub(crate) async fn kill_switch_set_audited(
+        &self,
+        engaged: bool,
+        actor: &str,
+        reason: &str,
+        at_ns: i64,
+        audit: &AuditDraft,
+        chain: ChainFn,
+    ) -> Result<(), RepoError> {
+        if actor.is_empty() || reason.is_empty() {
+            return Err(RepoError::Other);
+        }
+        if actor.len() > MAX_TEXT || reason.len() > MAX_TEXT {
+            return Err(RepoError::TooLarge);
+        }
+        let mut tx = self.pool.begin().await.map_err(|e| map_err(&e))?;
+        let expected: i64 = sqlx::query_scalar("SELECT version FROM kill_switch WHERE id = 1")
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| map_err(&e))?
+            .ok_or(RepoError::Corrupt)?;
+        let next = expected.checked_add(1).ok_or(RepoError::Other)?;
+        let done = sqlx::query(
+            "UPDATE kill_switch SET engaged = ?, version = ?, actor = ?, reason = ?, \
+             changed_ns = ? WHERE id = 1 AND version = ?",
+        )
+        .bind(i64::from(engaged))
+        .bind(next)
+        .bind(actor)
+        .bind(reason)
+        .bind(at_ns)
+        .bind(expected)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| map_err(&e))?;
+        if done.rows_affected() != 1 {
+            return Err(RepoError::Conflict);
+        }
+        sqlx::query(
+            "INSERT INTO kill_switch_events (version, engaged, actor, reason, changed_ns) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(next)
+        .bind(i64::from(engaged))
+        .bind(actor)
+        .bind(reason)
+        .bind(at_ns)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| map_err(&e))?;
+        append_in_tx(&mut tx, audit, chain).await?;
+        tx.commit().await.map_err(|e| map_err(&e))
     }
 }
 

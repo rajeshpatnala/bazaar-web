@@ -136,6 +136,32 @@ impl SqliteStore {
         payload: &str,
         at_ns: i64,
     ) -> Result<OrderRow, RepoError> {
+        self.create_inner(order_id, state, payload, at_ns, None)
+            .await
+    }
+
+    /// Like `order_create`, with the audit row in the same transaction (port `insert`).
+    pub(crate) async fn order_create_audited(
+        &self,
+        order_id: &str,
+        state: &str,
+        payload: &str,
+        at_ns: i64,
+        audit: &AuditDraft,
+        chain: ChainFn,
+    ) -> Result<OrderRow, RepoError> {
+        self.create_inner(order_id, state, payload, at_ns, Some((audit, chain)))
+            .await
+    }
+
+    async fn create_inner(
+        &self,
+        order_id: &str,
+        state: &str,
+        payload: &str,
+        at_ns: i64,
+        audit: Option<(&AuditDraft, ChainFn)>,
+    ) -> Result<OrderRow, RepoError> {
         check_label(order_id)?;
         check_label(state)?;
         if payload.len() > MAX_PAYLOAD {
@@ -164,6 +190,9 @@ impl SqliteStore {
         .execute(&mut *tx)
         .await
         .map_err(|e| map_err(&e))?;
+        if let Some((draft, chain)) = audit {
+            append_in_tx(&mut tx, draft, chain).await?;
+        }
         tx.commit().await.map_err(|e| map_err(&e))?;
         Ok(OrderRow {
             order_id: order_id.to_owned(),
