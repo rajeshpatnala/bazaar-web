@@ -197,3 +197,14 @@ async fn existing_data_dir_keeps_its_mode() {
     let mode = std::fs::metadata(tmp.path()).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o755);
 }
+
+#[tokio::test]
+async fn unusable_candle_root_reports_failed_duckdb() {
+    // A quote in the path is refused by the candle store root check (it is spliced into SQL).
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("it's");
+    let r = check_connections(&config_dir(), &dir, &clock(2026, 1, 6)).await;
+    assert_eq!(r.lines[0], "OK sqlite");
+    assert!(r.lines[1].starts_with("FAILED duckdb "), "{:?}", r.lines);
+    assert!(!r.ok);
+}

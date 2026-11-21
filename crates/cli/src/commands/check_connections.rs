@@ -9,7 +9,7 @@ use bazaar_core::ports::InstrumentRepo;
 use bazaar_core::segment::Segment;
 use bazaar_store::{DuckStore, SqliteStore};
 
-use super::{CommandError, DB_FILE, ensure_data_dir, repo_label};
+use super::{CANDLES_DIR, CommandError, DB_FILE, ensure_data_dir, repo_label};
 
 /// Result of `check-connections`: the lines to print and whether everything is OK.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,7 +18,7 @@ pub struct CheckReport {
     pub ok: bool,
 }
 
-/// Check the SQLite store and the freshness of the instrument master against the calendar's
+/// Check the SQLite store, the `DuckDB` candle store (engine and Parquet reader load) and the freshness of the instrument master against the calendar's
 /// last trading day on or before today. A placeholder or uncovered calendar is never fresh.
 pub async fn check_connections(
     config_dir: &Path,
@@ -47,7 +47,7 @@ pub async fn check_connections(
         }
     };
     // The candle store: the engine starts and the Parquet reader loads (no data file is touched).
-    let duck = match DuckStore::new(data_dir.join("candles")) {
+    let duck = match DuckStore::new(data_dir.join(CANDLES_DIR)) {
         Ok(d) => d.ping().await.map_err(repo_label),
         Err(e) => Err(repo_label(e)),
     };

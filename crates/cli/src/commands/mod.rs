@@ -16,6 +16,9 @@ pub use import_instruments::{ImportSummary, import_instruments};
 /// File name of the SQLite database inside the data directory.
 pub const DB_FILE: &str = "bazaar.sqlite";
 
+/// Directory of Parquet candle files inside the data directory (read through `DuckDB`).
+pub const CANDLES_DIR: &str = "candles";
+
 /// A failed command, with a safe category label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum CommandError {
