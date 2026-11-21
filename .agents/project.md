@@ -1,13 +1,14 @@
 # Project profile
 
 The manager fills this in with the user at the start (keep it under 60 lines). Every agent reads it.
-Filled 2026-11-18 with the owner. Stack and layering: `bz-repo-structure`, `bz-architecture`.
+Filled 2026-11-18 with the owner; updated 2026-11-21 (live mode, UI direction). Stack and layering: `bz-repo-structure`, `bz-architecture`.
 
 ## Purpose
 Bazaar is a personal, single-user trading assistant for Indian equities and F&O, running on the owner's Mac.
 Scope: NSE/BSE cash equity now (intraday and swing trading); F&O is a later phase (design must not block it).
 It scans the market, produces rule-based recommendations with plain-English "Why?" panels, backtests strategies
-(Indian cost model), runs a paper account by default, and routes any order through the DecisionGate and an explicit
+(Indian cost model), runs a paper account by default (paper and live are both supported, switched in the UI; live is selected server-side),
+and routes any order through the DecisionGate and an explicit
 user approval. There is no "place order" endpoint. Not investment advice; the disclaimer stays visible.
 
 ## Consumers / API style
@@ -20,7 +21,7 @@ errors, utoipa OpenAPI -> generated TS types) plus a WebSocket feed. Auth: launc
 |---|---|---|---|
 | SQLite (`data/bazaar.db`) | app state, approvals, kill switch, job runs, journal, paper account, audit log (sessions are in memory only) | sqlx 0.9, migrations in `crates/store/migrations` | |
 | Parquet + DuckDB (`data/candles/`) | candles, bhavcopy history, backtest data | duckdb crate, partitioned by symbol/year | |
-| Zerodha Kite Connect | live ticks (WebSocket), historical candles, instruments, margins; broker orders only via the future `live-trading` feature, after approval | REST + WebSocket, daily login redirect to `/api/v1/kite/callback` | |
+| Zerodha Kite Connect | live ticks (WebSocket), historical candles, instruments, margins; broker orders only via the `live-trading` feature (never default), after approval | REST + WebSocket, daily login redirect to `/api/v1/kite/callback` | |
 | NSE/BSE bhavcopy archives | end-of-day universe, delivery % | official downloads only | |
 
 ## Integrations
@@ -28,7 +29,7 @@ errors, utoipa OpenAPI -> generated TS types) plus a WebSocket feed. Auth: launc
 - TradingView: charting only - TradingView widgets/chart links in the UI alongside our own lightweight-charts. No scraping
   and no data extraction from TradingView; any inbound alert/webhook idea needs the owner's approval first.
   Zerodha (Kite) stays the only data and broker source.
-- NSE/BSE official bhavcopy downloads. No scraping. Live broker crate only behind the `live-trading` feature (never default).
+- NSE/BSE official bhavcopy downloads. No scraping. Live broker crate only behind the `live-trading` feature (never default); paper stays the default mode.
 
 ## Input data / parsing
 Kite JSON and binary tick frames; bhavcopy CSV/ZIP; instrument master CSV; Parquet for stored candles; config in
@@ -53,3 +54,4 @@ Branches: integration `develop`, release `main` (both exist). Feature PRs -> `de
 - No look-ahead in backtests; `paper` is the default mode; every order path goes through DecisionGate plus approval.
 - Agents never touch real data stores, the live broker or `data/`; tests use fakes, mocks and temp dirs.
 - Owner rules in `.agents/owner-rules.md` apply everywhere (no sticky/scroll-jacking UI; each section fits the desktop viewport).
+- UI: light premium look (owner chose preview B, `previews/B-light-premium.html`, 2026-11-20); React 19 + Vite.
