@@ -108,7 +108,9 @@ fn plain_open_violation(code: &str) -> bool {
 #[test]
 fn plain_open_guard_catches_spacing_aliases_and_variants() {
     assert!(plain_open_violation("SqliteStore::open(p)"));
-    assert!(plain_open_violation("bazaar_store::SqliteStore :: open (p)"));
+    assert!(plain_open_violation(
+        "bazaar_store::SqliteStore :: open (p)"
+    ));
     assert!(plain_open_violation("use bazaar_store::SqliteStore as S;"));
     assert!(plain_open_violation("S::open(p)"));
     assert!(plain_open_violation("SqliteStore::open_in_memory()"));
