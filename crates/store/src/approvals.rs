@@ -80,11 +80,23 @@ fn json_escape(s: &str) -> String {
     o
 }
 
+/// A unique violation, or a busy/snapshot failure on the first write (another writer committed
+/// between our state read and our write: we lost the race), is `Conflict`.
+fn lost_race_or_conflict(e: &sqlx::Error) -> RepoError {
+    if let sqlx::Error::Database(d) = e
+        && let Some(code) = d.code()
+        && matches!(code.as_ref(), "5" | "6" | "517" | "261" | "773")
+    {
+        return RepoError::Conflict;
+    }
+    conflict_or(e)
+}
+
 impl SqliteStore {
-    /// Record the decision, move the order, write its event and the audit row in ONE
-    /// transaction. `Conflict` when a decision already exists or the order version is stale;
-    /// on any error nothing is stored. Returns the new order version.
-    pub async fn approval_decide(
+    /// Test-only: the decision write without the order-state guard. Production code must use
+    /// `approval_decide_from` (RISK-131-3).
+    #[cfg(test)]
+    pub(crate) async fn approval_decide(
         &self,
         t: &OrderTransition<'_>,
         decision: ApprovalDecision,
@@ -92,14 +104,28 @@ impl SqliteStore {
         audit: &AuditDraft,
         chain: ChainFn,
     ) -> Result<u64, RepoError> {
-        self.approval_decide_from(t, None, decision, actor, audit, chain)
+        self.decide_tx(t, None, decision, actor, audit, chain).await
+    }
+
+    /// Record the decision, move the order, write its event and the audit row in ONE
+    /// transaction, and only while the order is in `required_state` (checked inside the
+    /// transaction). `Conflict` when the state differs, a decision already exists, the order
+    /// version is stale, or a concurrent writer won the race; on any error nothing is stored.
+    /// Returns the new order version.
+    pub(crate) async fn approval_decide_from(
+        &self,
+        t: &OrderTransition<'_>,
+        required_state: &str,
+        decision: ApprovalDecision,
+        actor: &str,
+        audit: &AuditDraft,
+        chain: ChainFn,
+    ) -> Result<u64, RepoError> {
+        self.decide_tx(t, Some(required_state), decision, actor, audit, chain)
             .await
     }
 
-    /// Like `approval_decide`, and when `required_state` is set the order must be in it at the
-    /// moment of the write (checked inside the transaction): any other state is `Conflict` and
-    /// nothing is stored.
-    pub async fn approval_decide_from(
+    async fn decide_tx(
         &self,
         t: &OrderTransition<'_>,
         required_state: Option<&str>,
@@ -129,7 +155,7 @@ impl SqliteStore {
             .bind(t.at_ns)
             .execute(&mut *tx)
             .await
-            .map_err(|e| conflict_or(&e))?;
+            .map_err(|e| lost_race_or_conflict(&e))?;
         let v = advance_in_tx(&mut tx, t).await?;
         append_in_tx(&mut tx, audit, chain).await?;
         tx.commit().await.map_err(|e| map_err(&e))?;

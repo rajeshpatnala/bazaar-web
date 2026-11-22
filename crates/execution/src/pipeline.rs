@@ -630,7 +630,14 @@ pub(crate) mod fakes {
     }
 
     #[derive(Default)]
-    pub(crate) struct MemApprovals(pub Mutex<HashMap<u128, ApprovalDecision>>);
+    pub(crate) struct MemApprovals(
+        pub Mutex<HashMap<u128, ApprovalDecision>>,
+        /// Shared order table: when set, `decide_and_advance` has the real repo's state and
+        /// version checks (RISK-131-4, TS-131-1).
+        pub Option<std::sync::Arc<MemOrders>>,
+        /// Inject a failure between the approval row and the order advance (rolls back).
+        pub AtomicBool,
+    );
     impl ApprovalRepo for MemApprovals {
         async fn decide(
             &self,
@@ -646,17 +653,41 @@ pub(crate) mod fakes {
             d: ApprovalDecision,
             _: &str,
             ver: u32,
-            _: String,
+            ns: String,
             _: String,
             _: AuditDraft,
             _: ChainFn,
         ) -> Result<u32, RepoError> {
-            // The fake has no order table: it models only first-wins.
+            let ok_target = match d {
+                ApprovalDecision::Approve => ["approved"].contains(&ns.as_str()),
+                ApprovalDecision::Decline => {
+                    ["declined", "expired", "blocked"].contains(&ns.as_str())
+                }
+            };
+            if !ok_target {
+                return Err(RepoError::Conflict);
+            }
             let mut m = self.0.lock().unwrap();
             if m.contains_key(&id) {
                 return Err(RepoError::Conflict);
             }
+            let Some(orders) = &self.1 else {
+                // No order table wired: first-wins only (the real store is authoritative).
+                m.insert(id, d);
+                return Ok(ver + 1);
+            };
+            let mut o = orders.0.lock().unwrap();
+            let e = o.get_mut(&id).ok_or(RepoError::Conflict)?;
+            if e.1 != "pending_approval" || e.0 != ver {
+                return Err(RepoError::Conflict);
+            }
+            // Tentative approval row, then the failure point, then the advance: a failure
+            // leaves both tables unchanged (the real repo rolls back the transaction).
+            if self.2.load(SeqCst) {
+                return Err(RepoError::Other);
+            }
             m.insert(id, d);
+            *e = (ver + 1, ns);
             Ok(ver + 1)
         }
     }
@@ -1071,6 +1102,50 @@ mod tests {
             go(Decline).await,
             Err(bazaar_core::ports::RepoError::Conflict)
         );
+    }
+
+    #[tokio::test]
+    async fn fake_decide_and_advance_checks_state_version_target_and_rolls_back() {
+        use crate::pipeline::fakes::{MemApprovals, MemOrders};
+        use bazaar_core::ports::RepoError::{Conflict, Other};
+        let draft = || bazaar_core::ports::AuditDraft {
+            ts_ist_rfc3339: "2026-11-22T09:15:00+05:30".into(),
+            actor: "t".into(),
+            kind: "k".into(),
+            payload: "{}".into(),
+        };
+        let orders = Arc::new(MemOrders::default());
+        for (id, st) in [(1, "pending_approval"), (2, "placed")] {
+            let r = OrderRecord {
+                intent_id: id,
+                version: 0,
+                state: st.into(),
+                payload: String::new(),
+            };
+            orders.insert(r, draft(), chain_hash).await.unwrap();
+        }
+        let a = MemApprovals(
+            std::sync::Mutex::default(),
+            Some(orders.clone()),
+            std::sync::atomic::AtomicBool::default(),
+        );
+        let go = |id, d, v, to: &str| {
+            a.decide_and_advance(id, d, "u", v, to.into(), "e".into(), draft(), chain_hash)
+        };
+        assert_eq!(go(2, Approve, 0, "approved").await, Err(Conflict)); // not pending
+        assert_eq!(go(9, Approve, 0, "approved").await, Err(Conflict)); // missing
+        assert_eq!(go(1, Approve, 3, "approved").await, Err(Conflict)); // stale version
+        assert_eq!(go(1, Approve, 0, "placed").await, Err(Conflict)); // target vs decision
+        a.2.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(go(1, Approve, 0, "approved").await, Err(Other)); // injected failure
+        assert!(a.0.lock().unwrap().is_empty());
+        assert_eq!(
+            orders.get(1).await.unwrap().unwrap().state,
+            "pending_approval"
+        );
+        a.2.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(go(1, Approve, 0, "approved").await, Ok(1));
+        assert_eq!(orders.get(1).await.unwrap().unwrap().state, "approved");
     }
 
     #[test]

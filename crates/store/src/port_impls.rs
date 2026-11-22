@@ -139,6 +139,7 @@ impl ApprovalRepo for SqliteStore {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // mirrors the port: one atomic write
     async fn decide_and_advance(
         &self,
         intent_id: u128,
@@ -150,38 +151,17 @@ impl ApprovalRepo for SqliteStore {
         audit: AuditDraft,
         chain: ChainFn,
     ) -> Result<u32, RepoError> {
-        self.decide_and_advance_impl(
-            intent_id,
-            decision,
-            actor,
-            expected_version,
-            new_state,
-            event_kind,
-            audit,
-            chain,
-        )
-        .await
-    }
-}
-
-impl SqliteStore {
-    #[allow(clippy::too_many_arguments)] // mirrors the port
-    async fn decide_and_advance_impl(
-        &self,
-        intent_id: u128,
-        decision: ApprovalDecision,
-        actor: &str,
-        expected_version: u32,
-        new_state: String,
-        event_kind: String,
-        audit: AuditDraft,
-        chain: ChainFn,
-    ) -> Result<u32, RepoError> {
-        let id = id_str(intent_id);
-        let stored = match decision {
-            ApprovalDecision::Approve => StoreDecision::Approved,
-            ApprovalDecision::Decline => StoreDecision::Declined,
+        // The target must fit the decision (SEC-131-1): an approval can only reach `approved`.
+        let (stored, allowed): (StoreDecision, &[&str]) = match decision {
+            ApprovalDecision::Approve => (StoreDecision::Approved, &["approved"]),
+            ApprovalDecision::Decline => {
+                (StoreDecision::Declined, &["declined", "expired", "blocked"])
+            }
         };
+        if !allowed.contains(&new_state.as_str()) {
+            return Err(RepoError::Conflict);
+        }
+        let id = id_str(intent_id);
         let t = OrderTransition {
             order_id: &id,
             expected_version: u64::from(expected_version) + 1,
@@ -190,7 +170,7 @@ impl SqliteStore {
             at_ns: ns_of(&audit.ts_ist_rfc3339)?,
         };
         let v = self
-            .approval_decide_from(&t, Some(PENDING_STATE), stored, actor, &audit, chain)
+            .approval_decide_from(&t, PENDING_STATE, stored, actor, &audit, chain)
             .await?;
         u32::try_from(v.checked_sub(1).ok_or(RepoError::Corrupt)?).map_err(|_| RepoError::Other)
     }
@@ -603,10 +583,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn decide_and_advance_failure_between_approval_row_and_advance_rolls_back() {
+        let s = seeded(7).await;
+        sqlx::query(
+            "CREATE TRIGGER boom BEFORE INSERT ON order_events \
+             WHEN NEW.event = 'order.approve' BEGIN SELECT RAISE(ABORT, 'boom'); END",
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        assert!(
+            dna(&s, 7, ApprovalDecision::Approve, 0, "approved")
+                .await
+                .is_err()
+        );
+        assert_eq!(count(&s, "approvals").await, 0);
+        assert_eq!(count(&s, "order_events").await, 1);
+        assert_eq!(count(&s, "audit_log").await, 1);
+        let o = OrderRepo::get(&s, 7).await.unwrap().unwrap();
+        assert_eq!((o.state.as_str(), o.version), ("pending_approval", 0));
+    }
+
+    #[tokio::test]
+    async fn decide_and_advance_target_state_must_fit_the_decision() {
+        let s = seeded(7).await;
+        for (d, to) in [
+            (ApprovalDecision::Approve, "placed"),
+            (ApprovalDecision::Approve, "declined"),
+            (ApprovalDecision::Decline, "approved"),
+            (ApprovalDecision::Decline, "placed"),
+        ] {
+            assert_eq!(dna(&s, 7, d, 0, to).await, Err(RepoError::Conflict), "{to}");
+        }
+        assert_eq!(count(&s, "approvals").await, 0);
+        assert_eq!(count(&s, "order_events").await, 1);
+        assert_eq!(
+            dna(&s, 7, ApprovalDecision::Decline, 0, "expired").await,
+            Ok(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_approval_row_is_a_conflict_through_the_store_method() {
+        let s = seeded(7).await;
+        let id = id_str(7);
+        s.approval_record(&id, StoreDecision::Approved, "a", 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            s.approval_record(&id, StoreDecision::Declined, "b", 2)
+                .await,
+            Err(RepoError::Conflict)
+        );
+    }
+
+    #[tokio::test]
     async fn list_in_state_is_oldest_first_limited_and_never_truncates_silently() {
         let s = store().await;
-        for id in [3u128, 1, 2] {
-            OrderRepo::insert(&s, pending(id), test_draft("order.created"), test_chain)
+        // Creation time orders the list (then id): ids 3, 1, 2 created at 09:15, 09:16, 09:17.
+        for (id, minute) in [(3u128, 15), (1, 16), (2, 17)] {
+            let mut d = test_draft("order.created");
+            d.ts_ist_rfc3339 = format!("2026-11-22T09:{minute}:00+05:30");
+            OrderRepo::insert(&s, pending(id), d, test_chain)
                 .await
                 .unwrap();
         }
@@ -619,10 +657,7 @@ mod tests {
             .iter()
             .map(|o| o.intent_id)
             .collect();
-        let mut sorted = ids.clone();
-        sorted.sort_unstable();
-        assert_eq!(sorted, vec![1, 2, 3]);
-        assert_eq!(ids.len(), 3);
+        assert_eq!(ids, vec![3, 1, 2], "oldest (earliest created) first");
         assert_eq!(
             OrderRepo::list_in_state(&s, "pending_approval", 2).await,
             Err(RepoError::TooLarge)
