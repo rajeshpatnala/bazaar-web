@@ -92,9 +92,36 @@ impl SqliteStore {
         audit: &AuditDraft,
         chain: ChainFn,
     ) -> Result<u64, RepoError> {
+        self.approval_decide_from(t, None, decision, actor, audit, chain)
+            .await
+    }
+
+    /// Like `approval_decide`, and when `required_state` is set the order must be in it at the
+    /// moment of the write (checked inside the transaction): any other state is `Conflict` and
+    /// nothing is stored.
+    pub async fn approval_decide_from(
+        &self,
+        t: &OrderTransition<'_>,
+        required_state: Option<&str>,
+        decision: ApprovalDecision,
+        actor: &str,
+        audit: &AuditDraft,
+        chain: ChainFn,
+    ) -> Result<u64, RepoError> {
         check_label(t.order_id)?;
         check_actor(actor)?;
         let mut tx = self.pool.begin().await.map_err(|e| map_err(&e))?;
+        if let Some(req) = required_state {
+            let state: Option<String> =
+                sqlx::query_scalar("SELECT state FROM orders WHERE order_id = ?")
+                    .bind(t.order_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| map_err(&e))?;
+            if state.as_deref() != Some(req) {
+                return Err(RepoError::Conflict);
+            }
+        }
         sqlx::query(INSERT)
             .bind(t.order_id)
             .bind(decision.label())

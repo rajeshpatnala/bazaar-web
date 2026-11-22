@@ -606,6 +606,27 @@ pub(crate) mod fakes {
             *e = (ver + 1, st);
             Ok(ver + 1)
         }
+        async fn list_in_state(&self, st: &str, limit: u32) -> Result<Vec<OrderRecord>, RepoError> {
+            let m = self.0.lock().unwrap();
+            let mut ids: Vec<u128> = m
+                .iter()
+                .filter(|(_, (_, s))| s == st)
+                .map(|(i, _)| *i)
+                .collect();
+            ids.sort_unstable();
+            if ids.len() > limit as usize {
+                return Err(RepoError::TooLarge);
+            }
+            Ok(ids
+                .into_iter()
+                .map(|i| OrderRecord {
+                    intent_id: i,
+                    version: m[&i].0,
+                    state: m[&i].1.clone(),
+                    payload: String::new(),
+                })
+                .collect())
+        }
     }
 
     #[derive(Default)]
@@ -618,6 +639,25 @@ pub(crate) mod fakes {
             _: String,
         ) -> Result<ApprovalDecision, RepoError> {
             Ok(*self.0.lock().unwrap().entry(id).or_insert(d))
+        }
+        async fn decide_and_advance(
+            &self,
+            id: u128,
+            d: ApprovalDecision,
+            _: &str,
+            ver: u32,
+            _: String,
+            _: String,
+            _: AuditDraft,
+            _: ChainFn,
+        ) -> Result<u32, RepoError> {
+            // The fake has no order table: it models only first-wins.
+            let mut m = self.0.lock().unwrap();
+            if m.contains_key(&id) {
+                return Err(RepoError::Conflict);
+            }
+            m.insert(id, d);
+            Ok(ver + 1)
         }
     }
 
@@ -980,6 +1020,57 @@ mod tests {
         let out = r.pipe.decide(IntentId(1), Approve, "u").await;
         assert!(matches!(out, Outcome::GateBlocked(_)), "{out:?}");
         assert_eq!(ids(&r), Vec::<u128>::new());
+    }
+
+    #[tokio::test]
+    async fn fake_repos_model_list_in_state_and_first_wins_decide_and_advance() {
+        use crate::pipeline::fakes::{MemApprovals, MemOrders};
+        let draft = || bazaar_core::ports::AuditDraft {
+            ts_ist_rfc3339: "2026-11-22T09:15:00+05:30".into(),
+            actor: "t".into(),
+            kind: "k".into(),
+            payload: "{}".into(),
+        };
+        let o = MemOrders::default();
+        let rec = |id| OrderRecord {
+            intent_id: id,
+            version: 0,
+            state: "pending_approval".into(),
+            payload: String::new(),
+        };
+        for id in [2, 1] {
+            o.insert(rec(id), draft(), chain_hash).await.unwrap();
+        }
+        let ids: Vec<u128> = o
+            .list_in_state("pending_approval", 5)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.intent_id)
+            .collect();
+        assert_eq!(ids, vec![1, 2]);
+        assert_eq!(
+            o.list_in_state("pending_approval", 1).await,
+            Err(bazaar_core::ports::RepoError::TooLarge)
+        );
+        let a = MemApprovals::default();
+        let go = |d| {
+            a.decide_and_advance(
+                1,
+                d,
+                "u",
+                0,
+                "approved".into(),
+                "e".into(),
+                draft(),
+                chain_hash,
+            )
+        };
+        assert_eq!(go(Approve).await, Ok(1));
+        assert_eq!(
+            go(Decline).await,
+            Err(bazaar_core::ports::RepoError::Conflict)
+        );
     }
 
     #[test]

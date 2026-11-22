@@ -180,6 +180,13 @@ pub trait OrderRepo: Send + Sync {
         audit: AuditDraft,
         chain: ChainFn,
     ) -> impl Future<Output = Result<u32, RepoError>> + Send;
+    /// Orders currently in `state`, oldest first, at most `limit`. More than `limit` matches is
+    /// `RepoError::TooLarge` (never a silent truncation).
+    fn list_in_state(
+        &self,
+        state: &str,
+        limit: u32,
+    ) -> impl Future<Output = Result<Vec<OrderRecord>, RepoError>> + Send;
 }
 
 /// A user's decision on an approval request: a closed set.
@@ -223,6 +230,22 @@ pub trait ApprovalRepo: Send + Sync {
         decision: ApprovalDecision,
         at_ist_rfc3339: String,
     ) -> impl Future<Output = Result<ApprovalDecision, RepoError>> + Send;
+    /// Record the decision, move the order to `new_state` with `event_kind`, and write the audit
+    /// row in ONE transaction. The order must still be in `pending_approval` at `expected_version`
+    /// (checked inside the transaction); otherwise, or when a decision already exists, the result
+    /// is `RepoError::Conflict` and nothing is stored. Returns the new order version.
+    #[allow(clippy::too_many_arguments)] // one atomic write: every part is needed
+    fn decide_and_advance(
+        &self,
+        intent_id: u128,
+        decision: ApprovalDecision,
+        actor: &str,
+        expected_version: u32,
+        new_state: String,
+        event_kind: String,
+        audit: AuditDraft,
+        chain: ChainFn,
+    ) -> impl Future<Output = Result<u32, RepoError>> + Send;
 }
 
 /// Persistent kill switch. A read error must be treated as engaged by the caller.

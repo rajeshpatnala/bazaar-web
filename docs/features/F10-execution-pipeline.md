@@ -49,6 +49,9 @@ Limits: MIS/NRML use full cash (no margin, no leverage), intraday short selling 
 - `execution.io_timeout_secs` (default 5, loader range 1..=30, unverified, owner to confirm); `ExecutionSection::io_timeout()`; the pipeline keeps its clamp as backstop.
 - `cli/src/compose.rs::open_store` = `open_verified(path, execution::audit::chain_hash)`; `cli/tests/compose.rs` has a tamper test (altered audit row gives `Corrupt`) and a source scan that fails if cli code uses plain `SqliteStore::open` outside the two instrument commands.
 
+## 8b slice 1 (store ports)
+`OrderRepo::list_in_state(state, limit)` (oldest first; more than `limit` is `TooLarge`) and `ApprovalRepo::decide_and_advance(id, decision, actor, expected_version, new_state, event, audit, chain)`: approval row, order advance, event and audit row in ONE transaction, with the `pending_approval` state checked inside it (any other state, a stale version, a missing order or an existing decision is `Conflict`, nothing stored). HARD CONDITION: no route or reload path calls `decide` or `decide_and_advance` until slice 3's RISK-129-2 tests have merged.
+
 ## Deferred
 - Config provenance (CR-130-1, RISK-130-2): the loader refuses unknown keys (`deny_unknown_fields`), so the 2026-11-22 owner confirmation of `[execution]` is recorded as comments plus a test (`confirmation_strings_are_recorded` in `execution/src/pipeline.rs`) that the exact string "owner confirmed 2026-11-22" is present in `config/risk.toml`, `config/data.toml` and `config/strategies.toml`. The `[hard_limits]` F10 ceilings stay unconfirmed.
 - Kill-switch reason (CR-130-4, CR-130-5, SEC-130-1): engage trims the reason and stores the same text in the audit payload and the repo; the pipeline and the store both cap actor and reason at 500 BYTES. Release stores the constant "released" (or "engage_never_persisted" for a latch that was never persisted); the operator context is the audit row's actor.
