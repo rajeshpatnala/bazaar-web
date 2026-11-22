@@ -147,6 +147,19 @@ impl ApprovalRepo for SqliteStore {
             .await?;
         u32::try_from(v.checked_sub(1).ok_or(RepoError::Corrupt)?).map_err(|_| RepoError::Other)
     }
+
+    async fn reconcile_stray_decisions(
+        &self,
+        ts_ist_rfc3339: &str,
+        chain: ChainFn,
+    ) -> Result<Vec<u128>, RepoError> {
+        let at = ns_of(ts_ist_rfc3339)?;
+        self.approvals_reconcile(PENDING_STATE, "expired", at, ts_ist_rfc3339, chain)
+            .await?
+            .iter()
+            .map(|id| id.parse::<u128>().map_err(|_| RepoError::Corrupt))
+            .collect()
+    }
 }
 
 impl KillSwitchRepo for SqliteStore {
@@ -448,6 +461,31 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!((approval.as_str(), audit.as_str()), ("alice", "alice"));
+    }
+
+    #[tokio::test]
+    async fn reconcile_stray_decisions_expires_a_pending_order_with_a_decision_row() {
+        let s = seeded(7).await;
+        OrderRepo::insert(&s, pending(8), test_draft("order.created"), test_chain)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO approvals (order_id, decision, actor, decided_ns) VALUES ('7', 'approved', 'a', 1)")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        let ids =
+            ApprovalRepo::reconcile_stray_decisions(&s, "2026-11-22T09:15:00+05:30", test_chain)
+                .await
+                .unwrap();
+        assert_eq!(ids, vec![7]);
+        assert_eq!(
+            OrderRepo::get(&s, 7).await.unwrap().unwrap().state,
+            "expired"
+        );
+        assert_eq!(
+            OrderRepo::get(&s, 8).await.unwrap().unwrap().state,
+            "pending_approval"
+        );
     }
 
     #[tokio::test]

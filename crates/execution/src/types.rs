@@ -62,6 +62,73 @@ pub struct OrderIntent {
     pub created_at: DateTime<Tz>,
 }
 
+impl Product {
+    /// Parse a stored label.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "cnc" => Some(Self::Cnc),
+            "mis" => Some(Self::Mis),
+            "nrml" => Some(Self::Nrml),
+            _ => None,
+        }
+    }
+}
+
+impl OrderIntent {
+    /// The full intent as the stored order payload (restart reload decodes it). Rupee amounts
+    /// are strings, never floats.
+    #[must_use]
+    pub fn to_payload(&self) -> String {
+        let (kind, price) = match self.kind {
+            OrderKind::Market => ("market", None),
+            OrderKind::Limit(p) => ("limit", Some(p.to_string())),
+        };
+        serde_json::json!({
+            "symbol": self.symbol,
+            "side": match self.side { Side::Buy => "buy", Side::Sell => "sell" },
+            "qty": self.qty,
+            "kind": kind,
+            "price": price,
+            "product": self.product.as_str(),
+            "reduce_only": self.reduce_only,
+            "created_at": self.created_at.to_rfc3339(),
+        })
+        .to_string()
+    }
+
+    /// Decode a stored payload; `None` for anything missing, malformed or from an older row
+    /// that did not carry the full intent (the caller expires such a row, audited).
+    #[must_use]
+    pub fn from_payload(id: IntentId, payload: &str) -> Option<Self> {
+        let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+        let side = match v.get("side")?.as_str()? {
+            "buy" => Side::Buy,
+            "sell" => Side::Sell,
+            _ => return None,
+        };
+        let kind = match v.get("kind")?.as_str()? {
+            "market" => OrderKind::Market,
+            "limit" => OrderKind::Limit(v.get("price")?.as_str()?.parse().ok()?),
+            _ => return None,
+        };
+        let qty = u32::try_from(v.get("qty")?.as_u64()?).ok()?;
+        let created_at = DateTime::parse_from_rfc3339(v.get("created_at")?.as_str()?)
+            .ok()?
+            .with_timezone(&chrono_tz::Asia::Kolkata);
+        Some(Self {
+            id,
+            symbol: v.get("symbol")?.as_str()?.to_owned(),
+            side,
+            qty,
+            kind,
+            product: Product::parse(v.get("product")?.as_str()?)?,
+            reduce_only: v.get("reduce_only")?.as_bool()?,
+            created_at,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,5 +144,34 @@ mod tests {
         assert_eq!(Product::Cnc.as_str(), "cnc");
         assert_eq!(Product::Mis.as_str(), "mis");
         assert_eq!(Product::Nrml.as_str(), "nrml");
+    }
+
+    #[test]
+    fn payload_round_trips_and_rejects_incomplete_rows() {
+        use chrono::TimeZone;
+        let t = chrono_tz::Asia::Kolkata
+            .with_ymd_and_hms(2026, 11, 23, 9, 15, 0)
+            .unwrap();
+        for kind in [OrderKind::Market, OrderKind::Limit(Decimal::new(10125, 2))] {
+            let i = OrderIntent {
+                id: IntentId(9),
+                symbol: "ABC".into(),
+                side: Side::Sell,
+                qty: 3,
+                kind,
+                product: Product::Nrml,
+                reduce_only: true,
+                created_at: t,
+            };
+            assert_eq!(
+                OrderIntent::from_payload(IntentId(9), &i.to_payload()),
+                Some(i)
+            );
+        }
+        // An old-style row (no side, kind, created_at) and garbage do not decode.
+        let old = r#"{"symbol":"ABC","qty":2,"reduce_only":false,"product":"mis"}"#;
+        assert_eq!(OrderIntent::from_payload(IntentId(1), old), None);
+        assert_eq!(OrderIntent::from_payload(IntentId(1), "nope"), None);
+        assert_eq!(OrderIntent::from_payload(IntentId(1), ""), None);
     }
 }

@@ -240,6 +240,16 @@ pub trait ApprovalRepo: Send + Sync {
         audit: AuditDraft,
         chain: ChainFn,
     ) -> impl Future<Output = Result<u32, RepoError>> + Send;
+
+    /// Startup guard, run before pending orders are reloaded: every order still in
+    /// `pending_approval` that already has a decision row is inconsistent. Each is moved to
+    /// `expired` with an audit row (one transaction per order) and its id returned; it is never
+    /// re-presented for approval.
+    fn reconcile_stray_decisions(
+        &self,
+        ts_ist_rfc3339: &str,
+        chain: ChainFn,
+    ) -> impl Future<Output = Result<Vec<u128>, RepoError>> + Send;
 }
 
 /// Persistent kill switch. A read error must be treated as engaged by the caller.

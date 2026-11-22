@@ -145,6 +145,24 @@ impl<A: ApprovalRepo> ApprovalQueue<A> {
         &self.repo
     }
 
+    /// Startup guard: expire (audited) every pending order that already has a decision row, so
+    /// it is never re-presented. Returns the ids.
+    ///
+    /// # Errors
+    /// `RepoError` when the repo fails; the caller must not reload on an error.
+    pub(crate) async fn reconcile_strays(&self, now: DateTime<Tz>) -> Result<Vec<u128>, RepoError> {
+        self.repo
+            .reconcile_stray_decisions(&now.to_rfc3339(), chain_hash)
+            .await
+    }
+
+    /// True when `created` (an intent's creation time, the queue time of a reloaded intent) has
+    /// reached the TTL at `now`.
+    #[must_use]
+    pub(crate) fn ttl_passed(&self, created: DateTime<Tz>, now: DateTime<Tz>) -> bool {
+        now - created >= self.ttl
+    }
+
     pub fn enqueue(&mut self, p: Pending) {
         self.pending.insert(p.track.id, p);
     }
