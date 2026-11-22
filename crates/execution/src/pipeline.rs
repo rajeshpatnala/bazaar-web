@@ -568,13 +568,20 @@ pub(crate) mod fakes {
     pub(crate) struct MemOrders(
         pub Mutex<HashMap<u128, (u32, String)>>,
         pub Mutex<Option<String>>,
+        /// Creation time (ns, from the insert's audit timestamp), like the real store's `created_ns`.
+        pub Mutex<HashMap<u128, i64>>,
     );
     impl OrderRepo for MemOrders {
-        async fn insert(&self, o: OrderRecord, _: AuditDraft, _: ChainFn) -> Result<(), RepoError> {
+        async fn insert(&self, o: OrderRecord, a: AuditDraft, _: ChainFn) -> Result<(), RepoError> {
             let mut m = self.0.lock().unwrap();
             if m.contains_key(&o.intent_id) {
                 return Err(RepoError::Conflict);
             }
+            let ns = chrono::DateTime::parse_from_rfc3339(&a.ts_ist_rfc3339)
+                .ok()
+                .and_then(|d| d.timestamp_nanos_opt())
+                .unwrap_or(0);
+            self.2.lock().unwrap().insert(o.intent_id, ns);
             m.insert(o.intent_id, (0, o.state));
             Ok(())
         }
@@ -613,7 +620,9 @@ pub(crate) mod fakes {
                 .filter(|(_, (_, s))| s == st)
                 .map(|(i, _)| *i)
                 .collect();
-            ids.sort_unstable();
+            let created = self.2.lock().unwrap();
+            // Oldest first: creation time, then id (the real store's ORDER BY).
+            ids.sort_unstable_by_key(|i| (created.get(i).copied().unwrap_or(0), *i));
             if ids.len() > limit as usize {
                 return Err(RepoError::TooLarge);
             }
@@ -1102,6 +1111,35 @@ mod tests {
             go(Decline).await,
             Err(bazaar_core::ports::RepoError::Conflict)
         );
+    }
+
+    #[tokio::test]
+    async fn fake_list_in_state_sorts_by_creation_time_then_id() {
+        use crate::pipeline::fakes::MemOrders;
+        let o = MemOrders::default();
+        for (id, ts) in [(3u128, "09:15"), (1, "09:17"), (2, "09:17"), (4, "09:16")] {
+            let d = bazaar_core::ports::AuditDraft {
+                ts_ist_rfc3339: format!("2026-11-22T{ts}:00+05:30"),
+                actor: "t".into(),
+                kind: "k".into(),
+                payload: "{}".into(),
+            };
+            let r = OrderRecord {
+                intent_id: id,
+                version: 0,
+                state: "pending_approval".into(),
+                payload: String::new(),
+            };
+            o.insert(r, d, chain_hash).await.unwrap();
+        }
+        let ids: Vec<u128> = o
+            .list_in_state("pending_approval", 9)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.intent_id)
+            .collect();
+        assert_eq!(ids, vec![3, 4, 1, 2]);
     }
 
     #[tokio::test]

@@ -139,6 +139,8 @@ impl ApprovalRepo for SqliteStore {
         }
     }
 
+    /// `Conflict` does NOT prove an Approve exists: callers must re-read the order state before
+    /// acting on it.
     #[allow(clippy::too_many_arguments)] // mirrors the port: one atomic write
     async fn decide_and_advance(
         &self,

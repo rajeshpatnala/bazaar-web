@@ -230,6 +230,9 @@ pub trait ApprovalRepo: Send + Sync {
         decision: ApprovalDecision,
         at_ist_rfc3339: String,
     ) -> impl Future<Output = Result<ApprovalDecision, RepoError>> + Send;
+    /// `Conflict` does NOT prove an Approve exists (it may be a decline, a stale version, a
+    /// non-pending order or a lost race): callers must re-read the order state before acting on it.
+    ///
     /// Record the decision, move the order to `new_state` with `event_kind`, and write the audit
     /// row in ONE transaction. The order must still be in `pending_approval` at `expected_version`
     /// (checked inside the transaction); otherwise, or when a decision already exists, the result
