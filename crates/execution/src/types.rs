@@ -62,6 +62,9 @@ pub struct OrderIntent {
     pub created_at: DateTime<Tz>,
 }
 
+/// Longest symbol a stored payload may carry.
+const MAX_SYMBOL: usize = 500;
+
 impl Product {
     /// Parse a stored label.
     #[must_use]
@@ -97,10 +100,12 @@ impl OrderIntent {
         .to_string()
     }
 
-    /// Decode a stored payload; `None` for anything missing, malformed or from an older row
-    /// that did not carry the full intent (the caller expires such a row, audited).
+    /// Decode a stored payload; `None` for anything missing, malformed, from an older row that
+    /// did not carry the full intent, or semantically invalid (qty 0, empty or over-long symbol,
+    /// limit price not above 0, `created_at` after `now`, which would stretch the TTL). The
+    /// caller expires or blocks such a row, audited.
     #[must_use]
-    pub fn from_payload(id: IntentId, payload: &str) -> Option<Self> {
+    pub fn from_payload(id: IntentId, payload: &str, now: DateTime<Tz>) -> Option<Self> {
         let v: serde_json::Value = serde_json::from_str(payload).ok()?;
         let side = match v.get("side")?.as_str()? {
             "buy" => Side::Buy,
@@ -116,9 +121,19 @@ impl OrderIntent {
         let created_at = DateTime::parse_from_rfc3339(v.get("created_at")?.as_str()?)
             .ok()?
             .with_timezone(&chrono_tz::Asia::Kolkata);
+        let symbol = v.get("symbol")?.as_str()?.to_owned();
+        let bad_price = matches!(kind, OrderKind::Limit(p) if p <= Decimal::ZERO);
+        if qty == 0
+            || symbol.is_empty()
+            || symbol.len() > MAX_SYMBOL
+            || bad_price
+            || created_at > now
+        {
+            return None;
+        }
         Some(Self {
             id,
-            symbol: v.get("symbol")?.as_str()?.to_owned(),
+            symbol,
             side,
             qty,
             kind,
@@ -164,14 +179,52 @@ mod tests {
                 created_at: t,
             };
             assert_eq!(
-                OrderIntent::from_payload(IntentId(9), &i.to_payload()),
+                OrderIntent::from_payload(IntentId(9), &i.to_payload(), t),
                 Some(i)
             );
         }
         // An old-style row (no side, kind, created_at) and garbage do not decode.
         let old = r#"{"symbol":"ABC","qty":2,"reduce_only":false,"product":"mis"}"#;
-        assert_eq!(OrderIntent::from_payload(IntentId(1), old), None);
-        assert_eq!(OrderIntent::from_payload(IntentId(1), "nope"), None);
-        assert_eq!(OrderIntent::from_payload(IntentId(1), ""), None);
+        assert_eq!(OrderIntent::from_payload(IntentId(1), old, t), None);
+        assert_eq!(OrderIntent::from_payload(IntentId(1), "nope", t), None);
+        assert_eq!(OrderIntent::from_payload(IntentId(1), "", t), None);
+    }
+
+    #[test]
+    fn payload_with_invalid_values_is_rejected() {
+        use chrono::TimeZone;
+        let t = chrono_tz::Asia::Kolkata
+            .with_ymd_and_hms(2026, 11, 23, 9, 15, 0)
+            .unwrap();
+        let base = OrderIntent {
+            id: IntentId(1),
+            symbol: "ABC".into(),
+            side: Side::Buy,
+            qty: 1,
+            kind: OrderKind::Limit(Decimal::ONE),
+            product: Product::Mis,
+            reduce_only: false,
+            created_at: t,
+        };
+        let ok = |i: &OrderIntent| OrderIntent::from_payload(IntentId(1), &i.to_payload(), t);
+        assert!(ok(&base).is_some());
+        let mut i = base.clone();
+        i.qty = 0;
+        assert!(ok(&i).is_none());
+        let mut i = base.clone();
+        i.symbol = String::new();
+        assert!(ok(&i).is_none());
+        let mut i = base.clone();
+        i.symbol = "X".repeat(501);
+        assert!(ok(&i).is_none());
+        for price in [Decimal::ZERO, Decimal::NEGATIVE_ONE] {
+            let mut i = base.clone();
+            i.kind = OrderKind::Limit(price);
+            assert!(ok(&i).is_none());
+        }
+        // Created in the future: would never reach its TTL.
+        let mut i = base;
+        i.created_at = t + chrono::Duration::seconds(1);
+        assert!(ok(&i).is_none());
     }
 }

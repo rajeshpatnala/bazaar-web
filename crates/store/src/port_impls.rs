@@ -473,11 +473,20 @@ mod tests {
             .execute(&s.pool)
             .await
             .unwrap();
+        let audits_before = count(&s, "audit_log").await;
         let ids =
             ApprovalRepo::reconcile_stray_decisions(&s, "2026-11-22T09:15:00+05:30", test_chain)
                 .await
                 .unwrap();
         assert_eq!(ids, vec![7]);
+        assert_eq!(count(&s, "audit_log").await, audits_before + 1);
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_log WHERE kind = 'order.expired_inconsistent' AND payload LIKE '%7%'",
+        )
+        .fetch_one(&s.pool)
+        .await
+        .unwrap();
+        assert_eq!(n, 1);
         assert_eq!(
             OrderRepo::get(&s, 7).await.unwrap().unwrap().state,
             "expired"
