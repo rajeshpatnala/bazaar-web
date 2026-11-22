@@ -87,7 +87,8 @@ max_hold_bars = 8           # time stop (5-12)
 min_rr = 1.2                # reward:risk floor (1.2-2.0)
 
 # [scanner] (F11, .agents/plans/F11-scanner.md "Owner inputs"). All values are PROPOSALS, UNVERIFIED for this
-# app (source: F11 plan 2026-11-21 + docs/strategy/F11-scanner-defaults.md; verified_on: not verified, confirm with the owner and market-strategist).
+# app (source: F11 plan 2026-11-21 + docs/strategy/F11-scanner-defaults.md). Owner confirmed these defaults on
+# 2026-11-22 (source/verified_on "owner confirmed 2026-11-22"); the per-line UNVERIFIED tags predate that.
 # weights: each 0-1, sum 1. The event penalty is subtractive (score points), not a weight.
 # min_median_traded_value is rupees as a string (Rs 10 crore, median 20-day traded value).
 [scanner]

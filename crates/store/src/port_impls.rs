@@ -134,9 +134,15 @@ impl KillSwitchRepo for SqliteStore {
         Ok(self.kill_switch_get().await?.engaged)
     }
 
-    async fn set(&self, engaged: bool, audit: AuditDraft, chain: ChainFn) -> Result<(), RepoError> {
+    async fn set(
+        &self,
+        engaged: bool,
+        reason: &str,
+        audit: AuditDraft,
+        chain: ChainFn,
+    ) -> Result<(), RepoError> {
         let at = ns_of(&audit.ts_ist_rfc3339)?;
-        self.kill_switch_set_audited(engaged, &audit.actor, &audit.kind, at, &audit, chain)
+        self.kill_switch_set_audited(engaged, &audit.actor, reason, at, &audit, chain)
             .await
     }
 }
@@ -302,20 +308,36 @@ mod tests {
     async fn kill_switch_set_and_read_with_audit() {
         let s = store().await;
         assert_eq!(KillSwitchRepo::is_engaged(&s).await, Ok(false));
-        KillSwitchRepo::set(&s, true, test_draft("kill.engage"), test_chain)
-            .await
-            .unwrap();
+        KillSwitchRepo::set(
+            &s,
+            true,
+            "daily loss",
+            test_draft("kill.engage"),
+            test_chain,
+        )
+        .await
+        .unwrap();
         assert_eq!(KillSwitchRepo::is_engaged(&s).await, Ok(true));
-        KillSwitchRepo::set(&s, false, test_draft("kill.release"), test_chain)
-            .await
-            .unwrap();
+        let k = s.kill_switch_get().await.unwrap();
+        assert_eq!(
+            k.reason, "daily loss",
+            "typed reason, not audit.kind (RISK-129-1)"
+        );
+        KillSwitchRepo::set(
+            &s,
+            false,
+            "released",
+            test_draft("kill.release"),
+            test_chain,
+        )
+        .await
+        .unwrap();
         assert_eq!(KillSwitchRepo::is_engaged(&s).await, Ok(false));
         let rows = AuditRepo::read_all(&s).await.unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].draft.kind, "kill.engage");
-        let empty = test_draft("");
         assert_eq!(
-            KillSwitchRepo::set(&s, true, empty, test_chain).await,
+            KillSwitchRepo::set(&s, true, "", test_draft("kill.engage"), test_chain).await,
             Err(RepoError::Other)
         );
         assert_eq!(KillSwitchRepo::is_engaged(&s).await, Ok(false));

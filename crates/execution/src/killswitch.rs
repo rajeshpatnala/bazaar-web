@@ -15,6 +15,15 @@ use bazaar_core::ports::{AuditDraft, KillSwitchRepo, RepoError};
 use crate::audit::chain_hash;
 use crate::executor::ExecError;
 
+/// The store refuses an empty reason; an engage without one is recorded as "unspecified".
+fn reason_or_default(reason: &str) -> &str {
+    if reason.trim().is_empty() {
+        "unspecified"
+    } else {
+        reason
+    }
+}
+
 /// Why `KillSwitch::release` refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ReleaseError {
@@ -125,13 +134,16 @@ impl<R: KillSwitchRepo> KillSwitch<R> {
             return Ok(());
         }
         let d = self.draft(actor, "kill_switch_engaged", reason);
-        self.repo.set(true, d, chain_hash).await.map_err(|e| {
-            tracing::warn!(
-                category = e.safe_reason(),
-                "kill switch engage not persisted"
-            );
-            ExecError::Storage
-        })
+        self.repo
+            .set(true, reason_or_default(reason), d, chain_hash)
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    category = e.safe_reason(),
+                    "kill switch engage not persisted"
+                );
+                ExecError::Storage
+            })
     }
 
     /// Release with the exact typed phrase.
@@ -147,25 +159,31 @@ impl<R: KillSwitchRepo> KillSwitch<R> {
             // Latched but never persisted: record that, so the log shows why orders were refused.
             if self.latch.load(Ordering::SeqCst) {
                 let d = self.draft(actor, "kill_switch_released", "engage_never_persisted");
-                self.repo.set(false, d, chain_hash).await.map_err(|e| {
-                    tracing::warn!(
-                        category = e.safe_reason(),
-                        "kill switch release not persisted"
-                    );
-                    ReleaseError::Storage
-                })?;
+                self.repo
+                    .set(false, "engage_never_persisted", d, chain_hash)
+                    .await
+                    .map_err(|e| {
+                        tracing::warn!(
+                            category = e.safe_reason(),
+                            "kill switch release not persisted"
+                        );
+                        ReleaseError::Storage
+                    })?;
             }
             self.latch.store(false, Ordering::SeqCst);
             return Ok(());
         }
         let d = self.draft(actor, "kill_switch_released", "");
-        self.repo.set(false, d, chain_hash).await.map_err(|e| {
-            tracing::warn!(
-                category = e.safe_reason(),
-                "kill switch release not persisted"
-            );
-            ReleaseError::Storage
-        })?;
+        self.repo
+            .set(false, "released", d, chain_hash)
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    category = e.safe_reason(),
+                    "kill switch release not persisted"
+                );
+                ReleaseError::Storage
+            })?;
         self.latch.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -194,6 +212,7 @@ pub(crate) mod fakes {
     pub(crate) struct MemRepo {
         pub rows: Mutex<Vec<AuditRow>>,
         pub engaged: AtomicBool,
+        pub reasons: Mutex<Vec<String>>,
         pub fail_read: AtomicBool,
         pub fail_write: AtomicBool,
         pub bad_hash: AtomicBool,
@@ -251,12 +270,19 @@ pub(crate) mod fakes {
             }
             Ok(self.0.engaged.load(Ordering::SeqCst))
         }
-        async fn set(&self, e: bool, a: AuditDraft, c: ChainFn) -> Result<(), RepoError> {
+        async fn set(
+            &self,
+            e: bool,
+            reason: &str,
+            a: AuditDraft,
+            c: ChainFn,
+        ) -> Result<(), RepoError> {
             self.0.push(a, c)?; // write-ahead: a failed audit leaves the state unchanged
             if self.0.fail_state_write.load(Ordering::SeqCst) {
                 return Err(RepoError::Other); // row appended, state unchanged
             }
             self.0.engaged.store(e, Ordering::SeqCst);
+            self.0.reasons.lock().unwrap().push(reason.to_owned());
             Ok(())
         }
     }
@@ -284,6 +310,22 @@ mod tests {
         assert!(k.is_engaged().await);
         assert_eq!(k.admits(false).await, Err(ExecError::KillSwitch));
         assert_eq!(k.admits(true).await, Err(ExecError::KillSwitch));
+    }
+
+    #[tokio::test]
+    async fn typed_reason_reaches_the_repo_not_the_audit_kind() {
+        let r = Arc::new(MemRepo::default());
+        let k = ks(&r, true);
+        k.engage("user", "daily loss").await.unwrap();
+        k.release(PHRASE, "user").await.unwrap();
+        let got = r.reasons.lock().unwrap().clone();
+        assert_eq!(got, vec!["daily loss".to_owned(), "released".to_owned()]);
+        let r2 = Arc::new(MemRepo::default());
+        ks(&r2, true).engage("user", "  ").await.unwrap();
+        assert_eq!(
+            r2.reasons.lock().unwrap().clone(),
+            vec!["unspecified".to_owned()]
+        );
     }
 
     #[tokio::test]

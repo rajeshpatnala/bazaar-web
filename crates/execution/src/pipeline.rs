@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bazaar_core::clock::Clock;
+use bazaar_core::config::ExecutionSection;
 use bazaar_core::ports::{
     ApprovalDecision, ApprovalRepo, AuditRepo, KillSwitchRepo, OrderRecord, OrderRepo,
     QuoteSnapshot, QuoteSource,
@@ -187,6 +188,38 @@ pub const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(5);
 /// Ceiling for the I/O timeout: a larger value is clamped so a bad config cannot stall the writer.
 pub const MAX_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// What the pipeline takes from `[execution]` config: the approval TTL and the per-call I/O
+/// timeout. Built only from the typed section, so no raw `Duration` is passed at the call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PipelineConfig {
+    approval_ttl_secs: u32,
+    io_timeout: Duration,
+}
+
+impl PipelineConfig {
+    /// `execution.approval_ttl_secs` and `execution.io_timeout_secs` (loader range 1..=30; the
+    /// pipeline still clamps as a second layer).
+    #[must_use]
+    pub fn from_section(e: &ExecutionSection) -> Self {
+        Self {
+            approval_ttl_secs: e.approval_ttl_secs,
+            io_timeout: clamp_io(e.io_timeout()),
+        }
+    }
+
+    /// The approval TTL in seconds.
+    #[must_use]
+    pub const fn approval_ttl_secs(&self) -> u32 {
+        self.approval_ttl_secs
+    }
+
+    /// The per-call I/O timeout.
+    #[must_use]
+    pub const fn io_timeout(&self) -> Duration {
+        self.io_timeout
+    }
+}
+
 fn clamp_io(d: Duration) -> Duration {
     if d.is_zero() {
         DEFAULT_IO_TIMEOUT
@@ -218,9 +251,8 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo> std
 impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
     Pipeline<X, G, Q, O, A>
 {
-    /// `io_timeout` bounds every quote read, gate run and send so one hung call cannot stall the
-    /// writer (the composition root supplies it from config). A zero value becomes
-    /// `DEFAULT_IO_TIMEOUT`; anything above `MAX_IO_TIMEOUT` is clamped to it.
+    /// `cfg.io_timeout` bounds every quote read, gate run and send so one hung call cannot stall
+    /// the writer; `cfg` comes from `PipelineConfig::from_section`.
     #[allow(clippy::too_many_arguments)] // composition root wires every port once
     pub fn new(
         exec: X,
@@ -228,9 +260,8 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
         quotes: Q,
         orders: Arc<O>,
         approvals: A,
-        approval_ttl_secs: u32,
+        cfg: PipelineConfig,
         clock: Arc<dyn Clock>,
-        io_timeout: Duration,
     ) -> Self {
         Self {
             exec,
@@ -238,9 +269,9 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
             quotes,
             fills: FillHandler::new(orders.clone()),
             orders,
-            queue: ApprovalQueue::new(approvals, approval_ttl_secs),
+            queue: ApprovalQueue::new(approvals, cfg.approval_ttl_secs),
             clock,
-            io_timeout: clamp_io(io_timeout),
+            io_timeout: clamp_io(cfg.io_timeout),
         }
     }
 
@@ -692,9 +723,11 @@ pub(crate) mod fakes {
             Quotes(AtomicBool::new(false), AtomicBool::new(false)),
             orders.clone(),
             approvals,
-            300,
+            PipelineConfig {
+                approval_ttl_secs: 300,
+                io_timeout: Duration::from_millis(150),
+            },
             clock.clone(),
-            Duration::from_millis(150),
         );
         Rig {
             pipe,
@@ -925,6 +958,21 @@ mod tests {
         let out = r.pipe.decide(IntentId(1), Approve, "u").await;
         assert!(matches!(out, Outcome::GateBlocked(_)), "{out:?}");
         assert_eq!(ids(&r), Vec::<u128>::new());
+    }
+
+    #[test]
+    fn pipeline_config_reads_ttl_and_timeout_from_the_risk_section() {
+        let r: bazaar_core::config::RiskConfig = bazaar_core::config::load(std::path::Path::new(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../config"),
+        ))
+        .unwrap();
+        let c = PipelineConfig::from_section(&r.execution);
+        assert_eq!(c.approval_ttl_secs(), r.execution.approval_ttl_secs);
+        assert_eq!(c.io_timeout(), Duration::from_secs(5));
+        assert!(
+            r.execution.breaker_engages_kill_switch,
+            "owner confirmed 2026-11-22"
+        );
     }
 
     #[tokio::test]

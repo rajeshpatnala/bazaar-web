@@ -4,7 +4,7 @@ Plan: `.agents/plans/F10-execution-pipeline.md`. Status: in progress.
 
 ## Slice 0 (shared contracts)
 - `core::ports`: `IdGen`, `OrderRepo`, `ApprovalRepo`, `AuditRepo`, `KillSwitchRepo`, `PaperLedgerRepo`, `MarginSource`, `QuoteSource`, plain-data records, `RepoError::Conflict`.
-- `config/risk.toml` `[execution]`: approval, drift, order-rate, kill-switch phrase and paper keys. All new values are UNVERIFIED, owner to confirm.
+- `config/risk.toml` `[execution]`: approval, drift, order-rate, kill-switch phrase and paper keys. Owner confirmed 2026-11-22.
 - `execution`: `IntentId`, `OrderIntent`, `OrderState::apply`/`ExecEvent`, `ExecError`, `Executor`, `ApprovedOrder` (`pub(crate)` constructor), audit hash and `verify_chain`.
 - ADR: `docs/adr/0001-audit-hash-chain.md`.
 
@@ -27,8 +27,8 @@ TTL check, fresh-quote re-gate and drift check happen while the order is still `
 - `ApprovedOrder` minted only inside the pipeline module with a gate-pass token (RISK-96-8, slice 3).
 - Real-store trigger/`Corrupt` test is a slice 7 merge condition (SEC-96-3, RISK-96-9).
 
-## Pre-live checklist: all new `[execution]` keys are UNVERIFIED (owner to confirm; no `source`/`verified_on` yet)
-`approval_ttl_secs`, `max_quote_drift_bps`, `max_orders_per_second`, `kill_switch_release_phrase`, `kill_allow_reduce_only`, `breaker_engages_kill_switch`, `paper_slippage_bps.*`, `paper_max_participation`, `paper_stale_after_secs`, `paper_mis_square_off_ist`, `io_timeout_secs` (BZ-205; default 5, loader accepts 1..=30; UNVERIFIED pending owner confirmation), and the ceilings `hard_limits.max_approval_ttl_secs`, `hard_limits.max_quote_drift_bps` (SEC-96-4).
+## Pre-live checklist: `[execution]` keys CONFIRMED by the owner on 2026-11-22 (8b slice 0: defaults, `io_timeout_secs = 5`, `breaker_engages_kill_switch = true`; source/verified_on "owner confirmed 2026-11-22"). Only the `hard_limits` ceilings below remain unconfirmed
+`approval_ttl_secs`, `max_quote_drift_bps`, `max_orders_per_second`, `kill_switch_release_phrase`, `kill_allow_reduce_only`, `breaker_engages_kill_switch`, `paper_slippage_bps.*`, `paper_max_participation`, `paper_stale_after_secs`, `paper_mis_square_off_ist`, `io_timeout_secs` (BZ-205; default 5, loader accepts 1..=30) (all owner confirmed 2026-11-22), and the still-unconfirmed ceilings `hard_limits.max_approval_ttl_secs`, `hard_limits.max_quote_drift_bps` (SEC-96-4).
 
 ## Paper account (slice 4, `paper::account`)
 Cash is derived by replaying the current epoch's append-only ledger (kinds opening, buy, sell, charge); a fill books its charge and trade lines in one all-or-nothing `PaperLedgerRepo::append_many`. Charges come only from `ChargeSource` (zero or negative is refused). The funds check refuses a fill that would take cash below zero; a sell above the held quantity (passed in by the caller from the position book) is refused. `reset` uses only the configured `paper_starting_cash_inr`. One `PaperAccount` per ledger (single writer).
@@ -50,7 +50,7 @@ Limits: MIS/NRML use full cash (no margin, no leverage), intraday short selling 
 - `cli/src/compose.rs::open_store` = `open_verified(path, execution::audit::chain_hash)`; `cli/tests/compose.rs` has a tamper test (altered audit row gives `Corrupt`) and a source scan that fails if cli code uses plain `SqliteStore::open` outside the two instrument commands.
 
 ## Deferred
-- Deferred to 8b: RISK-129-1 - `KillSwitchRepo::set` stores `audit.kind` as the `reason` in `kill_switch`/`kill_switch_events`; pass the typed reason through (until then the audit payload is the only reason record).
+- RISK-129-1 CLOSED (8b slice 0): `KillSwitchRepo::set(engaged, reason, audit, chain)` takes the typed reason; `kill_switch.reason` and `kill_switch_events.reason` hold it (release records "released", an empty engage reason "unspecified").
 - Deferred to 8b: RISK-129-2 + SEC-129-1 - `ApprovalRepo::decide` is a bare insert, not atomic with the order advance, writes no audit row and does not check order state. Before pending-intent reload ships: audit the decision before acting, add a crash-between-steps test, a test that a stored Approve is re-gated with a fresh quote and TTL-checked before any send, and a test that `decide` on a terminal order is refused.
 - Deferred to 8b: RISK-129-5 - the approval row actor is hardcoded "user" (`APPROVAL_ACTOR`); the real actor is recorded only by the later `advance_as` audit row. Acceptable for now.
 - Slice 8 deferrals: pending-intent reload after restart (needs an `OrderRepo` list method); slice 9 audit anchor stays a hard readiness condition; RISK-96-2/3/4 not touched in 8a.
@@ -67,8 +67,8 @@ Limits: MIS/NRML use full cash (no margin, no leverage), intraday short selling 
 - Real-SQLite proof lives in slices 6 (AC3), 7 (AC4 triggers, chain verify on reopen) and 8 (AC4 on real chain, AC8 composition); T2 tester checks these on a temp DB.
 - Kill-switch in-process latch (set on every `engage`, cleared by a successful `release`) is lost on restart; only the persisted state survives.
 - RISK-100-2: slices 2/3 derive `reduce_only` from the `ApprovedOrder`, not request data, with a test that a non-exit intent is refused when engaged. SEC-100-4: cap `actor`/`reason` length at the route (later slice). SEC-100-5: slice 3 runs the gate in `spawn_blocking` and tests it.
-- Owner to confirm defaults (RISK-96-11): 300 s approval TTL, 50 bps drift, `breaker_engages_kill_switch = false`. All stay UNVERIFIED.
-- RISK-105-9: owner to confirm whether a breaker trip should always engage the persisted kill switch (`breaker_engages_kill_switch`, default stays `false`, UNVERIFIED; reviewer recommends `true`). Not blocking: the latch is restored from the audit log regardless.
+- RISK-96-11 closed 2026-11-22: owner confirmed 300 s approval TTL, 50 bps drift and the other [execution] defaults.
+- RISK-105-9 closed 2026-11-22: owner confirmed `breaker_engages_kill_switch = true`. Not blocking: the latch is restored from the audit log regardless.
 - `GuardedExecutor` (slice 2) and the pipeline (slice 3) must both call `KillSwitch::admits`.
 - Defer RISK-96-8 to slice 3; RISK-96-5 to slice 2; SEC-96-2 anchor of latest (seq, hash) to slice 8; CR-96-5 to slice 5.
 - Bound `paper_mis_square_off_ist` against the session calendar (CR-96-5); slice sizes for later F10 slices <= 400 lines (CR-96-6).
