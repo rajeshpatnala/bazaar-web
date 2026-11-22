@@ -221,15 +221,6 @@ impl ApprovalDecision {
 
 /// Approval decisions, one per intent (first wins).
 pub trait ApprovalRepo: Send + Sync {
-    /// Record `decision` for the intent. Returns the decision that stands: `decision` when this
-    /// call was first, the earlier one otherwise. A stored value outside the closed set is
-    /// `RepoError::Corrupt`.
-    fn decide(
-        &self,
-        intent_id: u128,
-        decision: ApprovalDecision,
-        at_ist_rfc3339: String,
-    ) -> impl Future<Output = Result<ApprovalDecision, RepoError>> + Send;
     /// `Conflict` does NOT prove an Approve exists (it may be a decline, a stale version, a
     /// non-pending order or a lost race): callers must re-read the order state before acting on it.
     ///
