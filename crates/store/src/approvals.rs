@@ -184,27 +184,6 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// Bare first-wins decision insert (port `decide`): no order transition, no audit row.
-    pub(crate) async fn approval_insert(
-        &self,
-        order_id: &str,
-        decision: ApprovalDecision,
-        actor: &str,
-        at_ns: i64,
-    ) -> Result<(), RepoError> {
-        check_label(order_id)?;
-        check_actor(actor)?;
-        sqlx::query(INSERT)
-            .bind(order_id)
-            .bind(decision.label())
-            .bind(actor)
-            .bind(at_ns)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| conflict_or(&e))?;
-        Ok(())
-    }
-
     /// The decision for an order, if any.
     pub async fn approval_get(&self, order_id: &str) -> Result<Option<ApprovalRow>, RepoError> {
         let row = sqlx::query(

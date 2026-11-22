@@ -15,9 +15,6 @@ use crate::approvals::ApprovalDecision as StoreDecision;
 use crate::orders::{OrderRow, OrderTransition};
 use crate::sqlite::SqliteStore;
 
-/// Actor recorded on a port approval row (the port carries none; the audit row has the user).
-const APPROVAL_ACTOR: &str = "user";
-
 /// The only order state an approval decision may be written from.
 const PENDING_STATE: &str = "pending_approval";
 
@@ -113,32 +110,6 @@ impl OrderRepo for SqliteStore {
 }
 
 impl ApprovalRepo for SqliteStore {
-    async fn decide(
-        &self,
-        intent_id: u128,
-        decision: ApprovalDecision,
-        at_ist_rfc3339: String,
-    ) -> Result<ApprovalDecision, RepoError> {
-        let id = id_str(intent_id);
-        let stored = match decision {
-            ApprovalDecision::Approve => StoreDecision::Approved,
-            ApprovalDecision::Decline => StoreDecision::Declined,
-        };
-        let at = ns_of(&at_ist_rfc3339)?;
-        match self.approval_insert(&id, stored, APPROVAL_ACTOR, at).await {
-            Ok(()) => Ok(decision),
-            Err(RepoError::Conflict) => {
-                let row = self.approval_get(&id).await?.ok_or(RepoError::Corrupt)?;
-                match row.decision {
-                    StoreDecision::Approved => Ok(ApprovalDecision::Approve),
-                    StoreDecision::Declined => Ok(ApprovalDecision::Decline),
-                    StoreDecision::Expired => Err(RepoError::Corrupt),
-                }
-            }
-            Err(e) => Err(e),
-        }
-    }
-
     /// `Conflict` does NOT prove an Approve exists: callers must re-read the order state before
     /// acting on it.
     #[allow(clippy::too_many_arguments)] // mirrors the port: one atomic write
@@ -309,48 +280,6 @@ mod tests {
             Err(RepoError::Other)
         );
         assert_eq!(OrderRepo::get(&s, 99).await, Ok(None));
-    }
-
-    #[tokio::test]
-    async fn approval_first_wins_and_returns_standing_decision() {
-        let s = store().await;
-        OrderRepo::insert(&s, rec(1), test_draft("a"), test_chain)
-            .await
-            .unwrap();
-        let at = "2026-11-22T09:16:00+05:30".to_owned();
-        assert_eq!(
-            ApprovalRepo::decide(&s, 1, ApprovalDecision::Approve, at.clone()).await,
-            Ok(ApprovalDecision::Approve)
-        );
-        assert_eq!(
-            ApprovalRepo::decide(&s, 1, ApprovalDecision::Decline, at).await,
-            Ok(ApprovalDecision::Approve)
-        );
-        assert_eq!(
-            ApprovalRepo::decide(&s, 1, ApprovalDecision::Approve, "bad".into()).await,
-            Err(RepoError::Other)
-        );
-    }
-
-    #[tokio::test]
-    async fn approval_expired_row_reads_corrupt_and_unknown_order_errors() {
-        let s = store().await;
-        OrderRepo::insert(&s, rec(1), test_draft("a"), test_chain)
-            .await
-            .unwrap();
-        s.approval_record("1", StoreDecision::Expired, "system", 1)
-            .await
-            .unwrap();
-        let at = "2026-11-22T09:16:00+05:30".to_owned();
-        assert_eq!(
-            ApprovalRepo::decide(&s, 1, ApprovalDecision::Approve, at.clone()).await,
-            Err(RepoError::Corrupt)
-        );
-        assert!(
-            ApprovalRepo::decide(&s, 42, ApprovalDecision::Approve, at)
-                .await
-                .is_err()
-        );
     }
 
     #[tokio::test]

@@ -139,6 +139,12 @@ impl<A: ApprovalRepo> ApprovalQueue<A> {
         }
     }
 
+    /// Test access to the approval repo (fakes inspect and inject failures through it).
+    #[cfg(test)]
+    pub(crate) fn repo(&self) -> &A {
+        &self.repo
+    }
+
     pub fn enqueue(&mut self, p: Pending) {
         self.pending.insert(p.track.id, p);
     }
@@ -184,16 +190,44 @@ impl<A: ApprovalRepo> ApprovalQueue<A> {
         ids
     }
 
-    /// Persist the user's decision; the repo keeps the first one.
+    /// Record the user's decision, move the order and write the audit row in ONE repo
+    /// transaction (the order must still be pending at the track's version). On success the
+    /// track holds the new state and version; on any error it is unchanged and nothing is stored.
     ///
     /// # Errors
-    /// The repo's error.
-    pub async fn record(
+    /// `RepoError::Conflict` when the order is not pending, was already decided, or the version
+    /// is stale. A Conflict does NOT prove an Approve exists: re-read the order before acting.
+    pub(crate) async fn decide_and_advance(
         &self,
-        id: IntentId,
+        track: &mut Track,
         d: ApprovalDecision,
+        event: ExecEvent,
         now: DateTime<Tz>,
-    ) -> Result<ApprovalDecision, RepoError> {
-        self.repo.decide(id.0, d, now.to_rfc3339()).await
+        actor: &str,
+    ) -> Result<(), RepoError> {
+        let next = track.state.apply(event).map_err(|_| RepoError::Other)?;
+        let audit = bazaar_core::ports::AuditDraft {
+            ts_ist_rfc3339: now.to_rfc3339(),
+            actor: actor.to_owned(),
+            kind: event.as_str().into(),
+            payload: serde_json::json!({ "intent": track.id.to_string(), "state": next.as_str(), "actor": actor, "at": now.to_rfc3339() })
+                .to_string(),
+        };
+        let version = self
+            .repo
+            .decide_and_advance(
+                track.id.0,
+                d,
+                actor,
+                track.version,
+                next.as_str().into(),
+                event.as_str().into(),
+                audit,
+                chain_hash,
+            )
+            .await?;
+        track.version = version;
+        track.state = next;
+        Ok(())
     }
 }
