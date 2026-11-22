@@ -261,6 +261,23 @@ pub struct ExecutionSection {
     /// IST `HH:MM` at which paper MIS positions are squared off.
     #[serde(deserialize_with = "hhmm")]
     pub paper_mis_square_off_ist: NaiveTime,
+    /// Seconds one quote read, gate run or send may take before the pipeline gives up
+    /// (F10, BZ-205). Default 5, loader accepts 1..=30. Unverified, owner to confirm.
+    #[serde(default = "default_io_timeout_secs")]
+    pub io_timeout_secs: u32,
+}
+
+/// Default for `execution.io_timeout_secs`.
+const fn default_io_timeout_secs() -> u32 {
+    5
+}
+
+impl ExecutionSection {
+    /// The I/O timeout as a `Duration` (already range-checked by the loader).
+    #[must_use]
+    pub const fn io_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.io_timeout_secs as u64)
+    }
 }
 
 /// `[execution.paper_slippage_bps]`: one value per segment.
@@ -316,6 +333,8 @@ const OVERRIDES_PER_WEEK: (u32, u32) = (1, 50);
 const CONFIRM_DELAY_SECS: (u32, u32) = (1, 300);
 const MIN_OOS_TRADES: (u32, u32) = (1, 100_000);
 const ORDERS_PER_DAY: (u32, u32) = (1, 1000);
+/// `execution.io_timeout_secs`: a zero would disable the bound, a huge value would stall the writer.
+const IO_TIMEOUT_SECS: (u32, u32) = (1, 30);
 /// Cutoff for new expiry-day entries, seconds after midnight IST: within the 09:15..15:30 session.
 const EXPIRY_CUTOFF_SECS: (u32, u32) = (9 * 3600 + 15 * 60, 15 * 3600 + 30 * 60);
 
@@ -914,6 +933,11 @@ impl RiskConfig {
                 "must be at least 8 characters",
             );
         }
+        check_range(
+            "execution.io_timeout_secs",
+            e.io_timeout_secs,
+            IO_TIMEOUT_SECS,
+        )?;
         let p = e.paper_max_participation;
         if p <= Decimal::ZERO || p > Decimal::ONE {
             return bad("execution.paper_max_participation", "must be in (0, 1]");
@@ -1742,6 +1766,36 @@ mod tests {
                 parse_str::<RiskConfig>(&OK.replace(from, to)).is_err(),
                 "{from}"
             );
+        }
+    }
+
+    #[test]
+    fn io_timeout_defaults_to_5_and_accepts_1_to_30() {
+        let cfg: RiskConfig = parse_str(OK).unwrap();
+        assert_eq!(cfg.execution.io_timeout_secs, 5);
+        assert_eq!(
+            cfg.execution.io_timeout(),
+            std::time::Duration::from_secs(5)
+        );
+        for v in ["1", "30"] {
+            let text = with(
+                "[execution]\n",
+                &format!("[execution]\nio_timeout_secs = {v}\n"),
+            );
+            let cfg: RiskConfig = parse_str(&text).unwrap();
+            assert_eq!(cfg.execution.io_timeout_secs, v.parse::<u32>().unwrap());
+        }
+    }
+
+    #[test]
+    fn io_timeout_zero_and_31_are_refused_naming_the_key() {
+        for v in ["0", "31", "3600"] {
+            let text = with(
+                "[execution]\n",
+                &format!("[execution]\nio_timeout_secs = {v}\n"),
+            );
+            let err = parse_str::<RiskConfig>(&text).unwrap_err().to_string();
+            assert!(err.contains("execution.io_timeout_secs"), "{v}: {err}");
         }
     }
 }

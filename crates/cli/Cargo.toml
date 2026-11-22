@@ -14,6 +14,9 @@ workspace = true
 bazaar-broker = { workspace = true, optional = true }
 bazaar-core.workspace = true
 bazaar-data.workspace = true
+bazaar-execution.workspace = true
+bazaar-paper.workspace = true
+bazaar-risk.workspace = true
 bazaar-store.workspace = true
 chrono.workspace = true
 clap.workspace = true
@@ -25,6 +28,7 @@ bazaar-core = { workspace = true, features = ["test-util"] }
 chrono-tz.workspace = true
 tempfile.workspace = true
 serde_json.workspace = true
+sqlx.workspace = true
 toml.workspace = true
 
 [features]

@@ -11,6 +11,7 @@ mod killswitch;
 mod ledger;
 mod orders;
 mod parquet;
+mod port_impls;
 mod sqlite;
 
 pub use approvals::{ApprovalDecision, ApprovalRow};

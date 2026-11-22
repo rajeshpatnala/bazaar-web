@@ -88,6 +88,24 @@ pub(crate) fn verify_rows(rows: &[AuditRow], chain: ChainFn) -> Result<(), RepoE
     Ok(())
 }
 
+fn audit_row(r: &sqlx::sqlite::SqliteRow) -> Result<AuditRow, RepoError> {
+    let g = |e: sqlx::Error| map_err(&e);
+    let seq: i64 = r.try_get("seq").map_err(g)?;
+    let prev: Vec<u8> = r.try_get("prev_hash").map_err(g)?;
+    let hash: Vec<u8> = r.try_get("hash").map_err(g)?;
+    Ok(AuditRow {
+        seq: u64::try_from(seq).map_err(|_| RepoError::Corrupt)?,
+        draft: AuditDraft {
+            ts_ist_rfc3339: r.try_get("ts_ist").map_err(g)?,
+            actor: r.try_get("actor").map_err(g)?,
+            kind: r.try_get("kind").map_err(g)?,
+            payload: r.try_get("payload").map_err(g)?,
+        },
+        prev_hash: to_arr(&prev)?,
+        hash: to_arr(&hash)?,
+    })
+}
+
 impl SqliteStore {
     /// All audit rows in `seq` order.
     pub async fn audit_read_all(&self) -> Result<Vec<AuditRow>, RepoError> {
@@ -98,25 +116,28 @@ impl SqliteStore {
         .fetch_all(&self.pool)
         .await
         .map_err(|e| map_err(&e))?;
-        let g = |e: sqlx::Error| map_err(&e);
-        rows.iter()
-            .map(|r| {
-                let seq: i64 = r.try_get("seq").map_err(g)?;
-                let prev: Vec<u8> = r.try_get("prev_hash").map_err(g)?;
-                let hash: Vec<u8> = r.try_get("hash").map_err(g)?;
-                Ok(AuditRow {
-                    seq: u64::try_from(seq).map_err(|_| RepoError::Corrupt)?,
-                    draft: AuditDraft {
-                        ts_ist_rfc3339: r.try_get("ts_ist").map_err(g)?,
-                        actor: r.try_get("actor").map_err(g)?,
-                        kind: r.try_get("kind").map_err(g)?,
-                        payload: r.try_get("payload").map_err(g)?,
-                    },
-                    prev_hash: to_arr(&prev)?,
-                    hash: to_arr(&hash)?,
-                })
-            })
-            .collect()
+        rows.iter().map(audit_row).collect()
+    }
+
+    /// Append one row in its own transaction and return it as stored (port `append`).
+    pub(crate) async fn audit_append(
+        &self,
+        draft: &AuditDraft,
+        chain: ChainFn,
+    ) -> Result<AuditRow, RepoError> {
+        let mut tx = self.pool.begin().await.map_err(|e| map_err(&e))?;
+        let seq = append_in_tx(&mut tx, draft, chain).await?;
+        let row = sqlx::query(
+            "SELECT seq, ts_ist, actor, kind, payload, prev_hash, hash FROM audit_log \
+             WHERE seq = ?",
+        )
+        .bind(i64::try_from(seq).map_err(|_| RepoError::Other)?)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| map_err(&e))?;
+        let out = audit_row(&row)?;
+        tx.commit().await.map_err(|e| map_err(&e))?;
+        Ok(out)
     }
 
     /// Re-verify the whole chain with `chain`; `Corrupt` when any row was altered, removed or
