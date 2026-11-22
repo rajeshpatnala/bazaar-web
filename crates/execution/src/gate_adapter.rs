@@ -339,6 +339,7 @@ mod tests {
         }
     }
     impl GateContext for Ctx {
+        #[allow(clippy::too_many_lines)]
         fn inputs(&self, _: &OrderIntent) -> Option<GateInputsOwned> {
             if self.none {
                 return None;
