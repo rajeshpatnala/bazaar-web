@@ -84,8 +84,37 @@ fn compose_opens_verified_with_the_execution_chain_hash() {
     let code = code_only(&src);
     assert!(code.contains("open_verified(path, chain_hash)"));
     assert!(code.contains("bazaar_execution::audit::chain_hash"));
-    assert!(!code.contains("SqliteStore::open("));
-    assert!(!code.contains("open_in_memory"));
+    assert!(!plain_open_violation(&code));
+}
+
+/// True when the code could open a store without audit verification: whitespace is stripped so
+/// `SqliteStore :: open (` is caught, any `SqliteStore` alias (`use ... as X`) or a bare `::open(`
+/// is flagged, and so is any `open_*` variant other than `open_verified` (SEC-129-3).
+fn plain_open_violation(code: &str) -> bool {
+    let c: String = code.chars().filter(|ch| !ch.is_whitespace()).collect();
+    if c.contains("SqliteStoreas") || c.contains("::open(") || c.contains("open_in_memory") {
+        return true;
+    }
+    let mut rest = c.as_str();
+    while let Some(i) = rest.find("SqliteStore::open_") {
+        rest = &rest[i + "SqliteStore::open_".len()..];
+        if !rest.starts_with("verified") {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn plain_open_guard_catches_spacing_aliases_and_variants() {
+    assert!(plain_open_violation("SqliteStore::open(p)"));
+    assert!(plain_open_violation("bazaar_store::SqliteStore :: open (p)"));
+    assert!(plain_open_violation("use bazaar_store::SqliteStore as S;"));
+    assert!(plain_open_violation("S::open(p)"));
+    assert!(plain_open_violation("SqliteStore::open_in_memory()"));
+    assert!(plain_open_violation("SqliteStore::open_with(p)"));
+    assert!(!plain_open_violation("SqliteStore::open_verified(p, h)"));
+    assert!(!plain_open_violation("fn open_store() {}"));
 }
 
 #[test]
@@ -105,7 +134,7 @@ fn no_cli_code_outside_the_instrument_commands_opens_a_plain_store() {
         }
         let code = code_only(&std::fs::read_to_string(&f).unwrap());
         assert!(
-            !code.contains("SqliteStore::open("),
+            !plain_open_violation(&code),
             "{} opens the store without audit verification; use compose::open_store",
             f.display()
         );

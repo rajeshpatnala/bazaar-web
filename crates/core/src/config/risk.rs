@@ -333,9 +333,9 @@ const OVERRIDES_PER_WEEK: (u32, u32) = (1, 50);
 const CONFIRM_DELAY_SECS: (u32, u32) = (1, 300);
 const MIN_OOS_TRADES: (u32, u32) = (1, 100_000);
 const ORDERS_PER_DAY: (u32, u32) = (1, 1000);
-/// Cutoff for new expiry-day entries, seconds after midnight IST: within the 09:15..15:30 session.
 /// `execution.io_timeout_secs`: a zero would disable the bound, a huge value would stall the writer.
 const IO_TIMEOUT_SECS: (u32, u32) = (1, 30);
+/// Cutoff for new expiry-day entries, seconds after midnight IST: within the 09:15..15:30 session.
 const EXPIRY_CUTOFF_SECS: (u32, u32) = (9 * 3600 + 15 * 60, 15 * 3600 + 30 * 60);
 
 /// A percentage must be above 0 and at most 100.
