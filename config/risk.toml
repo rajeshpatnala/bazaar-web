@@ -14,7 +14,10 @@ max_daily_loss_pct = "3"
 on_daily_loss = "lockout_entries"
 # F6 keys below: owner-decided 2026-11-19 (.agents/decisions.md): max_open_positions, max_position_value_pct,
 # max_weekly_loss_pct (G19). Every other key in the sections below: source = owner-to-confirm,
-# verified_on = unverified. The file-level verified_on above is deliberately not bumped.
+# verified_on = unverified, EXCEPT [execution] and [execution.paper_slippage_bps], which the owner confirmed
+# on 2026-11-22 (source/verified_on "owner confirmed 2026-11-22"; recorded in comments because the loader
+# refuses unknown keys). The [hard_limits] F10 ceilings stay unconfirmed. The file-level verified_on above is
+# deliberately not bumped.
 max_open_positions = 3                  # G04a, Soft, owner decided 2026-11-19
 max_total_open_risk_pct = "3"           # G04b, Hard; owner-to-confirm, unverified
 max_weekly_loss_pct = "6"               # G19, Hard; owner decided 2026-11-19

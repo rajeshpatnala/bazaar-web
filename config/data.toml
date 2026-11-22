@@ -8,10 +8,12 @@
 # (no network access in that run). The owner check (BZ-490/BZ-491) compares each key with the
 # provider docs, removes it from `unverified` and bumps `verified_on`. Hosts the owner
 # confirmed: nseindia.in (calendar). On 2026-11-22 the owner confirmed every kite.* value
-# (source/verified_on "owner confirmed 2026-11-22"); nsearchives.nseindia.com, staleness and
+# (source/verified_on "owner confirmed 2026-11-22"; see `source`). The file-level `verified_on` is NOT
+# bumped: nse.*, staleness and history are still unverified, and the `unverified` list is the only
+# authority on what is confirmed. nsearchives.nseindia.com, staleness and
 # history still await confirmation.
 schema_version = 1
-verified_on = "2026-11-22"
+verified_on = "2026-11-21"
 source = "kite.*: owner confirmed 2026-11-22; nse.*, staleness, history: NSE archives (nsearchives.nseindia.com), written from memory, see unverified"
 unverified = [
   "nse.allowed_hosts", "nse.bhavcopy_url_template", "nse.banlist_url_template",

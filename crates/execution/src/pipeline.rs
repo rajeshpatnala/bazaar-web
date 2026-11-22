@@ -84,7 +84,7 @@ impl<E: Executor, R: KillSwitchRepo, P: PnlSource, A: AuditRepo> Guarded
 /// Why a handle call failed before or outside an order outcome.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PipelineError {
-    #[error("text longer than {MAX_TEXT} characters")]
+    #[error("text longer than {MAX_TEXT} bytes")]
     TooLong,
     #[error("pipeline stopped")]
     Closed,
@@ -143,7 +143,7 @@ impl PipelineHandle {
         d: ApprovalDecision,
         actor: &str,
     ) -> Result<Outcome, PipelineError> {
-        if actor.chars().count() > MAX_TEXT {
+        if actor.len() > MAX_TEXT {
             return Err(PipelineError::TooLong);
         }
         let actor = actor.to_owned();
@@ -151,7 +151,7 @@ impl PipelineHandle {
     }
 
     /// Engage (`text` = reason) or release (`text` = typed phrase). `actor` and `text` are capped
-    /// at [`MAX_TEXT`] characters before anything is sent or audited.
+    /// at [`MAX_TEXT`] bytes (the store caps bytes too, SEC-130-1) before anything is sent or audited.
     ///
     /// # Errors
     /// `TooLong`, `Closed`, or the kill switch's own error.
@@ -161,7 +161,7 @@ impl PipelineHandle {
         actor: &str,
         text: &str,
     ) -> Result<(), PipelineError> {
-        if actor.chars().count() > MAX_TEXT || text.chars().count() > MAX_TEXT {
+        if actor.len() > MAX_TEXT || text.len() > MAX_TEXT {
             return Err(PipelineError::TooLong);
         }
         let (actor, text) = (actor.to_owned(), text.to_owned());
@@ -723,6 +723,7 @@ pub(crate) mod fakes {
             Quotes(AtomicBool::new(false), AtomicBool::new(false)),
             orders.clone(),
             approvals,
+            // Struct literal on purpose: the 150 ms timeout is below the loader's 1..=30 s range.
             PipelineConfig {
                 approval_ttl_secs: 300,
                 io_timeout: Duration::from_millis(150),
@@ -917,6 +918,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kill_switch_text_cap_counts_bytes_not_characters() {
+        let r = rig(10, 0).await;
+        let h = r.pipe.spawn();
+        // 300 two-byte characters: 300 chars but 600 bytes, over the store cap.
+        let long = "\u{e9}".repeat(300);
+        assert_eq!(
+            h.set_kill_switch(true, "user", &long).await,
+            Err(PipelineError::TooLong)
+        );
+        assert_eq!(
+            h.set_kill_switch(true, &long, "r").await,
+            Err(PipelineError::TooLong)
+        );
+        assert!(
+            h.set_kill_switch(true, "user", &"\u{e9}".repeat(250))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
     async fn handle_caps_text_and_routes_commands() {
         let r = rig(10, 0).await;
         let rec = r.rec.clone();
@@ -958,6 +980,19 @@ mod tests {
         let out = r.pipe.decide(IntentId(1), Approve, "u").await;
         assert!(matches!(out, Outcome::GateBlocked(_)), "{out:?}");
         assert_eq!(ids(&r), Vec::<u128>::new());
+    }
+
+    #[test]
+    fn confirmation_strings_are_recorded() {
+        // The loader refuses unknown keys, so provenance lives in the files as text (TS-130-1).
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/");
+        let read = |f: &str| std::fs::read_to_string(format!("{dir}{f}")).unwrap();
+        let risk = read("risk.toml");
+        let exec = risk.split("\n[execution]\n").nth(1).unwrap();
+        assert!(exec.contains("source = \"owner confirmed 2026-11-22\""));
+        assert!(exec.contains("verified_on = \"2026-11-22\""));
+        assert!(read("data.toml").contains("kite.*: owner confirmed 2026-11-22"));
+        assert!(read("strategies.toml").contains("owner confirmed 2026-11-22"));
     }
 
     #[test]

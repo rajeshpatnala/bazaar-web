@@ -16,12 +16,11 @@ use crate::audit::chain_hash;
 use crate::executor::ExecError;
 
 /// The store refuses an empty reason; an engage without one is recorded as "unspecified".
+/// The reason is trimmed before it is stored (CR-130-4); the length cap is in bytes at the
+/// pipeline edge and again in the store.
 fn reason_or_default(reason: &str) -> &str {
-    if reason.trim().is_empty() {
-        "unspecified"
-    } else {
-        reason
-    }
+    let r = reason.trim();
+    if r.is_empty() { "unspecified" } else { r }
 }
 
 /// Why `KillSwitch::release` refused.
@@ -133,9 +132,11 @@ impl<R: KillSwitchRepo> KillSwitch<R> {
         if matches!(self.read().await, Ok(true)) {
             return Ok(());
         }
+        // One normalised reason (trimmed, "unspecified" when blank) for both records (RISK-130-1).
+        let reason = reason_or_default(reason);
         let d = self.draft(actor, "kill_switch_engaged", reason);
         self.repo
-            .set(true, reason_or_default(reason), d, chain_hash)
+            .set(true, reason, d, chain_hash)
             .await
             .map_err(|e| {
                 tracing::warn!(
@@ -326,6 +327,16 @@ mod tests {
             r2.reasons.lock().unwrap().clone(),
             vec!["unspecified".to_owned()]
         );
+        let audit_reason = |r: &MemRepo| {
+            let rows = r.rows.lock().unwrap();
+            let v: serde_json::Value = serde_json::from_str(&rows[0].draft.payload).unwrap();
+            v["reason"].as_str().unwrap().to_owned()
+        };
+        assert_eq!(audit_reason(&r2), "unspecified", "audit and row agree");
+        let r3 = Arc::new(MemRepo::default());
+        ks(&r3, true).engage("user", "  loss \n").await.unwrap();
+        assert_eq!(r3.reasons.lock().unwrap().clone(), vec!["loss".to_owned()]);
+        assert_eq!(audit_reason(&r3), "loss");
     }
 
     #[tokio::test]
