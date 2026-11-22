@@ -272,3 +272,113 @@ where
         ports.clock,
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use std::collections::HashMap;
+
+    use bazaar_core::ports::{AuditDraft, ChainFn, OrderRecord};
+    use bazaar_execution::types::{OrderKind, Product};
+    use chrono::TimeZone;
+    use chrono_tz::Asia::Kolkata;
+
+    use super::*;
+
+    /// Orders by state; a state may be made to fail.
+    #[derive(Default)]
+    struct Orders {
+        by_state: HashMap<&'static str, Result<Vec<OrderRecord>, RepoError>>,
+    }
+
+    impl OrderRepo for Orders {
+        async fn insert(&self, _: OrderRecord, _: AuditDraft, _: ChainFn) -> Result<(), RepoError> {
+            Err(RepoError::Unavailable)
+        }
+        async fn get(&self, _: u128) -> Result<Option<OrderRecord>, RepoError> {
+            Err(RepoError::Unavailable)
+        }
+        async fn advance(
+            &self,
+            _: u128,
+            _: u32,
+            _: String,
+            _: String,
+            _: AuditDraft,
+            _: ChainFn,
+        ) -> Result<u32, RepoError> {
+            Err(RepoError::Unavailable)
+        }
+        async fn list_in_state(&self, state: &str, _: u32) -> Result<Vec<OrderRecord>, RepoError> {
+            self.by_state
+                .get(state)
+                .cloned()
+                .unwrap_or_else(|| Ok(vec![]))
+        }
+    }
+
+    fn now() -> chrono::DateTime<chrono_tz::Tz> {
+        Kolkata.with_ymd_and_hms(2026, 11, 19, 11, 0, 0).unwrap()
+    }
+
+    fn row(id: u128, symbol: &str, qty: u32, reduce_only: bool) -> OrderRecord {
+        let i = OrderIntent {
+            id: IntentId(id),
+            symbol: symbol.into(),
+            side: Side::Sell,
+            qty,
+            kind: OrderKind::Limit(Decimal::from(50)),
+            product: Product::Mis,
+            reduce_only,
+            created_at: now(),
+        };
+        OrderRecord {
+            intent_id: id,
+            version: 1,
+            state: "approved".into(),
+            payload: i.to_payload(),
+        }
+    }
+
+    async fn qty(o: &Orders) -> Option<Decimal> {
+        pending_exit_qty(o, "ABC", IntentId(1), now()).await
+    }
+
+    #[tokio::test]
+    async fn sums_only_other_reduce_only_orders_for_the_symbol() {
+        let mut o = Orders::default();
+        o.by_state.insert(
+            "approved",
+            Ok(vec![
+                row(1, "ABC", 100, true), // the intent itself
+                row(2, "ABC", 3, true),
+                row(3, "ABC", 50, false), // an entry
+                row(4, "XYZ", 70, true),  // another symbol
+            ]),
+        );
+        o.by_state
+            .insert("unknown", Ok(vec![row(5, "ABC", 4, true)]));
+        assert_eq!(qty(&o).await, Some(Decimal::from(7)));
+        assert_eq!(qty(&Orders::default()).await, Some(Decimal::ZERO));
+    }
+
+    #[tokio::test]
+    async fn a_list_error_a_too_large_list_or_a_bad_payload_is_unknown() {
+        for fail in [RepoError::Unavailable, RepoError::TooLarge] {
+            let mut o = Orders::default();
+            o.by_state.insert("sent", Err(fail));
+            assert_eq!(qty(&o).await, None);
+        }
+        let mut o = Orders::default();
+        let mut bad = row(9, "ABC", 1, true);
+        bad.payload = "not json".into();
+        o.by_state.insert("pending_approval", Ok(vec![bad]));
+        assert_eq!(qty(&o).await, None);
+    }
+
+    #[test]
+    fn unknown_cost_is_unknown() {
+        assert_eq!(UnknownCost.cost(Side::Buy, 1, Decimal::ONE), Tri::Unknown);
+    }
+}

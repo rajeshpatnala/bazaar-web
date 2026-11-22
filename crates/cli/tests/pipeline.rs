@@ -345,8 +345,12 @@ fn calendar() -> MarketCalendar {
 }
 
 async fn build(env: &Env, cost: Arc<dyn CostModel>) -> (SqliteStore, Pipe) {
+    build_with(env, cost, RISK).await
+}
+
+async fn build_with(env: &Env, cost: Arc<dyn CostModel>, risk: &str) -> (SqliteStore, Pipe) {
     let store = open_store(&env.path).await.unwrap();
-    let cfg: RiskConfig = parse_str(RISK).unwrap();
+    let cfg: RiskConfig = parse_str(risk).unwrap();
     let account = Arc::new(PaperAccount::new(
         store.clone(),
         Fee,
@@ -371,7 +375,7 @@ async fn build(env: &Env, cost: Arc<dyn CostModel>) -> (SqliteStore, Pipe) {
         baseline: Arc::new(NoBaseline),
         cost,
     };
-    let pipe = build_pipeline(&store, RISK, ports).await.unwrap();
+    let pipe = build_pipeline(&store, risk, ports).await.unwrap();
     (store, pipe)
 }
 
@@ -624,6 +628,37 @@ async fn kill_switch_reason_is_stored_and_the_gate_reads_it_from_the_store() {
     assert!(matches!(out, Outcome::Placed(_)), "{out:?}");
 }
 
+#[tokio::test]
+async fn with_kill_allow_reduce_only_false_an_exit_is_blocked_while_killed() {
+    let env = Env::new();
+    env.held.0.lock().unwrap().push(long(10));
+    let risk = RISK.replace(
+        "kill_allow_reduce_only = true",
+        "kill_allow_reduce_only = false",
+    );
+    assert_ne!(risk, RISK, "the fixture key must be patched");
+    let (store, mut pipe) = build_with(&env, Arc::new(KnownCost), &risk).await;
+    pipe.reload().await.unwrap();
+    let h = pipe.spawn();
+    // Not killed: the exit queues.
+    assert_eq!(
+        h.submit(env.intent(1, Side::Sell, 4, true)).await.unwrap(),
+        Outcome::Queued
+    );
+    h.set_kill_switch(true, OWNER, "stop").await.unwrap();
+    env.advance(2);
+    // Killed with the key false: neither a new exit nor the approval of a queued one goes out.
+    let new_exit = h.submit(env.intent(2, Side::Sell, 4, true)).await.unwrap();
+    assert!(blocked(&new_exit), "{new_exit:?}");
+    let out = h
+        .decide(IntentId(1), ApprovalDecision::Approve, OWNER)
+        .await
+        .unwrap();
+    assert!(!matches!(out, Outcome::Placed(_)), "{out:?}");
+    assert_eq!(env.placed(), Vec::<u128>::new());
+    assert_ne!(state(&store, 1).await, "filled");
+}
+
 // ---- AC4: approval-time TTL and fresh-quote re-gate ----------------------------------------
 
 #[tokio::test]
@@ -666,7 +701,7 @@ async fn approval_regates_on_a_fresh_quote_drift_and_a_stale_quote_block() {
 #[tokio::test]
 async fn a_quote_older_than_the_limit_blocks_because_quote_at_comes_from_the_quote() {
     let env = Env::new();
-    let (_, h, _) = boot(&env).await;
+    let (store, h, _) = boot(&env).await;
     assert_eq!(
         h.submit(env.intent(1, Side::Buy, 10, false)).await.unwrap(),
         Outcome::Queued
@@ -678,7 +713,11 @@ async fn a_quote_older_than_the_limit_blocks_because_quote_at_comes_from_the_quo
         .decide(IntentId(1), ApprovalDecision::Approve, OWNER)
         .await
         .unwrap();
-    assert!(!matches!(out, Outcome::Placed(_)), "{out:?}");
+    assert!(
+        matches!(&out, Outcome::GateBlocked(m) if m.contains("G15")),
+        "{out:?}"
+    );
+    assert_eq!(state(&store, 1).await, "blocked");
     assert_eq!(env.placed(), Vec::<u128>::new());
 }
 
@@ -707,7 +746,7 @@ async fn restart_requeues_with_the_original_time_and_the_ttl_still_applies() {
         .await
         .unwrap();
     assert!(matches!(out, Outcome::Placed(_)), "{out:?}");
-    // 150 s later it would have expired: the original queue time was kept (checked on #3).
+    // 150 s later it would have expired: the original queue time was kept.
     assert_eq!(env.placed(), vec![2]);
 }
 
@@ -735,7 +774,7 @@ async fn restart_requeued_intent_expires_at_its_original_ttl_not_a_fresh_one() {
 }
 
 /// A crash between the approval write and the send leaves an `approved` order.
-async fn seed_approved(env: &Env, id: u128) {
+async fn seed_approved(env: &Env, id: u128, kill: bool) {
     let (store, h, _) = boot(env).await;
     assert_eq!(
         h.submit(env.intent(id, Side::Buy, 10, false))
@@ -764,12 +803,61 @@ async fn seed_approved(env: &Env, id: u128) {
     .await
     .unwrap();
     assert_eq!(state(&store, id).await, "approved");
+    if kill {
+        h.set_kill_switch(true, OWNER, "halt before restart")
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_stored_approve_is_blocked_at_reload_when_the_kill_switch_is_engaged() {
+    let env = Env::new();
+    seed_approved(&env, 1, true).await;
+    env.advance(5);
+    let (store, _h, rep) = boot(&env).await;
+    assert_eq!((rep.blocked, rep.resumed), (1, 0), "{rep:?}");
+    assert_eq!(state(&store, 1).await, "blocked");
+    assert_eq!(env.placed(), Vec::<u128>::new());
+}
+
+#[tokio::test]
+async fn a_stored_approve_is_blocked_at_reload_when_the_cost_is_unknown() {
+    let env = Env::new();
+    seed_approved(&env, 1, false).await;
+    env.advance(5);
+    let (store, mut pipe) = build(&env, Arc::new(UnknownCost)).await;
+    let rep = pipe.reload().await.unwrap();
+    let _h = pipe.spawn();
+    assert_eq!((rep.blocked, rep.resumed), (1, 0), "{rep:?}");
+    assert_eq!(state(&store, 1).await, "blocked");
+    assert_eq!(env.placed(), Vec::<u128>::new());
+}
+
+#[tokio::test]
+async fn an_unreadable_kill_switch_reads_as_unknown_and_blocks_entries() {
+    let env = Env::new();
+    let (_store, h, _) = boot(&env).await;
+    // Break the kill switch table out of band: the store read now fails.
+    let mut c = SqliteConnectOptions::new()
+        .filename(&env.path)
+        .connect()
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE kill_switch")
+        .execute(&mut c)
+        .await
+        .unwrap();
+    c.close().await.unwrap();
+    let out = h.submit(env.intent(1, Side::Buy, 10, false)).await.unwrap();
+    assert!(blocked(&out), "{out:?}");
+    assert_eq!(env.placed(), Vec::<u128>::new());
 }
 
 #[tokio::test]
 async fn a_stored_approve_after_restart_is_regated_first_and_a_drift_ends_blocked() {
     let env = Env::new();
-    seed_approved(&env, 1).await;
+    seed_approved(&env, 1, false).await;
     env.advance(5);
     env.price("49.70");
     let (store, _h, rep) = boot(&env).await;
@@ -781,7 +869,7 @@ async fn a_stored_approve_after_restart_is_regated_first_and_a_drift_ends_blocke
 #[tokio::test]
 async fn a_stored_approve_after_restart_past_the_ttl_ends_blocked_and_sends_nothing() {
     let env = Env::new();
-    seed_approved(&env, 1).await;
+    seed_approved(&env, 1, false).await;
     env.advance(301);
     let (store, _h, rep) = boot(&env).await;
     assert_eq!((rep.blocked, rep.resumed), (1, 0), "{rep:?}");
@@ -792,7 +880,7 @@ async fn a_stored_approve_after_restart_past_the_ttl_ends_blocked_and_sends_noth
 #[tokio::test]
 async fn a_stored_approve_after_restart_resumes_only_when_everything_still_passes() {
     let env = Env::new();
-    seed_approved(&env, 1).await;
+    seed_approved(&env, 1, false).await;
     env.advance(5);
     let (store, _h, rep) = boot(&env).await;
     assert_eq!((rep.resumed, rep.blocked), (1, 0), "{rep:?}");
@@ -833,7 +921,7 @@ async fn a_restart_never_resends_a_sent_or_unknown_order() {
 }
 
 #[tokio::test]
-async fn a_decision_row_without_an_advance_is_never_re_presented() {
+async fn a_second_decision_on_a_filled_order_is_a_conflict_and_writes_nothing() {
     // Atomic decide (AC3) on the real store: an approval for an order that is no longer pending
     // is refused and nothing is written.
     let env = Env::new();
