@@ -166,6 +166,47 @@ fn quote_time(q: Option<&QuoteSnapshot>) -> Tri<DateTime<chrono_tz::Tz>> {
         })
 }
 
+impl<C: GateContext> RiskGateAdapter<C> {
+    /// The adapter's own fail-closed checks, before the real gate runs.
+    fn precheck(
+        &self,
+        intent: &OrderIntent,
+        inp: &GateInputsOwned,
+        last: Option<Decimal>,
+    ) -> Option<GateOutcome> {
+        let held = inp.snapshot.position(&intent.symbol);
+        let killed = inp.snapshot.kill_switch != Tri::Known(false);
+        if intent.reduce_only {
+            // RISK-109-3: reduce_only must really shrink a live position, net of exits already
+            // pending, killed or not. Anything else is an entry in disguise.
+            let Some(pending) = inp.pending_exit_qty else {
+                return Some(block("reduce_only: pending exit quantity unknown"));
+            };
+            let shrinks = held.is_some_and(|p| {
+                p.side != intent.side && Decimal::from(intent.qty) + pending <= Decimal::from(p.qty)
+            });
+            if !shrinks {
+                return Some(block("reduce_only: no live position to reduce"));
+            }
+            if killed && !self.kill_allow_reduce_only {
+                return Some(block(
+                    "kill switch engaged: exits are not allowed by configuration",
+                ));
+            }
+        } else if killed {
+            return Some(block(
+                "kill switch engaged: only reduce_only exits are allowed",
+            ));
+        } else if last.is_none() {
+            // RISK-109-7: no quote blocks an entry.
+            return Some(block("no quote"));
+        } else if inp.proposed_price.is_none() {
+            return Some(block("no proposed price to measure quote drift from"));
+        }
+        None
+    }
+}
+
 impl<C: GateContext> GatePort for RiskGateAdapter<C> {
     fn gate(&self, intent: &OrderIntent, quote: Option<&QuoteSnapshot>) -> GateOutcome {
         let Some(mut inp) = self.ctx.inputs(intent) else {
@@ -173,30 +214,8 @@ impl<C: GateContext> GatePort for RiskGateAdapter<C> {
         };
         inp.data.quote_at = quote_time(quote);
         let last = quote.map(|q| q.last);
-        let held = inp.snapshot.position(&intent.symbol);
-        let killed = inp.snapshot.kill_switch != Tri::Known(false);
-        if intent.reduce_only {
-            // RISK-109-3: reduce_only must really shrink a live position, net of exits already
-            // pending, killed or not. Anything else is an entry in disguise.
-            let Some(pending) = inp.pending_exit_qty else {
-                return block("reduce_only: pending exit quantity unknown");
-            };
-            let shrinks = held.is_some_and(|p| {
-                p.side != intent.side && Decimal::from(intent.qty) + pending <= Decimal::from(p.qty)
-            });
-            if !shrinks {
-                return block("reduce_only: no live position to reduce");
-            }
-            if killed && !self.kill_allow_reduce_only {
-                return block("kill switch engaged: exits are not allowed by configuration");
-            }
-        } else if killed {
-            return block("kill switch engaged: only reduce_only exits are allowed");
-        } else if last.is_none() {
-            // RISK-109-7: no quote blocks an entry.
-            return block("no quote");
-        } else if inp.proposed_price.is_none() {
-            return block("no proposed price to measure quote drift from");
+        if let Some(b) = self.precheck(intent, &inp, last) {
+            return b;
         }
         let Some(inst) = inp.instrument.as_ref() else {
             return block("instrument not in the master");
@@ -284,6 +303,7 @@ mod tests {
     }
 
     /// Context with knobs the tests turn.
+    #[allow(clippy::struct_excessive_bools)]
     struct Ctx {
         held: Vec<Position>,
         killed: bool,
