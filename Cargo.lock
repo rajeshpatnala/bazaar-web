@@ -472,6 +472,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "clap",
+ "rust_decimal",
  "serde_json",
  "sqlx",
  "tempfile",
