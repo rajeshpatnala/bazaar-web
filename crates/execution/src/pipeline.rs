@@ -568,13 +568,20 @@ pub(crate) mod fakes {
     pub(crate) struct MemOrders(
         pub Mutex<HashMap<u128, (u32, String)>>,
         pub Mutex<Option<String>>,
+        /// Creation time (ns, from the insert's audit timestamp), like the real store's `created_ns`.
+        pub Mutex<HashMap<u128, i64>>,
     );
     impl OrderRepo for MemOrders {
-        async fn insert(&self, o: OrderRecord, _: AuditDraft, _: ChainFn) -> Result<(), RepoError> {
+        async fn insert(&self, o: OrderRecord, a: AuditDraft, _: ChainFn) -> Result<(), RepoError> {
             let mut m = self.0.lock().unwrap();
             if m.contains_key(&o.intent_id) {
                 return Err(RepoError::Conflict);
             }
+            let ns = chrono::DateTime::parse_from_rfc3339(&a.ts_ist_rfc3339)
+                .ok()
+                .and_then(|d| d.timestamp_nanos_opt())
+                .unwrap_or(0);
+            self.2.lock().unwrap().insert(o.intent_id, ns);
             m.insert(o.intent_id, (0, o.state));
             Ok(())
         }
@@ -606,10 +613,40 @@ pub(crate) mod fakes {
             *e = (ver + 1, st);
             Ok(ver + 1)
         }
+        async fn list_in_state(&self, st: &str, limit: u32) -> Result<Vec<OrderRecord>, RepoError> {
+            let m = self.0.lock().unwrap();
+            let mut ids: Vec<u128> = m
+                .iter()
+                .filter(|(_, (_, s))| s == st)
+                .map(|(i, _)| *i)
+                .collect();
+            let created = self.2.lock().unwrap();
+            // Oldest first: creation time, then id (the real store's ORDER BY).
+            ids.sort_unstable_by_key(|i| (created.get(i).copied().unwrap_or(0), *i));
+            if ids.len() > limit as usize {
+                return Err(RepoError::TooLarge);
+            }
+            Ok(ids
+                .into_iter()
+                .map(|i| OrderRecord {
+                    intent_id: i,
+                    version: m[&i].0,
+                    state: m[&i].1.clone(),
+                    payload: String::new(),
+                })
+                .collect())
+        }
     }
 
     #[derive(Default)]
-    pub(crate) struct MemApprovals(pub Mutex<HashMap<u128, ApprovalDecision>>);
+    pub(crate) struct MemApprovals(
+        pub Mutex<HashMap<u128, ApprovalDecision>>,
+        /// Shared order table: when set, `decide_and_advance` has the real repo's state and
+        /// version checks (RISK-131-4, TS-131-1).
+        pub Option<std::sync::Arc<MemOrders>>,
+        /// Inject a failure between the approval row and the order advance (rolls back).
+        pub AtomicBool,
+    );
     impl ApprovalRepo for MemApprovals {
         async fn decide(
             &self,
@@ -618,6 +655,49 @@ pub(crate) mod fakes {
             _: String,
         ) -> Result<ApprovalDecision, RepoError> {
             Ok(*self.0.lock().unwrap().entry(id).or_insert(d))
+        }
+        async fn decide_and_advance(
+            &self,
+            id: u128,
+            d: ApprovalDecision,
+            _: &str,
+            ver: u32,
+            ns: String,
+            _: String,
+            _: AuditDraft,
+            _: ChainFn,
+        ) -> Result<u32, RepoError> {
+            let ok_target = match d {
+                ApprovalDecision::Approve => ["approved"].contains(&ns.as_str()),
+                ApprovalDecision::Decline => {
+                    ["declined", "expired", "blocked"].contains(&ns.as_str())
+                }
+            };
+            if !ok_target {
+                return Err(RepoError::Conflict);
+            }
+            let mut m = self.0.lock().unwrap();
+            if m.contains_key(&id) {
+                return Err(RepoError::Conflict);
+            }
+            let Some(orders) = &self.1 else {
+                // No order table wired: first-wins only (the real store is authoritative).
+                m.insert(id, d);
+                return Ok(ver + 1);
+            };
+            let mut o = orders.0.lock().unwrap();
+            let e = o.get_mut(&id).ok_or(RepoError::Conflict)?;
+            if e.1 != "pending_approval" || e.0 != ver {
+                return Err(RepoError::Conflict);
+            }
+            // Tentative approval row, then the failure point, then the advance: a failure
+            // leaves both tables unchanged (the real repo rolls back the transaction).
+            if self.2.load(SeqCst) {
+                return Err(RepoError::Other);
+            }
+            m.insert(id, d);
+            *e = (ver + 1, ns);
+            Ok(ver + 1)
         }
     }
 
@@ -980,6 +1060,130 @@ mod tests {
         let out = r.pipe.decide(IntentId(1), Approve, "u").await;
         assert!(matches!(out, Outcome::GateBlocked(_)), "{out:?}");
         assert_eq!(ids(&r), Vec::<u128>::new());
+    }
+
+    #[tokio::test]
+    async fn fake_repos_model_list_in_state_and_first_wins_decide_and_advance() {
+        use crate::pipeline::fakes::{MemApprovals, MemOrders};
+        let draft = || bazaar_core::ports::AuditDraft {
+            ts_ist_rfc3339: "2026-11-22T09:15:00+05:30".into(),
+            actor: "t".into(),
+            kind: "k".into(),
+            payload: "{}".into(),
+        };
+        let o = MemOrders::default();
+        let rec = |id| OrderRecord {
+            intent_id: id,
+            version: 0,
+            state: "pending_approval".into(),
+            payload: String::new(),
+        };
+        for id in [2, 1] {
+            o.insert(rec(id), draft(), chain_hash).await.unwrap();
+        }
+        let ids: Vec<u128> = o
+            .list_in_state("pending_approval", 5)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.intent_id)
+            .collect();
+        assert_eq!(ids, vec![1, 2]);
+        assert_eq!(
+            o.list_in_state("pending_approval", 1).await,
+            Err(bazaar_core::ports::RepoError::TooLarge)
+        );
+        let a = MemApprovals::default();
+        let go = |d| {
+            a.decide_and_advance(
+                1,
+                d,
+                "u",
+                0,
+                "approved".into(),
+                "e".into(),
+                draft(),
+                chain_hash,
+            )
+        };
+        assert_eq!(go(Approve).await, Ok(1));
+        assert_eq!(
+            go(Decline).await,
+            Err(bazaar_core::ports::RepoError::Conflict)
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_list_in_state_sorts_by_creation_time_then_id() {
+        use crate::pipeline::fakes::MemOrders;
+        let o = MemOrders::default();
+        for (id, ts) in [(3u128, "09:15"), (1, "09:17"), (2, "09:17"), (4, "09:16")] {
+            let d = bazaar_core::ports::AuditDraft {
+                ts_ist_rfc3339: format!("2026-11-22T{ts}:00+05:30"),
+                actor: "t".into(),
+                kind: "k".into(),
+                payload: "{}".into(),
+            };
+            let r = OrderRecord {
+                intent_id: id,
+                version: 0,
+                state: "pending_approval".into(),
+                payload: String::new(),
+            };
+            o.insert(r, d, chain_hash).await.unwrap();
+        }
+        let ids: Vec<u128> = o
+            .list_in_state("pending_approval", 9)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.intent_id)
+            .collect();
+        assert_eq!(ids, vec![3, 4, 1, 2]);
+    }
+
+    #[tokio::test]
+    async fn fake_decide_and_advance_checks_state_version_target_and_rolls_back() {
+        use crate::pipeline::fakes::{MemApprovals, MemOrders};
+        use bazaar_core::ports::RepoError::{Conflict, Other};
+        let draft = || bazaar_core::ports::AuditDraft {
+            ts_ist_rfc3339: "2026-11-22T09:15:00+05:30".into(),
+            actor: "t".into(),
+            kind: "k".into(),
+            payload: "{}".into(),
+        };
+        let orders = Arc::new(MemOrders::default());
+        for (id, st) in [(1, "pending_approval"), (2, "placed")] {
+            let r = OrderRecord {
+                intent_id: id,
+                version: 0,
+                state: st.into(),
+                payload: String::new(),
+            };
+            orders.insert(r, draft(), chain_hash).await.unwrap();
+        }
+        let a = MemApprovals(
+            std::sync::Mutex::default(),
+            Some(orders.clone()),
+            std::sync::atomic::AtomicBool::default(),
+        );
+        let go = |id, d, v, to: &str| {
+            a.decide_and_advance(id, d, "u", v, to.into(), "e".into(), draft(), chain_hash)
+        };
+        assert_eq!(go(2, Approve, 0, "approved").await, Err(Conflict)); // not pending
+        assert_eq!(go(9, Approve, 0, "approved").await, Err(Conflict)); // missing
+        assert_eq!(go(1, Approve, 3, "approved").await, Err(Conflict)); // stale version
+        assert_eq!(go(1, Approve, 0, "placed").await, Err(Conflict)); // target vs decision
+        a.2.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(go(1, Approve, 0, "approved").await, Err(Other)); // injected failure
+        assert!(a.0.lock().unwrap().is_empty());
+        assert_eq!(
+            orders.get(1).await.unwrap().unwrap().state,
+            "pending_approval"
+        );
+        a.2.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(go(1, Approve, 0, "approved").await, Ok(1));
+        assert_eq!(orders.get(1).await.unwrap().unwrap().state, "approved");
     }
 
     #[test]
