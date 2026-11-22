@@ -447,6 +447,13 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
             return Ok(blocked_outcome(blocked));
         }
         // Order: TTL, fresh-quote re-gate, then ONE atomic decide+advance (audited), then send.
+        // The quote fetch can take seconds: re-read the clock, re-check the TTL with it and use
+        // that time for the decision and audit (RISK-132-2).
+        let now = self.clock.now_ist();
+        if self.queue.is_expired(p, now) {
+            p.track.advance(o, ExecEvent::Expire, now).await?;
+            return Ok(Outcome::Expired);
+        }
         if let Some(stopped) = self
             .decide_step(p, d, ExecEvent::Approve, now, actor)
             .await?
@@ -492,7 +499,8 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
 
     /// The one atomic decision write (approval row, order advance, audit row). `Some(outcome)`
     /// when another decision or state already holds: nothing is sent. A Conflict does not prove
-    /// an Approve exists (RISK-131-5), so the order is re-read and its state decides the outcome.
+    /// an Approve exists (RISK-131-5), so the order is re-read and its state decides the outcome;
+    /// a still-pending order is not decided: it is kept and a retryable `Storage` error returned.
     async fn decide_step(
         &self,
         p: &mut Pending,
@@ -507,17 +515,12 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
             .await
         {
             Ok(()) => Ok(None),
-            Err(RepoError::Conflict) => self.after_conflict(p, now, actor).await.map(Some),
+            Err(RepoError::Conflict) => self.after_conflict(p).await.map(Some),
             Err(_) => Err(ExecError::Storage),
         }
     }
 
-    async fn after_conflict(
-        &self,
-        p: &mut Pending,
-        now: DateTime<Tz>,
-        actor: &str,
-    ) -> Result<Outcome, ExecError> {
+    async fn after_conflict(&self, p: &mut Pending) -> Result<Outcome, ExecError> {
         let rec = self
             .orders
             .get(p.track.id.0)
@@ -525,15 +528,10 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
             .map_err(|_| ExecError::Storage)?
             .ok_or(ExecError::Storage)?;
         if rec.state == OrderState::PendingApproval.as_str() {
-            if rec.version != p.track.version {
-                return Err(ExecError::Storage);
-            }
-            // A decision row without an advance cannot happen through the atomic write; if it is
-            // ever seen the order is declined (fail closed) and nothing is sent.
-            p.track
-                .advance_as(&*self.orders, ExecEvent::Decline, now, actor)
-                .await?;
-            return Ok(Outcome::AlreadyDecided(Box::new(Outcome::Declined)));
+            // Still pending: a lost write race (busy/snapshot also maps to Conflict), not a
+            // decision. Nothing is decided or declined; the intent stays queued and the caller
+            // may retry (CR-132-1, RISK-132-3).
+            return Err(ExecError::Storage);
         }
         let prior = match rec.state.as_str() {
             "declined" => Outcome::Declined,
@@ -660,16 +658,16 @@ pub(crate) mod fakes {
     }
 
     #[derive(Default)]
-    pub(crate) struct MemApprovals(
-        pub Mutex<HashMap<u128, ApprovalDecision>>,
+    pub(crate) struct MemApprovals {
+        pub rows: Mutex<HashMap<u128, ApprovalDecision>>,
         /// Shared order table: when set, `decide_and_advance` has the real repo's state and
         /// version checks (RISK-131-4, TS-131-1).
-        pub Option<std::sync::Arc<MemOrders>>,
+        pub orders: Option<std::sync::Arc<MemOrders>>,
         /// Inject a failure between the approval row and the order advance (rolls back).
-        pub AtomicBool,
+        pub fail_between: AtomicBool,
         /// Every committed decision: (approval actor, audit actor).
-        pub Mutex<Vec<(String, String)>>,
-    );
+        pub actors: Mutex<Vec<(String, String)>>,
+    }
     impl ApprovalRepo for MemApprovals {
         async fn decide_and_advance(
             &self,
@@ -691,11 +689,11 @@ pub(crate) mod fakes {
             if !ok_target {
                 return Err(RepoError::Conflict);
             }
-            let mut m = self.0.lock().unwrap();
+            let mut m = self.rows.lock().unwrap();
             if m.contains_key(&id) {
                 return Err(RepoError::Conflict);
             }
-            let Some(orders) = &self.1 else {
+            let Some(orders) = &self.orders else {
                 // No order table wired: first-wins only (the real store is authoritative).
                 m.insert(id, d);
                 return Ok(ver + 1);
@@ -707,19 +705,30 @@ pub(crate) mod fakes {
             }
             // Tentative approval row, then the failure point, then the advance: a failure
             // leaves both tables unchanged (the real repo rolls back the transaction).
-            if self.2.load(SeqCst) {
+            if self.fail_between.load(SeqCst) {
                 return Err(RepoError::Other);
             }
             m.insert(id, d);
-            self.3.lock().unwrap().push((actor.to_owned(), au.actor));
+            self.actors
+                .lock()
+                .unwrap()
+                .push((actor.to_owned(), au.actor));
             *e = (ver + 1, ns);
             Ok(ver + 1)
         }
     }
 
-    pub(crate) struct Quotes(pub AtomicBool, pub AtomicBool);
+    /// (fail, hang, clock moved on by this many seconds while the quote is fetched).
+    pub(crate) struct Quotes(
+        pub AtomicBool,
+        pub AtomicBool,
+        pub Mutex<Option<(Arc<Tick>, i64)>>,
+    );
     impl QuoteSource for Quotes {
         async fn quote(&self, _: &str) -> Result<QuoteSnapshot, SourceError> {
+            if let Some((clock, secs)) = &*self.2.lock().unwrap() {
+                *clock.0.lock().unwrap() += chrono::Duration::seconds(*secs);
+            }
             if self.1.load(SeqCst) {
                 std::future::pending::<()>().await;
             }
@@ -813,11 +822,15 @@ pub(crate) mod fakes {
             thread: Mutex::new(None),
         });
         let orders = Arc::new(MemOrders::default());
-        approvals.1 = Some(orders.clone());
+        approvals.orders = Some(orders.clone());
         let pipe = Pipeline::new(
             exec,
             gate.clone(),
-            Quotes(AtomicBool::new(false), AtomicBool::new(false)),
+            Quotes(
+                AtomicBool::new(false),
+                AtomicBool::new(false),
+                Mutex::new(None),
+            ),
             orders.clone(),
             approvals,
             // Struct literal on purpose: the 150 ms timeout is below the loader's 1..=30 s range.
@@ -1179,12 +1192,10 @@ mod tests {
             };
             orders.insert(r, draft(), chain_hash).await.unwrap();
         }
-        let a = MemApprovals(
-            std::sync::Mutex::default(),
-            Some(orders.clone()),
-            std::sync::atomic::AtomicBool::default(),
-            std::sync::Mutex::default(),
-        );
+        let a = MemApprovals {
+            orders: Some(orders.clone()),
+            ..Default::default()
+        };
         let go = |id, d, v, to: &str| {
             a.decide_and_advance(id, d, "u", v, to.into(), "e".into(), draft(), chain_hash)
         };
@@ -1192,14 +1203,16 @@ mod tests {
         assert_eq!(go(9, Approve, 0, "approved").await, Err(Conflict)); // missing
         assert_eq!(go(1, Approve, 3, "approved").await, Err(Conflict)); // stale version
         assert_eq!(go(1, Approve, 0, "placed").await, Err(Conflict)); // target vs decision
-        a.2.store(true, std::sync::atomic::Ordering::SeqCst);
+        a.fail_between
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         assert_eq!(go(1, Approve, 0, "approved").await, Err(Other)); // injected failure
-        assert!(a.0.lock().unwrap().is_empty());
+        assert!(a.rows.lock().unwrap().is_empty());
         assert_eq!(
             orders.get(1).await.unwrap().unwrap().state,
             "pending_approval"
         );
-        a.2.store(false, std::sync::atomic::Ordering::SeqCst);
+        a.fail_between
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         assert_eq!(go(1, Approve, 0, "approved").await, Ok(1));
         assert_eq!(orders.get(1).await.unwrap().unwrap().state, "approved");
     }
@@ -1243,30 +1256,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decline_against_stored_approve_finishes_the_order_declined() {
-        let seeded = MemApprovals::default();
-        seeded.0.lock().unwrap().insert(1, Approve);
-        let mut r = rig_with(10, 0, seeded).await;
-        queued(&mut r, 1, false).await;
-        let out = r.pipe.decide(IntentId(1), Decline, "u").await;
-        assert!(matches!(out, Outcome::AlreadyDecided(_)), "{out:?}");
-        assert_eq!(r.orders.0.lock().unwrap()[&1].1, "declined");
-        assert_eq!(ids(&r), Vec::<u128>::new());
-    }
-
-    #[tokio::test]
-    async fn stored_decline_beats_a_later_approve_and_nothing_is_sent() {
-        let seeded = MemApprovals::default();
-        seeded.0.lock().unwrap().insert(1, Decline);
-        let mut r = rig_with(10, 0, seeded).await;
-        queued(&mut r, 1, false).await;
-        let out = r.pipe.decide(IntentId(1), Approve, "u").await;
-        assert_eq!(out, Outcome::AlreadyDecided(Box::new(Outcome::Declined)));
-        assert_eq!(r.orders.0.lock().unwrap()[&1].1, "declined");
-        assert_eq!(ids(&r), Vec::<u128>::new());
-    }
-
-    #[tokio::test]
     async fn fill_write_failure_after_send_is_reported_as_placed_unrecorded() {
         let mut r = rig(10, 0).await;
         queued(&mut r, 1, false).await;
@@ -1284,19 +1273,19 @@ mod tests {
         r.pipe
             .queue
             .repo()
-            .2
+            .fail_between
             .store(true, std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
             r.pipe.decide(IntentId(1), Approve, "u").await,
             Outcome::Error(ExecError::Storage)
         );
-        assert!(r.pipe.queue.repo().0.lock().unwrap().is_empty());
+        assert!(r.pipe.queue.repo().rows.lock().unwrap().is_empty());
         assert_eq!(r.orders.0.lock().unwrap()[&1].1, "pending_approval");
         assert_eq!(ids(&r), Vec::<u128>::new());
         r.pipe
             .queue
             .repo()
-            .2
+            .fail_between
             .store(false, std::sync::atomic::Ordering::SeqCst);
         assert!(matches!(
             r.pipe.decide(IntentId(1), Approve, "u").await,
@@ -1315,7 +1304,7 @@ mod tests {
             r.pipe.decide(IntentId(1), Approve, "u").await,
             Outcome::GateBlocked(_)
         ));
-        assert!(r.pipe.queue.repo().0.lock().unwrap().is_empty());
+        assert!(r.pipe.queue.repo().rows.lock().unwrap().is_empty());
         // Past the TTL: Expired, no approval row, nothing sent.
         *r.gate.verdict.lock().unwrap() = GateOutcome::Pass;
         *r.clock.0.lock().unwrap() += chrono::Duration::seconds(300);
@@ -1323,7 +1312,7 @@ mod tests {
             r.pipe.decide(IntentId(2), Approve, "u").await,
             Outcome::Expired
         );
-        assert!(r.pipe.queue.repo().0.lock().unwrap().is_empty());
+        assert!(r.pipe.queue.repo().rows.lock().unwrap().is_empty());
         assert_eq!(ids(&r), Vec::<u128>::new());
     }
 
@@ -1335,7 +1324,7 @@ mod tests {
         r.orders.0.lock().unwrap().get_mut(&1).unwrap().1 = "expired".into();
         let out = r.pipe.decide(IntentId(1), Approve, "u").await;
         assert_eq!(out, Outcome::AlreadyDecided(Box::new(Outcome::Expired)));
-        assert!(r.pipe.queue.repo().0.lock().unwrap().is_empty());
+        assert!(r.pipe.queue.repo().rows.lock().unwrap().is_empty());
         assert_eq!(r.orders.0.lock().unwrap()[&1].1, "expired");
         assert_eq!(ids(&r), Vec::<u128>::new());
     }
@@ -1349,22 +1338,48 @@ mod tests {
             Outcome::Placed(_)
         ));
         assert_eq!(
-            *r.pipe.queue.repo().3.lock().unwrap(),
+            *r.pipe.queue.repo().actors.lock().unwrap(),
             vec![("alice".to_owned(), "alice".to_owned())]
         );
     }
 
     #[tokio::test]
-    async fn a_conflict_with_an_unmoved_order_declines_and_never_sends() {
-        // A decision row exists but the order is still pending (cannot happen through the atomic
-        // write): the Conflict does not prove an Approve, the order is re-read and declined.
+    async fn a_lost_race_conflict_keeps_the_order_pending_and_a_retry_succeeds() {
+        // Conflict with the order still pending at the same version (a lost write race, or a
+        // stray decision row): nothing is declined, the intent stays queued (CR-132-1).
         let seeded = MemApprovals::default();
-        seeded.0.lock().unwrap().insert(1, Approve);
+        seeded.rows.lock().unwrap().insert(1, Approve);
         let mut r = rig_with(10, 0, seeded).await;
         queued(&mut r, 1, false).await;
+        // A Decline click is not reported as "already decided" either.
+        let out = r.pipe.decide(IntentId(1), Decline, "u").await;
+        assert_eq!(out, Outcome::Error(ExecError::Storage));
         let out = r.pipe.decide(IntentId(1), Approve, "u").await;
-        assert_eq!(out, Outcome::AlreadyDecided(Box::new(Outcome::Declined)));
-        assert_eq!(r.orders.0.lock().unwrap()[&1].1, "declined");
+        assert_eq!(out, Outcome::Error(ExecError::Storage));
+        assert_eq!(r.orders.0.lock().unwrap()[&1].1, "pending_approval");
+        assert_eq!(ids(&r), Vec::<u128>::new());
+        // The race clears: a retried Approve goes through.
+        r.pipe.queue.repo().rows.lock().unwrap().clear();
+        assert!(matches!(
+            r.pipe.decide(IntentId(1), Approve, "u").await,
+            Outcome::Placed(_)
+        ));
+        assert_eq!(ids(&r), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn ttl_is_rechecked_after_a_slow_quote_and_nothing_is_decided_or_sent() {
+        let mut r = rig(10, 0).await;
+        queued(&mut r, 1, false).await;
+        // Still inside the TTL when decide starts; the quote fetch takes the clock past it.
+        *r.clock.0.lock().unwrap() += chrono::Duration::seconds(299);
+        *r.pipe.quotes.2.lock().unwrap() = Some((r.clock.clone(), 2));
+        assert_eq!(
+            r.pipe.decide(IntentId(1), Approve, "u").await,
+            Outcome::Expired
+        );
+        assert!(r.pipe.queue.repo().rows.lock().unwrap().is_empty());
+        assert_eq!(r.orders.0.lock().unwrap()[&1].1, "expired");
         assert_eq!(ids(&r), Vec::<u128>::new());
     }
 

@@ -205,7 +205,7 @@ impl<A: ApprovalRepo> ApprovalQueue<A> {
         now: DateTime<Tz>,
         actor: &str,
     ) -> Result<(), RepoError> {
-        let next = track.state.apply(event).map_err(|_| RepoError::Other)?;
+        let next = track.state.apply(event).map_err(|_| RepoError::Conflict)?;
         let audit = bazaar_core::ports::AuditDraft {
             ts_ist_rfc3339: now.to_rfc3339(),
             actor: actor.to_owned(),

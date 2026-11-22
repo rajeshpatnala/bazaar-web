@@ -421,6 +421,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn decide_and_advance_stores_the_actor_on_the_approval_row_and_the_audit_row() {
+        let s = seeded(7).await;
+        let mut draft = test_draft("approval");
+        draft.actor = "alice".into();
+        ApprovalRepo::decide_and_advance(
+            &s,
+            7,
+            ApprovalDecision::Approve,
+            "alice",
+            0,
+            "approved".into(),
+            "order.approve".into(),
+            draft,
+            test_chain,
+        )
+        .await
+        .unwrap();
+        let approval: String = sqlx::query_scalar("SELECT actor FROM approvals")
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+        let audit: String =
+            sqlx::query_scalar("SELECT actor FROM audit_log ORDER BY seq DESC LIMIT 1")
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
+        assert_eq!((approval.as_str(), audit.as_str()), ("alice", "alice"));
+    }
+
+    #[tokio::test]
     async fn decide_and_advance_refuses_terminal_and_approved_orders_and_writes_nothing() {
         for state in ["approved", "declined", "expired", "blocked", "placed"] {
             let s = seeded(7).await;
