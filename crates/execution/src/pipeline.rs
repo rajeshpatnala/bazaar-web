@@ -324,6 +324,14 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
         }
     }
 
+    /// Re-run the gate with a fresh quote; no quote (or a late one) blocks.
+    async fn regate(&self, intent: &OrderIntent) -> GateOutcome {
+        match self.bounded(self.quotes.quote(&intent.symbol)).await {
+            Some(Ok(q)) => self.run_gate(intent, Some(q)).await,
+            _ => GateOutcome::Block("no fresh quote".into()),
+        }
+    }
+
     /// `None` when `f` did not finish within the I/O timeout.
     async fn bounded<T>(&self, f: impl Future<Output = T>) -> Option<T> {
         tokio::time::timeout(self.io_timeout, f).await.ok()
@@ -341,11 +349,7 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
             intent_id: id.0,
             version: 0,
             state: OrderState::Proposed.as_str().into(),
-            payload: serde_json::json!({
-                "symbol": intent.symbol, "qty": intent.qty, "reduce_only": intent.reduce_only,
-                "product": intent.product.as_str(),
-            })
-            .to_string(),
+            payload: intent.to_payload(),
         };
         let audit = bazaar_core::ports::AuditDraft {
             ts_ist_rfc3339: now.to_rfc3339(),
@@ -438,10 +442,7 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
             return Ok(stopped.unwrap_or(Outcome::Declined));
         }
         // Re-gate with a fresh quote; no quote means no approval-time gate, so it blocks.
-        let blocked = match self.bounded(self.quotes.quote(&p.intent.symbol)).await {
-            Some(Ok(q)) => self.run_gate(&p.intent, Some(q)).await,
-            _ => GateOutcome::Block("no fresh quote".into()),
-        };
+        let blocked = self.regate(&p.intent).await;
         if blocked != GateOutcome::Pass {
             p.track.advance(o, ExecEvent::GateBlocked, now).await?;
             return Ok(blocked_outcome(blocked));
@@ -460,8 +461,22 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
         {
             return Ok(stopped);
         }
+        self.send_approved(p, now, "pipeline", None).await
+    }
+
+    /// Pre-send guards, then `Send` and the executor call, for an order already `Approved`.
+    async fn send_approved(
+        &self,
+        p: &mut Pending,
+        now: DateTime<Tz>,
+        actor: &str,
+        reason: Option<&str>,
+    ) -> Result<Outcome, ExecError> {
+        let o = &*self.orders;
         if let Err(e) = self.exec.peek(&p.intent, now).await {
-            p.track.advance(o, ExecEvent::GuardBlocked, now).await?;
+            p.track
+                .advance_why(o, ExecEvent::GuardBlocked, now, actor, reason)
+                .await?;
             return Ok(Outcome::GuardBlocked(e));
         }
         p.track.advance(o, ExecEvent::Send, now).await?;
@@ -541,6 +556,183 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
         Ok(Outcome::AlreadyDecided(Box::new(prior)))
     }
 
+    /// Restart reload; call exactly once before [`Self::spawn`], and abort startup on `Err`
+    /// (the queue is emptied on a failure part way, but nothing may be served). Order matters
+    /// (fail closed):
+    /// 1. stray decision rows (a pending order that already has a decision) are expired, audited,
+    ///    and never re-presented; an error here aborts the reload;
+    /// 2. `pending_approval` orders are re-queued (queue time = the intent's creation time, so a
+    ///    reloaded intent never lives longer than its TTL allows); past-TTL or undecodable ones
+    ///    are expired, audited with the reason;
+    /// 3. `approved` but never sent orders are resumed only if TTL, a fresh-quote re-gate and the
+    ///    guards all pass; otherwise they end `blocked`, audited with the reason, nothing sent;
+    /// 4. `sent`, `partially_filled` and `unknown` orders are never touched or re-sent (the
+    ///    reconciler owns them); they are counted and logged, and a failed list is an error.
+    ///
+    /// Ids already queued or finished are skipped, so a repeat call changes nothing.
+    ///
+    /// # Errors
+    /// `ExecError::Storage` when a list, the stray-row guard or an audited write fails or a list
+    /// is too large; nothing is reported as all-clear.
+    pub async fn reload(&mut self) -> Result<ReloadReport, ExecError> {
+        let out = self.reload_inner().await;
+        if out.is_err() {
+            self.queue.clear_pending();
+        }
+        out
+    }
+
+    async fn reload_inner(&mut self) -> Result<ReloadReport, ExecError> {
+        const BY: &str = "system";
+        let now = self.clock.now_ist();
+        let strays = self
+            .queue
+            .reconcile_strays(now)
+            .await
+            .map_err(|_| ExecError::Storage)?
+            .len();
+        let mut rep = ReloadReport {
+            strays,
+            ..ReloadReport::default()
+        };
+        let pending = self
+            .orders
+            .list_in_state(OrderState::PendingApproval.as_str(), RELOAD_LIMIT)
+            .await
+            .map_err(|_| ExecError::Storage)?;
+        let approved = self
+            .orders
+            .list_in_state(OrderState::Approved.as_str(), RELOAD_LIMIT)
+            .await
+            .map_err(|_| ExecError::Storage)?;
+        for r in pending {
+            let id = IntentId(r.intent_id);
+            if self.queue.knows(id) {
+                continue;
+            }
+            let mut track = track_of(&r, OrderState::PendingApproval);
+            let reason = match OrderIntent::from_payload(id, &r.payload, now) {
+                Some(intent) if !self.queue.ttl_passed(intent.created_at, now) => {
+                    self.queue.enqueue(Pending {
+                        queued_at: intent.created_at,
+                        intent,
+                        track,
+                    });
+                    rep.requeued += 1;
+                    continue;
+                }
+                Some(_) => "restart_reload: past approval TTL",
+                None => "restart_reload: stored order not decodable",
+            };
+            track
+                .advance_why(&*self.orders, ExecEvent::Expire, now, BY, Some(reason))
+                .await?;
+            self.queue.finish(id, Outcome::Expired);
+            rep.expired += 1;
+        }
+        for r in approved {
+            let id = IntentId(r.intent_id);
+            if self.queue.knows(id) {
+                continue;
+            }
+            let mut track = track_of(&r, OrderState::Approved);
+            let out = if let Some(intent) = OrderIntent::from_payload(id, &r.payload, now) {
+                let mut p = Pending {
+                    queued_at: intent.created_at,
+                    intent,
+                    track,
+                };
+                self.resume_approved(&mut p)
+                    .await
+                    .unwrap_or_else(Outcome::Error)
+            } else {
+                let why = "restart_reload: stored order not decodable";
+                track
+                    .advance_why(&*self.orders, ExecEvent::GuardBlocked, now, BY, Some(why))
+                    .await?;
+                Outcome::GateBlocked("stored order not decodable".into())
+            };
+            match &out {
+                Outcome::Placed(_) | Outcome::PlacedUnrecorded(_) => rep.resumed += 1,
+                // The order may still be `approved` in the store: not counted as blocked.
+                Outcome::Error(e) => {
+                    tracing::error!(intent = %id, error = %e, "reload: approved order not resolved");
+                    rep.errors += 1;
+                }
+                _ => rep.blocked += 1,
+            }
+            self.queue.finish(id, out);
+        }
+        rep.in_flight = self.count_in_flight().await?;
+        Ok(rep)
+    }
+
+    /// Count sent, partially filled and unknown orders (never re-sent); a failed list is an error.
+    async fn count_in_flight(&self) -> Result<usize, ExecError> {
+        let mut total = 0;
+        for st in [
+            OrderState::Sent,
+            OrderState::PartiallyFilled,
+            OrderState::Unknown,
+        ] {
+            let n = self
+                .orders
+                .list_in_state(st.as_str(), RELOAD_LIMIT)
+                .await
+                .map_err(|_| ExecError::Storage)?
+                .len();
+            if n > 0 {
+                tracing::warn!(
+                    state = st.as_str(),
+                    n,
+                    "reload: in-flight orders left to reconciliation, never re-sent"
+                );
+            }
+            total += n;
+        }
+        Ok(total)
+    }
+
+    /// An `approved`-but-unsent order after a restart: TTL (measured from the intent's creation,
+    /// stricter than the live path, which measures from the queue time), then a fresh-quote
+    /// re-gate, then the same guards and send as a live approval. A failure ends it `blocked`,
+    /// audited with the reason (actor "system"), and sends nothing. The clock is re-read after
+    /// the quote.
+    async fn resume_approved(&self, p: &mut Pending) -> Result<Outcome, ExecError> {
+        const BY: &str = "system";
+        let o = &*self.orders;
+        let expired = "approval expired before restart resume";
+        let now = self.clock.now_ist();
+        if self.queue.is_expired(p, now) {
+            let why = format!("restart_reload: {expired}");
+            p.track
+                .advance_why(o, ExecEvent::GuardBlocked, now, BY, Some(&why))
+                .await?;
+            return Ok(Outcome::GateBlocked(expired.into()));
+        }
+        let gate = self.regate(&p.intent).await;
+        let now = self.clock.now_ist();
+        if gate != GateOutcome::Pass {
+            let why = match &gate {
+                GateOutcome::Block(r) => format!("restart_reload: gate blocked: {r}"),
+                _ => "restart_reload: quote drifted".to_owned(),
+            };
+            p.track
+                .advance_why(o, ExecEvent::GuardBlocked, now, BY, Some(&why))
+                .await?;
+            return Ok(blocked_outcome(gate));
+        }
+        if self.queue.is_expired(p, now) {
+            let why = format!("restart_reload: {expired}");
+            p.track
+                .advance_why(o, ExecEvent::GuardBlocked, now, BY, Some(&why))
+                .await?;
+            return Ok(Outcome::GateBlocked(expired.into()));
+        }
+        self.send_approved(p, now, BY, Some("restart_reload: guard refused the send"))
+            .await
+    }
+
     /// Expire every queued intent past its TTL; returns how many.
     pub async fn expire_stale(&mut self) -> usize {
         let now = self.clock.now_ist();
@@ -556,6 +748,36 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
             }
         }
         n
+    }
+}
+
+/// Most orders per state a reload will read; more is an error, never a silent truncation.
+const RELOAD_LIMIT: u32 = 1000;
+
+/// What a restart reload did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReloadReport {
+    /// Stray decision rows expired by the startup guard.
+    pub strays: usize,
+    /// Pending intents back in the queue.
+    pub requeued: usize,
+    /// Pending intents expired (past TTL or undecodable).
+    pub expired: usize,
+    /// Approved-but-unsent orders sent after a fresh TTL check, re-gate and guards.
+    pub resumed: usize,
+    /// Approved-but-unsent orders ended `blocked`, nothing sent.
+    pub blocked: usize,
+    /// Approved orders whose resolution failed (storage); they may still be `approved`.
+    pub errors: usize,
+    /// Sent, partially filled or unknown orders left alone.
+    pub in_flight: usize,
+}
+
+fn track_of(r: &OrderRecord, state: OrderState) -> Track {
+    Track {
+        id: IntentId(r.intent_id),
+        version: r.version,
+        state,
     }
 }
 
@@ -589,6 +811,10 @@ pub(crate) mod fakes {
         pub Mutex<Option<String>>,
         /// Creation time (ns, from the insert's audit timestamp), like the real store's `created_ns`.
         pub Mutex<HashMap<u128, i64>>,
+        /// Stored payload per order (the intent JSON the reload decodes).
+        pub Mutex<HashMap<u128, String>>,
+        /// Every `advance`: (order id, audit actor, audit payload).
+        pub Mutex<Vec<(u128, String, String)>>,
     );
     impl OrderRepo for MemOrders {
         async fn insert(&self, o: OrderRecord, a: AuditDraft, _: ChainFn) -> Result<(), RepoError> {
@@ -601,6 +827,7 @@ pub(crate) mod fakes {
                 .and_then(|d| d.timestamp_nanos_opt())
                 .unwrap_or(0);
             self.2.lock().unwrap().insert(o.intent_id, ns);
+            self.3.lock().unwrap().insert(o.intent_id, o.payload);
             m.insert(o.intent_id, (0, o.state));
             Ok(())
         }
@@ -609,7 +836,7 @@ pub(crate) mod fakes {
                 intent_id: id,
                 version: *v,
                 state: s.clone(),
-                payload: String::new(),
+                payload: self.3.lock().unwrap().get(&id).cloned().unwrap_or_default(),
             }))
         }
         async fn advance(
@@ -618,7 +845,7 @@ pub(crate) mod fakes {
             ver: u32,
             st: String,
             _: String,
-            _: AuditDraft,
+            au: AuditDraft,
             _: ChainFn,
         ) -> Result<u32, RepoError> {
             if self.1.lock().unwrap().as_deref() == Some(st.as_str()) {
@@ -630,6 +857,7 @@ pub(crate) mod fakes {
                 return Err(RepoError::Conflict);
             }
             *e = (ver + 1, st);
+            self.4.lock().unwrap().push((id, au.actor, au.payload));
             Ok(ver + 1)
         }
         async fn list_in_state(&self, st: &str, limit: u32) -> Result<Vec<OrderRecord>, RepoError> {
@@ -651,7 +879,7 @@ pub(crate) mod fakes {
                     intent_id: i,
                     version: m[&i].0,
                     state: m[&i].1.clone(),
-                    payload: String::new(),
+                    payload: self.3.lock().unwrap().get(&i).cloned().unwrap_or_default(),
                 })
                 .collect())
         }
@@ -715,6 +943,29 @@ pub(crate) mod fakes {
                 .push((actor.to_owned(), au.actor));
             *e = (ver + 1, ns);
             Ok(ver + 1)
+        }
+
+        async fn reconcile_stray_decisions(
+            &self,
+            _: &str,
+            _: ChainFn,
+        ) -> Result<Vec<u128>, RepoError> {
+            let rows = self.rows.lock().unwrap();
+            let Some(orders) = &self.orders else {
+                return Ok(Vec::new());
+            };
+            let mut o = orders.0.lock().unwrap();
+            let mut ids: Vec<u128> = o
+                .iter()
+                .filter(|(i, (_, st))| st == "pending_approval" && rows.contains_key(i))
+                .map(|(i, _)| *i)
+                .collect();
+            ids.sort_unstable();
+            for i in &ids {
+                let e = o.get_mut(i).unwrap();
+                *e = (e.0 + 1, "expired".into());
+            }
+            Ok(ids)
         }
     }
 
@@ -863,6 +1114,268 @@ mod tests {
     }
     async fn queued(r: &mut Rig, id: u128, reduce: bool) {
         assert_eq!(r.pipe.submit(intent(id, reduce)).await, Outcome::Queued);
+    }
+
+    /// Seed an order row as a restart would find it (the in-memory queue is empty).
+    async fn seed(r: &Rig, id: u128, state: &str, payload: String) {
+        r.orders
+            .insert(
+                OrderRecord {
+                    intent_id: id,
+                    version: 0,
+                    state: state.into(),
+                    payload,
+                },
+                bazaar_core::ports::AuditDraft {
+                    ts_ist_rfc3339: start().to_rfc3339(),
+                    actor: "t".into(),
+                    kind: "seed".into(),
+                    payload: "{}".into(),
+                },
+                chain_hash,
+            )
+            .await
+            .unwrap();
+    }
+    /// Audit rows the fake recorded for `id`: (actor, payload).
+    fn audits(r: &Rig, id: u128) -> Vec<(String, String)> {
+        r.orders
+            .4
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|a| a.0 == id)
+            .map(|a| (a.1.clone(), a.2.clone()))
+            .collect()
+    }
+    fn state_of(r: &Rig, id: u128) -> String {
+        r.orders.0.lock().unwrap()[&id].1.clone()
+    }
+
+    #[tokio::test]
+    async fn submit_stores_the_full_intent_and_reload_requeues_it_with_its_original_time() {
+        let mut r = rig(10, 0).await;
+        queued(&mut r, 1, false).await;
+        let stored = r.orders.get(1).await.unwrap().unwrap().payload;
+        assert_eq!(
+            OrderIntent::from_payload(IntentId(1), &stored, start()),
+            Some(intent(1, false))
+        );
+        // Restart: a fresh pipeline over the same stores finds it pending.
+        seed(&r, 2, "pending_approval", intent(2, false).to_payload()).await;
+        *r.clock.0.lock().unwrap() += chrono::Duration::seconds(100);
+        let rep = r.pipe.reload().await.unwrap();
+        assert_eq!((rep.requeued, rep.expired), (1, 0));
+        // A repeat reload changes nothing: ids already queued are skipped.
+        let again = r.pipe.reload().await.unwrap();
+        assert_eq!((again.requeued, again.expired), (0, 0));
+        // Original queue time: 100 s already used, so 200 s more is past the 300 s TTL.
+        *r.clock.0.lock().unwrap() += chrono::Duration::seconds(200);
+        assert_eq!(r.pipe.expire_stale().await, 2);
+        assert_eq!(state_of(&r, 2), "expired");
+    }
+
+    #[tokio::test]
+    async fn reload_requeued_intent_is_approved_with_a_fresh_regate() {
+        let mut r = rig(10, 0).await;
+        seed(&r, 5, "pending_approval", intent(5, false).to_payload()).await;
+        // Reload needs the order at version 0 and the pending state: seeded as such.
+        assert_eq!(r.pipe.reload().await.unwrap().requeued, 1);
+        *r.gate.verdict.lock().unwrap() = GateOutcome::Block("moved".into());
+        assert!(matches!(
+            r.pipe.decide(IntentId(5), Approve, "u").await,
+            Outcome::GateBlocked(_)
+        ));
+        assert_eq!(ids(&r), Vec::<u128>::new());
+        assert_eq!(state_of(&r, 5), "blocked");
+    }
+
+    #[tokio::test]
+    async fn reload_expires_past_ttl_and_undecodable_pending_rows_audited() {
+        let mut r = rig(10, 0).await;
+        seed(&r, 1, "pending_approval", intent(1, false).to_payload()).await;
+        seed(&r, 2, "pending_approval", String::new()).await;
+        seed(
+            &r,
+            3,
+            "pending_approval",
+            r#"{"symbol":"ABC","qty":2}"#.into(),
+        )
+        .await;
+        *r.clock.0.lock().unwrap() += chrono::Duration::seconds(300);
+        let rep = r.pipe.reload().await.unwrap();
+        assert_eq!((rep.requeued, rep.expired), (0, 3));
+        for id in [1, 2, 3] {
+            assert_eq!(state_of(&r, id), "expired");
+        }
+        assert_eq!(
+            r.pipe.decide(IntentId(2), Approve, "u").await,
+            Outcome::AlreadyDecided(Box::new(Outcome::Expired))
+        );
+        assert_eq!(ids(&r), Vec::<u128>::new());
+        let a = audits(&r, 1);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].0, "system");
+        assert!(a[0].1.contains("restart_reload: past approval TTL"));
+        assert!(audits(&r, 2)[0].1.contains("not decodable"));
+        // An undecodable row expires even inside the TTL.
+        seed(&r, 4, "pending_approval", "garbage".into()).await;
+        assert_eq!(r.pipe.reload().await.unwrap().expired, 1);
+        assert_eq!(state_of(&r, 4), "expired");
+    }
+
+    #[tokio::test]
+    async fn reload_never_re_presents_an_order_with_a_stray_decision_row() {
+        let seeded = MemApprovals::default();
+        seeded.rows.lock().unwrap().insert(1, Approve);
+        let mut r = rig_with(10, 0, seeded).await;
+        seed(&r, 1, "pending_approval", intent(1, false).to_payload()).await;
+        let rep = r.pipe.reload().await.unwrap();
+        assert_eq!((rep.strays, rep.requeued), (1, 0));
+        assert_eq!(state_of(&r, 1), "expired");
+        assert_eq!(
+            r.pipe.decide(IntentId(1), Approve, "u").await,
+            Outcome::Error(ExecError::InvalidInput("unknown intent"))
+        );
+        assert_eq!(ids(&r), Vec::<u128>::new());
+    }
+
+    #[tokio::test]
+    async fn reload_resumes_an_approved_unsent_order_only_after_ttl_and_regate_pass() {
+        let mut r = rig(10, 0).await;
+        seed(&r, 1, "approved", intent(1, false).to_payload()).await;
+        let rep = r.pipe.reload().await.unwrap();
+        assert_eq!((rep.resumed, rep.blocked), (1, 0));
+        assert_eq!(ids(&r), vec![1]);
+        assert_eq!(state_of(&r, 1), "filled");
+        // The gate ran (a fresh quote was fetched) before the send.
+        assert!(r.gate.thread.lock().unwrap().is_some());
+        // Finished: a late decide gets the stored outcome and nothing is sent twice.
+        assert!(matches!(
+            r.pipe.decide(IntentId(1), Approve, "u").await,
+            Outcome::AlreadyDecided(_)
+        ));
+        assert_eq!(ids(&r), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn reload_blocks_an_approved_unsent_order_when_gate_ttl_quote_or_guard_fails() {
+        // Gate block.
+        let mut r = rig(10, 0).await;
+        seed(&r, 1, "approved", intent(1, false).to_payload()).await;
+        *r.gate.verdict.lock().unwrap() = GateOutcome::Block("x".into());
+        let rep = r.pipe.reload().await.unwrap();
+        assert_eq!((rep.resumed, rep.blocked), (0, 1));
+        assert_eq!(state_of(&r, 1), "blocked");
+        // No fresh quote.
+        let mut r2 = rig(10, 0).await;
+        seed(&r2, 1, "approved", intent(1, false).to_payload()).await;
+        r2.pipe
+            .quotes
+            .0
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        r2.pipe.reload().await.unwrap();
+        assert_eq!(state_of(&r2, 1), "blocked");
+        // Past the TTL.
+        let mut r3 = rig(10, 0).await;
+        seed(&r3, 1, "approved", intent(1, false).to_payload()).await;
+        *r3.clock.0.lock().unwrap() += chrono::Duration::seconds(300);
+        r3.pipe.reload().await.unwrap();
+        assert_eq!(state_of(&r3, 1), "blocked");
+        // TTL passes during the slow quote.
+        let mut r4 = rig(10, 0).await;
+        seed(&r4, 1, "approved", intent(1, false).to_payload()).await;
+        *r4.clock.0.lock().unwrap() += chrono::Duration::seconds(299);
+        *r4.pipe.quotes.2.lock().unwrap() = Some((r4.clock.clone(), 2));
+        r4.pipe.reload().await.unwrap();
+        assert_eq!(state_of(&r4, 1), "blocked");
+        // Guard refuses (no rate slots).
+        let mut r5 = rig(1, 0).await;
+        queued(&mut r5, 9, false).await;
+        assert!(matches!(
+            r5.pipe.decide(IntentId(9), Approve, "u").await,
+            Outcome::Placed(_)
+        ));
+        seed(&r5, 1, "approved", intent(1, false).to_payload()).await;
+        r5.pipe.reload().await.unwrap();
+        assert_eq!(state_of(&r5, 1), "blocked");
+        // An undecodable approved row is blocked, never sent.
+        let mut r6 = rig(10, 0).await;
+        seed(&r6, 1, "approved", "garbage".into()).await;
+        r6.pipe.reload().await.unwrap();
+        assert_eq!(state_of(&r6, 1), "blocked");
+        // Kill switch engaged.
+        let mut r7 = rig(10, 0).await;
+        seed(&r7, 1, "approved", intent(1, false).to_payload()).await;
+        r7.pipe.exec.engage("a", "r").await.unwrap();
+        r7.pipe.reload().await.unwrap();
+        assert_eq!(state_of(&r7, 1), "blocked");
+        // Reduce-only with no position: the gate refuses.
+        let mut r8 = rig(10, 0).await;
+        seed(&r8, 1, "approved", intent(1, true).to_payload()).await;
+        *r8.gate.verdict.lock().unwrap() = GateOutcome::Block("reduce_only: no position".into());
+        r8.pipe.reload().await.unwrap();
+        assert_eq!(state_of(&r8, 1), "blocked");
+        // Quote drifted.
+        let mut r9 = rig(10, 0).await;
+        seed(&r9, 1, "approved", intent(1, false).to_payload()).await;
+        *r9.gate.verdict.lock().unwrap() = GateOutcome::Drifted {
+            new_risk: Decimal::from(9),
+        };
+        let rep = r9.pipe.reload().await.unwrap();
+        assert_eq!((rep.resumed, rep.blocked), (0, 1));
+        assert_eq!(state_of(&r9, 1), "blocked");
+        for r in [&r, &r2, &r3, &r4, &r6, &r7, &r8, &r9] {
+            assert_eq!(ids(r), Vec::<u128>::new());
+        }
+        assert_eq!(ids(&r5), vec![9]);
+        // Every restart-time block is audited by "system" with its reason.
+        for (rg, why) in [
+            (&r, "gate blocked: x"),
+            (&r2, "restart_reload"),
+            (&r3, "approval expired"),
+            (&r4, "approval expired"),
+            (&r5, "guard refused"),
+            (&r6, "not decodable"),
+            (&r7, "guard refused"),
+            (&r8, "reduce_only: no position"),
+            (&r9, "quote drifted"),
+        ] {
+            let a = audits(rg, 1);
+            assert_eq!(a.len(), 1, "{why}");
+            assert_eq!(a[0].0, "system");
+            assert!(a[0].1.contains(why), "{why}: {}", a[0].1);
+        }
+    }
+
+    #[tokio::test]
+    async fn reload_never_touches_or_resends_sent_partial_or_unknown_orders() {
+        let mut r = rig(10, 0).await;
+        for (id, st) in [(1, "sent"), (2, "partially_filled"), (3, "unknown")] {
+            seed(&r, id, st, intent(id, false).to_payload()).await;
+        }
+        let rep = r.pipe.reload().await.unwrap();
+        assert_eq!(rep.in_flight, 3);
+        assert_eq!(ids(&r), Vec::<u128>::new());
+        assert_eq!(state_of(&r, 1), "sent");
+        assert_eq!(state_of(&r, 2), "partially_filled");
+        assert_eq!(state_of(&r, 3), "unknown");
+    }
+
+    #[tokio::test]
+    async fn reload_with_more_rows_than_the_limit_is_an_error_and_sends_nothing() {
+        let mut r = rig(10, 0).await;
+        seed(&r, 1, "approved", intent(1, false).to_payload()).await;
+        // More approved rows than the reload limit is an error, never a truncation.
+        for id in 10..=(10 + u128::from(RELOAD_LIMIT)) {
+            r.orders
+                .0
+                .lock()
+                .unwrap()
+                .insert(id, (0, "approved".into()));
+        }
+        assert_eq!(r.pipe.reload().await, Err(ExecError::Storage));
+        assert_eq!(ids(&r), Vec::<u128>::new());
     }
 
     #[tokio::test]

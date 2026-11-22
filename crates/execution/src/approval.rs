@@ -70,12 +70,28 @@ impl Track {
         now: DateTime<Tz>,
         actor: &str,
     ) -> Result<(), ExecError> {
+        self.advance_why(orders, event, now, actor, None).await
+    }
+
+    /// Like [`Self::advance_as`], with a `reason` carried in the audit payload (restart reload
+    /// records why it expired or blocked an order).
+    ///
+    /// # Errors
+    /// `ExecError::Storage` for an illegal transition or a failed or stale write.
+    pub async fn advance_why<O: OrderRepo>(
+        &mut self,
+        orders: &O,
+        event: ExecEvent,
+        now: DateTime<Tz>,
+        actor: &str,
+        reason: Option<&str>,
+    ) -> Result<(), ExecError> {
         let next = self.state.apply(event).map_err(|_| ExecError::Storage)?;
         let audit = bazaar_core::ports::AuditDraft {
             ts_ist_rfc3339: now.to_rfc3339(),
             actor: actor.to_owned(),
             kind: event.as_str().into(),
-            payload: serde_json::json!({ "intent": self.id.to_string(), "state": next.as_str(), "actor": actor, "at": now.to_rfc3339() })
+            payload: serde_json::json!({ "intent": self.id.to_string(), "state": next.as_str(), "actor": actor, "at": now.to_rfc3339(), "reason": reason })
                 .to_string(),
         };
         let version = orders
@@ -143,6 +159,35 @@ impl<A: ApprovalRepo> ApprovalQueue<A> {
     #[cfg(test)]
     pub(crate) fn repo(&self) -> &A {
         &self.repo
+    }
+
+    /// Startup guard: expire (audited) every pending order that already has a decision row, so
+    /// it is never re-presented. Returns the ids.
+    ///
+    /// # Errors
+    /// `RepoError` when the repo fails; the caller must not reload on an error.
+    pub(crate) async fn reconcile_strays(&self, now: DateTime<Tz>) -> Result<Vec<u128>, RepoError> {
+        self.repo
+            .reconcile_stray_decisions(&now.to_rfc3339(), chain_hash)
+            .await
+    }
+
+    /// True when `created` (an intent's creation time, the queue time of a reloaded intent) has
+    /// reached the TTL at `now`.
+    #[must_use]
+    pub(crate) fn ttl_passed(&self, created: DateTime<Tz>, now: DateTime<Tz>) -> bool {
+        now - created >= self.ttl
+    }
+
+    /// True when the intent is queued or already finished (reload skips such ids).
+    #[must_use]
+    pub(crate) fn knows(&self, id: IntentId) -> bool {
+        self.pending.contains_key(&id) || self.done.contains_key(&id)
+    }
+
+    /// Drop every queued (not finished) intent; used when a reload fails half way.
+    pub(crate) fn clear_pending(&mut self) {
+        self.pending.clear();
     }
 
     pub fn enqueue(&mut self, p: Pending) {
