@@ -14,7 +14,10 @@ max_daily_loss_pct = "3"
 on_daily_loss = "lockout_entries"
 # F6 keys below: owner-decided 2026-11-19 (.agents/decisions.md): max_open_positions, max_position_value_pct,
 # max_weekly_loss_pct (G19). Every other key in the sections below: source = owner-to-confirm,
-# verified_on = unverified. The file-level verified_on above is deliberately not bumped.
+# verified_on = unverified, EXCEPT [execution] and [execution.paper_slippage_bps], which the owner confirmed
+# on 2026-11-22 (source/verified_on "owner confirmed 2026-11-22"; recorded in comments because the loader
+# refuses unknown keys). The [hard_limits] F10 ceilings stay unconfirmed. The file-level verified_on above is
+# deliberately not bumped.
 max_open_positions = 3                  # G04a, Soft, owner decided 2026-11-19
 max_total_open_risk_pct = "3"           # G04b, Hard; owner-to-confirm, unverified
 max_weekly_loss_pct = "6"               # G19, Hard; owner decided 2026-11-19
@@ -64,19 +67,21 @@ max_approval_ttl_secs = 3600               # F10 ceiling; unverified, owner to c
 max_quote_drift_bps = 500               # F10 ceiling; unverified, owner to confirm; raise only with an ADR
 
 [execution]
+# source = "owner confirmed 2026-11-22", verified_on = "2026-11-22" for every key in this section and
+# [execution.paper_slippage_bps] (F10 defaults, io_timeout_secs = 5, breaker_engages_kill_switch = true).
 paper_starting_cash_inr = "100000"
-approval_ttl_secs = 300                 # F10; unverified, owner to confirm (source and verified_on empty)
-max_quote_drift_bps = 50                # F10; unverified, owner to confirm
-max_orders_per_second = 1               # F10; unverified, owner to confirm; [limits] per-minute and per-day caps always also apply
-kill_allow_reduce_only = true           # F10; unverified, owner to confirm
-kill_switch_release_phrase = "RELEASE KILL SWITCH"   # F10; unverified, owner to confirm the wording
-breaker_engages_kill_switch = false     # F10; unverified, default off
-paper_max_participation = "0.1"         # F10; unverified, owner to confirm
-paper_stale_after_secs = 5              # F10; unverified
-paper_mis_square_off_ist = "15:15"      # F10; unverified, owner to confirm
-io_timeout_secs = 5                     # BZ-205; seconds per quote read, gate run or send; loader accepts 1..=30; source and verified_on empty, unverified, owner to confirm
+approval_ttl_secs = 300                 # F10; owner confirmed 2026-11-22
+max_quote_drift_bps = 50                # F10; owner confirmed 2026-11-22
+max_orders_per_second = 1               # F10; owner confirmed 2026-11-22; [limits] per-minute and per-day caps always also apply
+kill_allow_reduce_only = true           # F10; owner confirmed 2026-11-22
+kill_switch_release_phrase = "RELEASE KILL SWITCH"   # F10; owner confirmed 2026-11-22
+breaker_engages_kill_switch = true      # F10; owner confirmed 2026-11-22 (a breaker trip engages the persisted kill switch)
+paper_max_participation = "0.1"         # F10; owner confirmed 2026-11-22
+paper_stale_after_secs = 5              # F10; owner confirmed 2026-11-22
+paper_mis_square_off_ist = "15:15"      # F10; owner confirmed 2026-11-22
+io_timeout_secs = 5                     # BZ-205; seconds per quote read, gate run or send; loader accepts 1..=30; owner confirmed 2026-11-22
 
-[execution.paper_slippage_bps]          # F10; unverified, owner to confirm; per segment
+[execution.paper_slippage_bps]          # F10; owner confirmed 2026-11-22; per segment
 equity = 5
 equity_derivatives = 5
 currency = 2

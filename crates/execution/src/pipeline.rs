@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bazaar_core::clock::Clock;
+use bazaar_core::config::ExecutionSection;
 use bazaar_core::ports::{
     ApprovalDecision, ApprovalRepo, AuditRepo, KillSwitchRepo, OrderRecord, OrderRepo,
     QuoteSnapshot, QuoteSource,
@@ -83,7 +84,7 @@ impl<E: Executor, R: KillSwitchRepo, P: PnlSource, A: AuditRepo> Guarded
 /// Why a handle call failed before or outside an order outcome.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PipelineError {
-    #[error("text longer than {MAX_TEXT} characters")]
+    #[error("text longer than {MAX_TEXT} bytes")]
     TooLong,
     #[error("pipeline stopped")]
     Closed,
@@ -142,7 +143,7 @@ impl PipelineHandle {
         d: ApprovalDecision,
         actor: &str,
     ) -> Result<Outcome, PipelineError> {
-        if actor.chars().count() > MAX_TEXT {
+        if actor.len() > MAX_TEXT {
             return Err(PipelineError::TooLong);
         }
         let actor = actor.to_owned();
@@ -150,7 +151,7 @@ impl PipelineHandle {
     }
 
     /// Engage (`text` = reason) or release (`text` = typed phrase). `actor` and `text` are capped
-    /// at [`MAX_TEXT`] characters before anything is sent or audited.
+    /// at [`MAX_TEXT`] bytes (the store caps bytes too, SEC-130-1) before anything is sent or audited.
     ///
     /// # Errors
     /// `TooLong`, `Closed`, or the kill switch's own error.
@@ -160,7 +161,7 @@ impl PipelineHandle {
         actor: &str,
         text: &str,
     ) -> Result<(), PipelineError> {
-        if actor.chars().count() > MAX_TEXT || text.chars().count() > MAX_TEXT {
+        if actor.len() > MAX_TEXT || text.len() > MAX_TEXT {
             return Err(PipelineError::TooLong);
         }
         let (actor, text) = (actor.to_owned(), text.to_owned());
@@ -186,6 +187,38 @@ impl PipelineHandle {
 pub const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(5);
 /// Ceiling for the I/O timeout: a larger value is clamped so a bad config cannot stall the writer.
 pub const MAX_IO_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What the pipeline takes from `[execution]` config: the approval TTL and the per-call I/O
+/// timeout. Built only from the typed section, so no raw `Duration` is passed at the call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PipelineConfig {
+    approval_ttl_secs: u32,
+    io_timeout: Duration,
+}
+
+impl PipelineConfig {
+    /// `execution.approval_ttl_secs` and `execution.io_timeout_secs` (loader range 1..=30; the
+    /// pipeline still clamps as a second layer).
+    #[must_use]
+    pub fn from_section(e: &ExecutionSection) -> Self {
+        Self {
+            approval_ttl_secs: e.approval_ttl_secs,
+            io_timeout: clamp_io(e.io_timeout()),
+        }
+    }
+
+    /// The approval TTL in seconds.
+    #[must_use]
+    pub const fn approval_ttl_secs(&self) -> u32 {
+        self.approval_ttl_secs
+    }
+
+    /// The per-call I/O timeout.
+    #[must_use]
+    pub const fn io_timeout(&self) -> Duration {
+        self.io_timeout
+    }
+}
 
 fn clamp_io(d: Duration) -> Duration {
     if d.is_zero() {
@@ -218,9 +251,8 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo> std
 impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
     Pipeline<X, G, Q, O, A>
 {
-    /// `io_timeout` bounds every quote read, gate run and send so one hung call cannot stall the
-    /// writer (the composition root supplies it from config). A zero value becomes
-    /// `DEFAULT_IO_TIMEOUT`; anything above `MAX_IO_TIMEOUT` is clamped to it.
+    /// `cfg.io_timeout` bounds every quote read, gate run and send so one hung call cannot stall
+    /// the writer; `cfg` comes from `PipelineConfig::from_section`.
     #[allow(clippy::too_many_arguments)] // composition root wires every port once
     pub fn new(
         exec: X,
@@ -228,9 +260,8 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
         quotes: Q,
         orders: Arc<O>,
         approvals: A,
-        approval_ttl_secs: u32,
+        cfg: PipelineConfig,
         clock: Arc<dyn Clock>,
-        io_timeout: Duration,
     ) -> Self {
         Self {
             exec,
@@ -238,9 +269,9 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
             quotes,
             fills: FillHandler::new(orders.clone()),
             orders,
-            queue: ApprovalQueue::new(approvals, approval_ttl_secs),
+            queue: ApprovalQueue::new(approvals, cfg.approval_ttl_secs),
             clock,
-            io_timeout: clamp_io(io_timeout),
+            io_timeout: clamp_io(cfg.io_timeout),
         }
     }
 
@@ -692,9 +723,12 @@ pub(crate) mod fakes {
             Quotes(AtomicBool::new(false), AtomicBool::new(false)),
             orders.clone(),
             approvals,
-            300,
+            // Struct literal on purpose: the 150 ms timeout is below the loader's 1..=30 s range.
+            PipelineConfig {
+                approval_ttl_secs: 300,
+                io_timeout: Duration::from_millis(150),
+            },
             clock.clone(),
-            Duration::from_millis(150),
         );
         Rig {
             pipe,
@@ -884,6 +918,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kill_switch_text_cap_counts_bytes_not_characters() {
+        let r = rig(10, 0).await;
+        let h = r.pipe.spawn();
+        // 300 two-byte characters: 300 chars but 600 bytes, over the store cap.
+        let long = "\u{e9}".repeat(300);
+        assert_eq!(
+            h.set_kill_switch(true, "user", &long).await,
+            Err(PipelineError::TooLong)
+        );
+        assert_eq!(
+            h.set_kill_switch(true, &long, "r").await,
+            Err(PipelineError::TooLong)
+        );
+        assert!(
+            h.set_kill_switch(true, "user", &"\u{e9}".repeat(250))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
     async fn handle_caps_text_and_routes_commands() {
         let r = rig(10, 0).await;
         let rec = r.rec.clone();
@@ -925,6 +980,34 @@ mod tests {
         let out = r.pipe.decide(IntentId(1), Approve, "u").await;
         assert!(matches!(out, Outcome::GateBlocked(_)), "{out:?}");
         assert_eq!(ids(&r), Vec::<u128>::new());
+    }
+
+    #[test]
+    fn confirmation_strings_are_recorded() {
+        // The loader refuses unknown keys, so provenance lives in the files as text (TS-130-1).
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/");
+        let read = |f: &str| std::fs::read_to_string(format!("{dir}{f}")).unwrap();
+        let risk = read("risk.toml");
+        let exec = risk.split("\n[execution]\n").nth(1).unwrap();
+        assert!(exec.contains("source = \"owner confirmed 2026-11-22\""));
+        assert!(exec.contains("verified_on = \"2026-11-22\""));
+        assert!(read("data.toml").contains("kite.*: owner confirmed 2026-11-22"));
+        assert!(read("strategies.toml").contains("owner confirmed 2026-11-22"));
+    }
+
+    #[test]
+    fn pipeline_config_reads_ttl_and_timeout_from_the_risk_section() {
+        let r: bazaar_core::config::RiskConfig = bazaar_core::config::load(std::path::Path::new(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../config"),
+        ))
+        .unwrap();
+        let c = PipelineConfig::from_section(&r.execution);
+        assert_eq!(c.approval_ttl_secs(), r.execution.approval_ttl_secs);
+        assert_eq!(c.io_timeout(), Duration::from_secs(5));
+        assert!(
+            r.execution.breaker_engages_kill_switch,
+            "owner confirmed 2026-11-22"
+        );
     }
 
     #[tokio::test]

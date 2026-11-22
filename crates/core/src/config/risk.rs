@@ -239,7 +239,7 @@ pub struct OverrideSection {
 pub struct ExecutionSection {
     #[serde(deserialize_with = "super::decimal_str::deserialize")]
     pub paper_starting_cash_inr: Decimal,
-    /// Seconds an approval request stays open (F10). Unverified, owner to confirm.
+    /// Seconds an approval request stays open (F10). Owner confirmed 2026-11-22.
     pub approval_ttl_secs: u32,
     /// Largest move of the fresh quote from the intent price, in bps, that an approval accepts.
     pub max_quote_drift_bps: u32,
@@ -262,7 +262,7 @@ pub struct ExecutionSection {
     #[serde(deserialize_with = "hhmm")]
     pub paper_mis_square_off_ist: NaiveTime,
     /// Seconds one quote read, gate run or send may take before the pipeline gives up
-    /// (F10, BZ-205). Default 5, loader accepts 1..=30. Unverified, owner to confirm.
+    /// (F10, BZ-205). Default 5, loader accepts 1..=30. Owner confirmed 2026-11-22.
     #[serde(default = "default_io_timeout_secs")]
     pub io_timeout_secs: u32,
 }

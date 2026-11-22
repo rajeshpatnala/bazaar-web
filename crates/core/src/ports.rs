@@ -229,10 +229,13 @@ pub trait ApprovalRepo: Send + Sync {
 pub trait KillSwitchRepo: Send + Sync {
     /// Current state.
     fn is_engaged(&self) -> impl Future<Output = Result<bool, RepoError>> + Send;
-    /// Engage or release, with its audit row in the same transaction.
+    /// Engage or release, with its audit row in the same transaction. `reason` is the typed
+    /// reason kept in the `kill_switch` row and its event history (RISK-129-1); it must not be
+    /// empty.
     fn set(
         &self,
         engaged: bool,
+        reason: &str,
         audit: AuditDraft,
         chain: ChainFn,
     ) -> impl Future<Output = Result<(), RepoError>> + Send;
