@@ -293,13 +293,21 @@ mod tests {
     }
 
     impl OrderRepo for Orders {
-        async fn insert(&self, _: OrderRecord, _: AuditDraft, _: ChainFn) -> Result<(), RepoError> {
-            Err(RepoError::Unavailable)
+        fn insert(
+            &self,
+            _: OrderRecord,
+            _: AuditDraft,
+            _: ChainFn,
+        ) -> impl Future<Output = Result<(), RepoError>> + Send {
+            std::future::ready(Err(RepoError::Unavailable))
         }
-        async fn get(&self, _: u128) -> Result<Option<OrderRecord>, RepoError> {
-            Err(RepoError::Unavailable)
+        fn get(
+            &self,
+            _: u128,
+        ) -> impl Future<Output = Result<Option<OrderRecord>, RepoError>> + Send {
+            std::future::ready(Err(RepoError::Unavailable))
         }
-        async fn advance(
+        fn advance(
             &self,
             _: u128,
             _: u32,
@@ -307,14 +315,20 @@ mod tests {
             _: String,
             _: AuditDraft,
             _: ChainFn,
-        ) -> Result<u32, RepoError> {
-            Err(RepoError::Unavailable)
+        ) -> impl Future<Output = Result<u32, RepoError>> + Send {
+            std::future::ready(Err(RepoError::Unavailable))
         }
-        async fn list_in_state(&self, state: &str, _: u32) -> Result<Vec<OrderRecord>, RepoError> {
-            self.by_state
-                .get(state)
-                .cloned()
-                .unwrap_or_else(|| Ok(vec![]))
+        fn list_in_state(
+            &self,
+            state: &str,
+            _: u32,
+        ) -> impl Future<Output = Result<Vec<OrderRecord>, RepoError>> + Send {
+            std::future::ready(
+                self.by_state
+                    .get(state)
+                    .cloned()
+                    .unwrap_or_else(|| Ok(vec![])),
+            )
         }
     }
 
