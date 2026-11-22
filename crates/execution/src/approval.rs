@@ -249,13 +249,14 @@ impl<A: ApprovalRepo> ApprovalQueue<A> {
         event: ExecEvent,
         now: DateTime<Tz>,
         actor: &str,
+        risk_inr: Option<rust_decimal::Decimal>,
     ) -> Result<(), RepoError> {
         let next = track.state.apply(event).map_err(|_| RepoError::Conflict)?;
         let audit = bazaar_core::ports::AuditDraft {
             ts_ist_rfc3339: now.to_rfc3339(),
             actor: actor.to_owned(),
             kind: event.as_str().into(),
-            payload: serde_json::json!({ "intent": track.id.to_string(), "state": next.as_str(), "actor": actor, "at": now.to_rfc3339() })
+            payload: serde_json::json!({ "intent": track.id.to_string(), "state": next.as_str(), "actor": actor, "at": now.to_rfc3339(), "risk_inr": risk_inr.map(|r| r.to_string()) })
                 .to_string(),
         };
         let version = self

@@ -34,7 +34,11 @@ pub const MAX_TEXT: usize = 500;
 /// What the gate says. The real-`Gate` adapter lives in the composition slice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateOutcome {
-    Pass,
+    /// Allowed; `risk_inr` is the gate's rupee risk for the order (0 for exits), recorded in the
+    /// approval audit payload as a string.
+    Pass {
+        risk_inr: Decimal,
+    },
     Block(String),
     /// The quote moved past the drift limit; the re-computed rupee risk.
     Drifted {
@@ -372,7 +376,7 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
             _ => GateOutcome::Block("no fresh quote".into()),
         };
         match blocked {
-            GateOutcome::Pass => {
+            GateOutcome::Pass { .. } => {
                 track
                     .advance(&*self.orders, ExecEvent::GatePassed, now)
                     .await?;
@@ -437,16 +441,16 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
         }
         if d == ApprovalDecision::Decline {
             let stopped = self
-                .decide_step(p, d, ExecEvent::Decline, now, actor)
+                .decide_step(p, d, ExecEvent::Decline, now, actor, None)
                 .await?;
             return Ok(stopped.unwrap_or(Outcome::Declined));
         }
         // Re-gate with a fresh quote; no quote means no approval-time gate, so it blocks.
         let blocked = self.regate(&p.intent).await;
-        if blocked != GateOutcome::Pass {
+        let GateOutcome::Pass { risk_inr } = blocked else {
             p.track.advance(o, ExecEvent::GateBlocked, now).await?;
             return Ok(blocked_outcome(blocked));
-        }
+        };
         // Order: TTL, fresh-quote re-gate, then ONE atomic decide+advance (audited), then send.
         // The quote fetch can take seconds: re-read the clock, re-check the TTL with it and use
         // that time for the decision and audit (RISK-132-2).
@@ -456,7 +460,7 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
             return Ok(Outcome::Expired);
         }
         if let Some(stopped) = self
-            .decide_step(p, d, ExecEvent::Approve, now, actor)
+            .decide_step(p, d, ExecEvent::Approve, now, actor, Some(risk_inr))
             .await?
         {
             return Ok(stopped);
@@ -523,10 +527,11 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
         event: ExecEvent,
         now: DateTime<Tz>,
         actor: &str,
+        risk_inr: Option<Decimal>,
     ) -> Result<Option<Outcome>, ExecError> {
         match self
             .queue
-            .decide_and_advance(&mut p.track, d, event, now, actor)
+            .decide_and_advance(&mut p.track, d, event, now, actor, risk_inr)
             .await
         {
             Ok(()) => Ok(None),
@@ -712,7 +717,7 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
         }
         let gate = self.regate(&p.intent).await;
         let now = self.clock.now_ist();
-        if gate != GateOutcome::Pass {
+        if !matches!(gate, GateOutcome::Pass { .. }) {
             let why = match &gate {
                 GateOutcome::Block(r) => format!("restart_reload: gate blocked: {r}"),
                 _ => "restart_reload: quote drifted".to_owned(),
@@ -785,7 +790,7 @@ fn blocked_outcome(g: GateOutcome) -> Outcome {
     match g {
         GateOutcome::Drifted { new_risk } => Outcome::QuoteDrifted { new_risk },
         GateOutcome::Block(r) => Outcome::GateBlocked(r),
-        GateOutcome::Pass => Outcome::Error(ExecError::Storage),
+        GateOutcome::Pass { .. } => Outcome::Error(ExecError::Storage),
     }
 }
 
@@ -895,6 +900,8 @@ pub(crate) mod fakes {
         pub fail_between: AtomicBool,
         /// Every committed decision: (approval actor, audit actor).
         pub actors: Mutex<Vec<(String, String)>>,
+        /// Payload of every committed decision audit.
+        pub payloads: Mutex<Vec<String>>,
     }
     impl ApprovalRepo for MemApprovals {
         async fn decide_and_advance(
@@ -936,6 +943,7 @@ pub(crate) mod fakes {
             if self.fail_between.load(SeqCst) {
                 return Err(RepoError::Other);
             }
+            self.payloads.lock().unwrap().push(au.payload.clone());
             m.insert(id, d);
             self.actors
                 .lock()
@@ -1069,7 +1077,9 @@ pub(crate) mod fakes {
         let rec = RecordingExecutor::default();
         let exec = GuardedExecutor::new(rec.clone(), guard, clock.clone());
         let gate = Arc::new(FakeGate {
-            verdict: Mutex::new(GateOutcome::Pass),
+            verdict: Mutex::new(GateOutcome::Pass {
+                risk_inr: Decimal::ZERO,
+            }),
             thread: Mutex::new(None),
         });
         let orders = Arc::new(MemOrders::default());
@@ -1404,7 +1414,9 @@ mod tests {
             r.pipe.submit(intent(1, false)).await,
             Outcome::GateBlocked("G01".into())
         );
-        *r.gate.verdict.lock().unwrap() = GateOutcome::Pass;
+        *r.gate.verdict.lock().unwrap() = GateOutcome::Pass {
+            risk_inr: Decimal::ZERO,
+        };
         queued(&mut r, 2, false).await;
         *r.gate.verdict.lock().unwrap() = GateOutcome::Drifted {
             new_risk: Decimal::from(9),
@@ -1819,7 +1831,9 @@ mod tests {
         ));
         assert!(r.pipe.queue.repo().rows.lock().unwrap().is_empty());
         // Past the TTL: Expired, no approval row, nothing sent.
-        *r.gate.verdict.lock().unwrap() = GateOutcome::Pass;
+        *r.gate.verdict.lock().unwrap() = GateOutcome::Pass {
+            risk_inr: Decimal::ZERO,
+        };
         *r.clock.0.lock().unwrap() += chrono::Duration::seconds(300);
         assert_eq!(
             r.pipe.decide(IntentId(2), Approve, "u").await,
@@ -1854,6 +1868,23 @@ mod tests {
             *r.pipe.queue.repo().actors.lock().unwrap(),
             vec![("alice".to_owned(), "alice".to_owned())]
         );
+    }
+
+    #[tokio::test]
+    async fn approval_audit_payload_carries_risk_inr_as_a_string() {
+        let mut r = rig(10, 0).await;
+        queued(&mut r, 1, false).await;
+        *r.gate.verdict.lock().unwrap() = GateOutcome::Pass {
+            risk_inr: Decimal::new(12050, 2),
+        };
+        assert!(matches!(
+            r.pipe.decide(IntentId(1), Approve, "alice").await,
+            Outcome::Placed(_)
+        ));
+        let payloads = r.pipe.queue.repo().payloads.lock().unwrap().clone();
+        assert_eq!(payloads.len(), 1);
+        let v: serde_json::Value = serde_json::from_str(&payloads[0]).unwrap();
+        assert_eq!(v["risk_inr"], "120.50");
     }
 
     #[tokio::test]
@@ -2037,7 +2068,7 @@ mod tests {
                         }
                         Op::GateBlock(b) => {
                             blocked = b;
-                            *r.gate.verdict.lock().unwrap() = if b { GateOutcome::Block("x".into()) } else { GateOutcome::Pass };
+                            *r.gate.verdict.lock().unwrap() = if b { GateOutcome::Block("x".into()) } else { GateOutcome::Pass { risk_inr: Decimal::ZERO } };
                         }
                     }
                     prop_assert_eq!(ids(&r), expected.clone());

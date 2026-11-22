@@ -10,6 +10,7 @@ pub mod audit;
 pub mod breaker;
 pub mod executor;
 pub mod fills;
+pub mod gate_adapter;
 pub mod guarded;
 pub mod killswitch;
 pub mod pipeline;
