@@ -302,9 +302,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config");
         let cal = MarketCalendar::from_config(&load::<CalendarConfig>(Path::new(cfg)).unwrap());
-        let r = start(&dir.path().join("x.db"), RISK, c.clone(), cal)
-            .await
-            .unwrap();
+        let r = start(
+            &dir.path().join("x.db"),
+            RISK,
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config"),
+            c.clone(),
+            cal,
+        )
+        .await
+        .unwrap();
         (r, dir)
     }
 
