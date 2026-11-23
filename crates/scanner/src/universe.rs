@@ -28,6 +28,7 @@ pub enum DropReason {
     ShortHistory { bars: usize, needed: usize },
     NoBarOnDecisionDate,
     RegimeFailed(String),
+    SignalExpired(String),
 }
 
 /// Upper-case, trimmed form used to compare tradingsymbols.

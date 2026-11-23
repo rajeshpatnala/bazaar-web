@@ -46,7 +46,7 @@ fn parts() -> RecommendationParts {
         horizon: Horizon::Swing,
         size: PositionSize { qty: 10, lots: 1 },
         risk_rupees: d(60),
-        reward_risk: d(1),
+        reward_risk: reward_risk(d(102), d(96), d(110)).unwrap(),
         agreeing_strategies: vec!["donchian_breakout".into()],
         confidence: 80,
         regime: RegimeState::unknown(t(15), Fact::new("a", "b", "c")),
@@ -111,6 +111,7 @@ fn risk_below_stop_distance_is_rejected() {
     p.action = Action::Sell;
     p.stop_loss = d(106);
     p.targets = vec![d(90)];
+    p.reward_risk = reward_risk(d(100), d(106), d(90)).unwrap();
     assert_eq!(
         Recommendation::new(p, 30, 55).unwrap_err(),
         RecError::RiskBelowStopDistance
@@ -131,6 +132,7 @@ fn targets_must_move_strictly_away_from_entry() {
         RecError::TargetsNotMonotonic
     );
     p.targets = vec![d(105), d(110)];
+    p.reward_risk = reward_risk(d(102), d(96), d(105)).unwrap();
     assert!(Recommendation::new(p, 30, 55).is_ok());
 }
 
@@ -197,6 +199,7 @@ fn sell_checks_sides_the_other_way() {
     );
     p.stop_loss = d(106);
     p.targets = vec![d(90)];
+    p.reward_risk = reward_risk(d(100), d(106), d(90)).unwrap();
     assert!(Recommendation::new(p, 30, 55).is_ok());
 }
 
@@ -274,4 +277,81 @@ fn missing_input_failure_counts_as_hard() {
     let s = GateSummary::from_verdict(&v, t(18));
     assert_eq!(s.hard_failures, vec![RuleId::G05]);
     assert_eq!(s.overridable_failures, Vec::<RuleId>::new());
+}
+
+#[test]
+fn paper_only_failures_are_the_paper_level_subset_of_the_overridable_ones() {
+    // G05 is a soft override, G01 overridable in paper mode only, G02 never.
+    let s = GateSummary::from_verdict(&verdict(&[RuleId::G01, RuleId::G02, RuleId::G05]), t(18));
+    assert_eq!(s.hard_failures, vec![RuleId::G02]);
+    assert_eq!(s.overridable_failures, vec![RuleId::G01, RuleId::G05]);
+    assert_eq!(s.paper_only, vec![RuleId::G01]);
+    let ok = GateSummary::from_verdict(&verdict(&[]), t(18));
+    assert_eq!(ok.paper_only, Vec::<RuleId>::new());
+}
+
+#[test]
+fn paper_only_outside_the_overridable_list_is_rejected_naming_the_rule() {
+    let mut p = parts();
+    p.gate = GateSummary::from_verdict(&verdict(&[RuleId::G05]), t(18));
+    p.gate.paper_only = vec![RuleId::G01];
+    assert_eq!(
+        Recommendation::new(p.clone(), 30, 55).unwrap_err(),
+        RecError::PaperOnlyNotOverridable
+    );
+    p.gate.paper_only = vec![];
+    assert!(Recommendation::new(p, 30, 55).is_ok());
+}
+
+#[test]
+fn a_stated_reward_risk_that_does_not_match_the_levels_is_rejected() {
+    // (110 - 102) / (102 - 96) = 1.3333...; the stated 2 is a copy of a different calculation.
+    let mut p = parts();
+    p.reward_risk = d(2);
+    assert_eq!(
+        Recommendation::new(p.clone(), 30, 55).unwrap_err(),
+        RecError::RewardRiskMismatch
+    );
+    // The best-case fill (entry low) would give 10 / 4 = 2.5: also refused.
+    p.reward_risk = reward_risk(d(100), d(96), d(110)).unwrap();
+    assert_eq!(
+        Recommendation::new(p, 30, 55).unwrap_err(),
+        RecError::RewardRiskMismatch
+    );
+}
+
+#[test]
+fn reward_risk_is_none_when_stop_equals_entry() {
+    assert_eq!(reward_risk(d(100), d(100), d(110)), None);
+    assert_eq!(reward_risk(d(102), d(96), d(110)), Some(d(8) / d(6)));
+}
+
+#[test]
+fn a_sell_reward_risk_on_the_best_fill_is_refused() {
+    let mut p = parts();
+    p.action = Action::Sell;
+    p.stop_loss = d(106);
+    p.targets = vec![d(90)];
+    // Worst sell fill is the zone low (100): 10 / 6. The zone high (102) would give 12 / 4 = 3.
+    p.reward_risk = reward_risk(d(102), d(106), d(90)).unwrap();
+    assert_eq!(
+        Recommendation::new(p.clone(), 30, 55).unwrap_err(),
+        RecError::RewardRiskMismatch
+    );
+    p.reward_risk = reward_risk(d(100), d(106), d(90)).unwrap();
+    assert!(Recommendation::new(p, 30, 55).is_ok());
+}
+
+#[test]
+fn paper_only_must_be_exactly_the_paper_level_failures() {
+    // G01 is Paper level: leaving it out of `paper_only` would make it look like a Soft override.
+    let mut p = parts();
+    p.gate = GateSummary::from_verdict(&verdict(&[RuleId::G01, RuleId::G05]), t(18));
+    assert_eq!(p.gate.paper_only, vec![RuleId::G01]);
+    assert!(Recommendation::new(p.clone(), 30, 55).is_ok());
+    p.gate.paper_only = vec![];
+    assert_eq!(
+        Recommendation::new(p, 30, 55).unwrap_err(),
+        RecError::PaperOnlyNotOverridable
+    );
 }
