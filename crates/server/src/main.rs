@@ -4,6 +4,9 @@ use std::{io::Write as _, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use anyhow::Context as _;
 use bazaar_cli::commands::DB_FILE;
+
+/// How often the tick driver runs its clock pass (expiry, square-off, alarms).
+const DRIVER_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 use bazaar_core::{calendar::MarketCalendar, clock::SystemClock, config::Config};
 use bazaar_server::{
     app, runtime,
@@ -182,9 +185,24 @@ async fn serve(port_flag: Option<u16>) -> anyhow::Result<()> {
         writeln!(std::io::stdout().lock(), "Open Bazaar: {url}")?;
         open_browser(&url);
     }
-    axum::serve(listener, app::build(state))
+    // The tick driver (clock work, approval expiry, square-off alarm) stops after the server
+    // drains, so a final pass runs before exit.
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let driver = runtime::Driver::new(
+        rt.paper.clone(),
+        rt.handle.clone(),
+        state.alarms.clone(),
+        state.clock.clone(),
+    );
+    let driver_task = tokio::spawn(driver.run(DRIVER_EVERY, cancel.clone()));
+    let served = axum::serve(listener, app::build(state))
         .with_graceful_shutdown(shutdown_signal())
-        .await?;
+        .await;
+    cancel.cancel();
+    if driver_task.await.is_err() {
+        tracing::error!("tick driver ended abnormally");
+    }
+    served?;
     Ok(())
 }
 

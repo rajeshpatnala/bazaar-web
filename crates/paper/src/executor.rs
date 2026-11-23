@@ -115,6 +115,16 @@ impl<R: PaperLedgerRepo, C: ChargeSource, A: AuditRepo, S: SpecSource> PaperExec
         lock(&self.book).position(symbol, product)
     }
 
+    /// True when any non-flat position is held (any product); used to refuse a P&L figure that
+    /// would need a mark price.
+    #[must_use]
+    pub fn has_open_positions(&self) -> bool {
+        let b = lock(&self.book);
+        [Product::Mis, Product::Cnc, Product::Nrml]
+            .into_iter()
+            .any(|p| !b.open_positions(p).is_empty())
+    }
+
     /// Number of orders still working.
     #[must_use]
     pub fn working_count(&self) -> usize {
@@ -607,6 +617,7 @@ mod tests {
         let o = tick_at(&r, "100", 1000, 1).await;
         assert_eq!(o.fills.len(), 1);
         assert_eq!(r.ex.position("ABC", Product::Cnc), 10);
+        assert!(r.ex.has_open_positions());
         // 10 x 100.10 (100 * 1.001 aligned up) + charge 1
         let bal = r.ex.account.balances().await.unwrap();
         assert_eq!(bal.cash, d("100000") - d("1001.00") - d("1"));
@@ -769,6 +780,7 @@ mod tests {
         let o = r.ex.on_tick(&t).await;
         assert_eq!(o.fills[0].reason, FillReason::SquareOff);
         assert_eq!(r.ex.position("ABC", Product::Mis), 0);
+        assert!(!r.ex.has_open_positions());
         let rows = lock(&r.audit.rows).clone();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].draft.kind, "auto_square_off");

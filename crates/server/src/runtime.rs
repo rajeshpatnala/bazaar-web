@@ -6,6 +6,10 @@
 //! `Unavailable`/`None`, never a guess. The executor is paper; `live = Known(false)` unless the
 //! build has `live-trading`, in which case it is `Unknown` (blocked) until a reconciler exists.
 
+mod driver;
+
+pub use driver::{ALARM_SQUARE_OFF, Driver, LedgerPnl};
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -13,14 +17,15 @@ use bazaar_cli::compose::{BuiltPipeline, ComposeError, Ports, UnknownCost, build
 use bazaar_core::calendar::MarketCalendar;
 use bazaar_core::clock::Clock;
 use bazaar_core::config::{RiskConfig, parse_str};
-use bazaar_core::ports::{KillSwitchRepo, QuoteSnapshot, QuoteSource, RepoError, SourceError};
+use bazaar_core::ports::{
+    KillSwitchRepo, PaperLedgerRepo, QuoteSnapshot, QuoteSource, RepoError, SourceError,
+};
 use bazaar_core::segment::{InstrumentKind, Segment};
-use bazaar_execution::breaker::{DayPnl, PnlSource};
 use bazaar_execution::executor::{ApprovedOrder, ExecAck, ExecError, Executor};
 use bazaar_execution::gate_adapter::{GateContext, GateInputsOwned};
 use bazaar_execution::pipeline::{PipelineHandle, ReloadReport};
 use bazaar_execution::types::OrderIntent;
-use bazaar_paper::account::{ChargeSource, PaperAccount};
+use bazaar_paper::account::{ChargeSource, LedgerKind, PaperAccount};
 use bazaar_paper::executor::{PaperExecutor, SpecSource};
 use bazaar_paper::fill::{InstrumentSpec, SimConfig};
 use bazaar_paper::squareoff::ValidatedSquareOffTime;
@@ -41,16 +46,6 @@ pub struct UnavailableQuotes;
 
 impl QuoteSource for UnavailableQuotes {
     fn quote(&self, _: &str) -> impl Future<Output = Result<QuoteSnapshot, SourceError>> + Send {
-        std::future::ready(Err(SourceError::Unavailable))
-    }
-}
-
-/// No P&L source until S2 reads the ledger: the breaker sees an error, never a zero.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct UnknownPnl;
-
-impl PnlSource for UnknownPnl {
-    fn day_pnl(&self) -> impl Future<Output = Result<DayPnl, SourceError>> + Send {
         std::future::ready(Err(SourceError::Unavailable))
     }
 }
@@ -158,7 +153,7 @@ impl Executor for SharedPaper {
 }
 
 /// The pipeline the runtime builds.
-pub type Built = BuiltPipeline<SharedPaper, UnknownPnl, UnavailableQuotes, ProdBase>;
+pub type Built = BuiltPipeline<SharedPaper, LedgerPnl, UnavailableQuotes, ProdBase>;
 
 /// Why startup stopped; any of these means the server must not bind.
 #[derive(Debug, Error)]
@@ -236,6 +231,29 @@ pub async fn start(
     })
 }
 
+/// RISK-136-4: ledger lines carry no symbol, quantity or product, so the paper position book
+/// cannot be rebuilt from them. Fail closed: any buy or sell line in the current epoch may be an
+/// open lot, so startup refuses to serve until the account is reset (new epoch). An unreadable
+/// or corrupt ledger refuses too.
+async fn ensure_no_open_lots(store: &SqliteStore) -> Result<(), StartError> {
+    let lines = PaperLedgerRepo::current_epoch(store)
+        .await
+        .map_err(|e| StartError::Paper(format!("ledger unreadable: {e}")))?;
+    for l in &lines {
+        match LedgerKind::parse(&l.kind) {
+            Some(LedgerKind::Opening | LedgerKind::Charge) => {}
+            Some(LedgerKind::Buy | LedgerKind::Sell) => {
+                return Err(StartError::Paper(
+                    "open paper lots may exist and cannot be restored from the ledger; reset the paper account"
+                        .into(),
+                ));
+            }
+            None => return Err(StartError::Paper("ledger has an unknown line kind".into())),
+        }
+    }
+    Ok(())
+}
+
 async fn build(
     store: &SqliteStore,
     risk_toml: &str,
@@ -260,6 +278,7 @@ async fn build(
             .await
             .map_err(|e| StartError::Paper(e.to_string()))?;
     }
+    ensure_no_open_lots(store).await?;
     let cal = Arc::new(calendar.clone());
     let segs = [(Segment::Equity, InstrumentKind::CashNonFno)];
     // RISK-138-5: validate on the latest trading day (today when it is one), so a start on a
@@ -288,7 +307,7 @@ async fn build(
     ));
     let ports = Ports {
         executor: SharedPaper(paper.clone()),
-        pnl: UnknownPnl,
+        pnl: LedgerPnl::new(store.clone(), paper.clone(), clock.clone()),
         quotes: UnavailableQuotes,
         base: ProdBase,
         clock,
@@ -523,6 +542,38 @@ mod tests {
         ));
         let rt = start(&dir.path().join("x.db"), RISK, sat, calendar()).await;
         assert!(rt.is_ok(), "{:?}", rt.err());
+    }
+
+    /// RISK-136-4: a ledger with fills cannot restore the position book, so startup refuses.
+    #[tokio::test]
+    async fn reopen_refuses_while_the_ledger_may_hold_open_lots() {
+        use bazaar_core::ports::LedgerEntry;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("x.db");
+        let c = clock();
+        // A flat ledger (opening only) reopens fine.
+        drop(start(&db, RISK, c.clone(), calendar()).await.unwrap());
+        drop(start(&db, RISK, c.clone(), calendar()).await.unwrap());
+        let store = bazaar_cli::compose::open_store(&db).await.unwrap();
+        let epoch = PaperLedgerRepo::current_epoch(&store).await.unwrap()[0].epoch;
+        PaperLedgerRepo::append(
+            &store,
+            LedgerEntry {
+                epoch,
+                kind: "buy".into(),
+                amount: Decimal::from(-500),
+                ref_id: Some(9),
+                ts_ist_rfc3339: c.now_ist().to_rfc3339(),
+            },
+        )
+        .await
+        .unwrap();
+        drop(store);
+        let e = start(&db, RISK, c, calendar()).await;
+        match e {
+            Err(StartError::Paper(m)) => assert!(m.contains("open paper lots may exist"), "{m}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
     }
 
     #[test]
