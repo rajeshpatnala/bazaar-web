@@ -114,7 +114,7 @@ fn finish(o: Outcome) -> Result<(DecisionOutcomeDto, bool), ApiError> {
         (status = 401, body = Problem, content_type = "application/problem+json"),
         (status = 503, body = Problem, content_type = "application/problem+json"),
     ))]
-async fn list(State(s): State<AppState>) -> Result<Json<ApprovalListDto>, ApiError> {
+async fn list_approvals(State(s): State<AppState>) -> Result<Json<ApprovalListDto>, ApiError> {
     let rows = s
         .pending()?
         .list()
@@ -174,7 +174,7 @@ async fn decide(
 /// Routes of this module, relative to `/api/v1`.
 pub fn router() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
-        .routes(routes!(list))
+        .routes(routes!(list_approvals))
         .routes(routes!(decide))
 }
 

@@ -57,6 +57,24 @@ mod tests {
         assert_eq!(doc.info.version, "1");
     }
 
+    /// Generated clients key on `operationId`: a duplicate breaks them (CR-147-1).
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn operation_ids_are_present_and_unique() {
+        let json = serde_json::to_value(document()).unwrap();
+        let mut ids = Vec::new();
+        for item in json["paths"].as_object().unwrap().values() {
+            for op in item.as_object().unwrap().values() {
+                ids.push(op["operationId"].as_str().unwrap().to_owned());
+            }
+        }
+        let n = ids.len();
+        assert!(n >= 8);
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), n, "duplicate operationId");
+    }
+
     /// The path set is an allowlist: adding a route must edit this list (reviewers check that
     /// none places an order).
     #[test]
@@ -64,9 +82,20 @@ mod tests {
         let doc = document();
         let mut got: Vec<&str> = doc.paths.paths.keys().map(String::as_str).collect();
         got.sort_unstable();
+        for p in &got {
+            let lower = p.to_ascii_lowercase();
+            assert!(!lower.contains("place"), "{p} names place");
+            assert!(
+                !lower
+                    .split('/')
+                    .any(|seg| seg == "order" || seg == "orders"),
+                "{p} names order"
+            );
+        }
         assert_eq!(
             got,
             [
+                "/api/v1/alarms",
                 "/api/v1/approvals",
                 "/api/v1/approvals/{id}/decision",
                 "/api/v1/auth/me",

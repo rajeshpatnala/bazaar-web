@@ -4,6 +4,23 @@
  */
 
 export interface paths {
+    "/api/v1/alarms": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Alarms currently raised (empty when all is well). Text is escaped by `AlarmDto`. */
+        get: operations["list_alarms"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/approvals": {
         parameters: {
             query?: never;
@@ -12,7 +29,7 @@ export interface paths {
             cookie?: never;
         };
         /** Orders waiting for a decision, with their expiry. */
-        get: operations["list"];
+        get: operations["list_approvals"];
         put?: never;
         post?: never;
         delete?: never;
@@ -282,7 +299,34 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    list: {
+    list_alarms: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlarmDto"][];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_approvals: {
         parameters: {
             query?: never;
             header?: never;
