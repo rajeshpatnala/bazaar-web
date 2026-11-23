@@ -47,7 +47,7 @@ def main():
         if "CI_SCOPE_FILES" in os.environ:
             files = os.environ["CI_SCOPE_FILES"].split()
         else:
-            files = run("git", "diff", "--name-only", f"{base}...HEAD").split()
+            files = run("git", "diff", "--name-only", "--no-renames", f"{base}...HEAD").split()
     except Exception as e:
         why(f"full run: cannot diff against {base} ({type(e).__name__})")
         return emit(True, True, True, [])
