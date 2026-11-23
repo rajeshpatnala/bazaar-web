@@ -510,12 +510,14 @@ fn size_order(
         .cost(side, entry_part, eval.ref_price)
         .known()
         .ok_or(MintError::Arithmetic)?;
+    // Same allowance as sizing: `max(cost, floor)` (BZ-522), so minted risk matches what was sized.
+    let allowance = cost.max(eval.ctx.limits.min_charges_slippage_buffer);
     let risk = eval
         .risk_ref
         .checked_sub(stop)
         .map(|d| d.abs())
         .and_then(|per| Decimal::from(entry_part).checked_mul(per))
-        .and_then(|r| r.checked_add(cost))
+        .and_then(|r| r.checked_add(allowance))
         .ok_or(MintError::Arithmetic)?;
     // Defence in depth for the per-trade ceiling: a non-monotonic cost model must not let the
     // final quantity cost more than the size that was proved to fit.

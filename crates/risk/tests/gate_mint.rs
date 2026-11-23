@@ -361,6 +361,28 @@ fn a_passing_entry_mints_with_gate_derived_figures() {
 }
 
 #[test]
+fn minted_risk_uses_the_floor_when_the_real_cost_is_below_it() {
+    // QUAN-153-1: cost Rs 5 is under the loaded floor; minted risk = qty x per-unit + floor, the
+    // same allowance sizing reserved (not the raw Rs 5).
+    let mut env = Env::new(50);
+    let floor = env
+        .cfg
+        .effective(&Baseline::none())
+        .min_charges_slippage_buffer;
+    assert!(floor > d("5"));
+    env.cost = Box::new(Cost(Some(d("5")), Decimal::ZERO));
+    let gate = Gate::new(&env.cfg, &Store, &At);
+    let g = minted(env.decide(&gate, &intent(10), None, &Sink::new(false)));
+    assert_eq!(g.qty(), 10);
+    assert_eq!(g.risk_rupees(), d("100") + floor);
+    // A cost above the floor stays the cost.
+    env.cost = Box::new(Cost(Some(d("20")), Decimal::ZERO));
+    let gate = Gate::new(&env.cfg, &Store, &At);
+    let g = minted(env.decide(&gate, &intent(10), None, &Sink::new(false)));
+    assert_eq!(g.risk_rupees(), d("120"));
+}
+
+#[test]
 fn g02_and_sizing_use_the_cost_of_the_final_quantity() {
     let mut env = Env::new(50);
     // Cost Rs 20 + Re 1 per share: 111 x 10 + 131 = 1,241 fits Rs 1,250; 112 x 10 + 132 does not,

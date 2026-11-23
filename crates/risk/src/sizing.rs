@@ -3,8 +3,9 @@
 //!
 //! `qty = floor((equity x risk% - buffer) / per-unit risk)`, floored to lots, then capped by the
 //! position-value cap (G14), then (overridden trades) by `size_factor`, floored to lots again.
-//! Finally the size steps down a lot at a time until `risk at stop + cost(qty) <= budget`, where
-//! the cost (charges + slippage) is worked out for that quantity (`size_with_cost`).
+//! Finally the size steps down a lot at a time until `risk at stop + allowance(qty) <= budget`,
+//! where the allowance is `max(cost(qty), min_charges_slippage_buffer)`: the configured floor means
+//! "assume at least this much cost", it never refuses a cheap order (`size_with_cost`).
 //!
 //! Scope: `size` is for stop-defined linear instruments (equity, futures) only. Options sizing is
 //! out of F6 scope: a short option leg has unbounded loss and a bought option risks its premium,
@@ -41,8 +42,8 @@ pub enum SizingError {
     ZeroEquity,
     /// A required snapshot input is unknown (named).
     InputUnknown(&'static str),
-    /// The charges + slippage buffer is below the configured floor.
-    BufferBelowFloor,
+    /// The charges + slippage cost is negative (a bad input, never a discount).
+    NegativeCost,
     /// One lot risks more than the budget: no trade.
     BudgetBelowOneLot,
     /// One lot is worth more than the position-value cap: no trade.
@@ -66,7 +67,7 @@ impl fmt::Display for SizingError {
             Self::StopOnWrongSide => "the stop is on the wrong side of the entry price",
             Self::ZeroEquity => "there is no capital left to size from",
             Self::InputUnknown(what) => return write!(f, "cannot confirm {what}; no size given"),
-            Self::BufferBelowFloor => "the charges and slippage allowance is below the minimum",
+            Self::NegativeCost => "the charges and slippage estimate is negative, so no size given",
             Self::BudgetBelowOneLot => {
                 "This setup needs more money than your risk limit allows, so there is no trade here."
             }
@@ -96,7 +97,8 @@ pub struct SizingInput {
     pub lot_size: u32,
     pub tick_size: Decimal,
     /// Total estimated charges + slippage, rupees, used by [`size`] as a flat figure (compute it
-    /// for the largest candidate quantity); `Unknown` rejects. [`size_with_cost`] ignores it.
+    /// for the largest candidate quantity); the allowance is `max(buffer, floor)`; `Unknown` and
+    /// negative values reject. [`size_with_cost`] ignores it.
     pub buffer: Tri<Decimal>,
     /// Apply `override.size_factor` (an overridden trade).
     pub overridden: bool,
@@ -199,25 +201,33 @@ pub fn size(limits: &EffectiveLimits, input: &SizingInput) -> Result<Sized, Sizi
     size_with_cost(limits, input, &|_| input.buffer)
 }
 
-/// Size one trade; `cost(qty)` is the total charges + slippage for that quantity, rupees.
+/// Size one trade; `cost(qty)` is the total charges + slippage for that quantity, rupees. The
+/// allowance used is `max(cost(qty), min_charges_slippage_buffer)` at every quantity, including
+/// the final one after the step-down.
 /// Rejects: lot or tick 0, entry == stop, stop on the wrong side, zero equity,
-/// unknown or too-small buffer, budget below one lot, bad `size_factor`.
+/// unknown or negative cost, budget below one lot, bad `size_factor`.
 pub fn size_with_cost(
     limits: &EffectiveLimits,
     input: &SizingInput,
     cost: &dyn Fn(u32) -> Tri<Decimal>,
 ) -> Result<Sized, SizingError> {
     validate(input)?;
-    // Cost for a quantity: known, non-negative and not below the configured floor.
+    // A hand-built limits struct with a floor <= 0 must not weaken "never below the floor".
+    if limits.min_charges_slippage_buffer <= Decimal::ZERO {
+        return Err(SizingError::InputUnknown("the charges and slippage floor"));
+    }
+    // Allowance for a quantity: `max(cost, floor)`. Unknown or negative cost fails; the floor is
+    // the configured `min_charges_slippage_buffer` (assume at least that much cost), so the
+    // allowance is never below it. Same function for backtest, paper and live.
     let cost_at = |qty: Decimal| -> Result<Decimal, SizingError> {
         let q = qty.to_u32().ok_or(SizingError::Arithmetic)?;
         let c = *cost(q).known().ok_or(SizingError::InputUnknown(
             "the charges and slippage allowance",
         ))?;
-        if c < limits.min_charges_slippage_buffer || c < Decimal::ZERO {
-            return Err(SizingError::BufferBelowFloor);
+        if c < Decimal::ZERO {
+            return Err(SizingError::NegativeCost);
         }
-        Ok(c)
+        Ok(c.max(limits.min_charges_slippage_buffer))
     };
     // First estimate from the cost of one lot; the step-down below fixes it for the final size.
     let buffer = cost_at(Decimal::from(input.lot_size))?;

@@ -178,12 +178,8 @@ fn invalid_inputs_are_rejected() {
         Err(SizingError::BadPrice)
     );
     assert_eq!(
-        case(&|i| i.buffer = d(59).into_known()),
-        Err(SizingError::BufferBelowFloor)
-    );
-    assert_eq!(
         case(&|i| i.buffer = d(-5).into_known()),
-        Err(SizingError::BufferBelowFloor)
+        Err(SizingError::NegativeCost)
     );
     assert!(matches!(
         case(&|i| i.buffer = Tri::Unknown),
@@ -285,7 +281,7 @@ fn error_messages_are_plain_english() {
         SizingError::StopOnWrongSide,
         SizingError::ZeroEquity,
         SizingError::InputUnknown("x"),
-        SizingError::BufferBelowFloor,
+        SizingError::NegativeCost,
         SizingError::CapBelowOneLot,
         SizingError::OverrideBelowOneLot,
         SizingError::BadSizeFactor,
@@ -374,12 +370,12 @@ fn cost_that_grows_with_qty_steps_the_size_down() {
 }
 
 #[test]
-fn cost_below_floor_or_unknown_at_the_final_qty_rejects() {
+fn unknown_or_negative_cost_at_the_final_qty_rejects() {
     let l = limits();
-    let low = |q: u32| Tri::Known(if q > 1 { d(10) } else { d(60) });
+    let neg = |q: u32| Tri::Known(if q > 1 { d(-10) } else { d(60) });
     assert_eq!(
-        size_with_cost(&l, &input(), &low),
-        Err(SizingError::BufferBelowFloor)
+        size_with_cost(&l, &input(), &neg),
+        Err(SizingError::NegativeCost)
     );
     let unk = |q: u32| {
         if q > 1 {
@@ -392,6 +388,110 @@ fn cost_below_floor_or_unknown_at_the_final_qty_rejects() {
         size_with_cost(&l, &input(), &unk),
         Err(SizingError::InputUnknown(_))
     ));
+}
+
+#[test]
+fn cost_below_floor_sizes_with_the_floor_allowance() {
+    // Rs 10 cost and Rs 59 flat buffer both size as Rs 60: 94 shares, risk 940 + 60 = budget.
+    let l = limits();
+    let low = size_with_cost(&l, &input(), &|_| Tri::Known(d(10))).unwrap();
+    let mut i = input();
+    i.buffer = Tri::Known(d(59));
+    let flat = size(&l, &i).unwrap();
+    let at_floor = size(&l, &input()).unwrap();
+    for s in [&low, &flat] {
+        assert_eq!((s.qty, s.risk_at_stop, s.budget), (50, d(500), d(1000)));
+        assert_eq!(s, &at_floor);
+    }
+    let mut wide = l.clone();
+    wide.max_position_value_pct = d(100);
+    let s = size_with_cost(&wide, &input(), &|_| Tri::Known(d(10))).unwrap();
+    assert_eq!((s.qty, s.risk_at_stop), (94, d(940)));
+}
+
+#[test]
+fn cost_above_floor_is_the_allowance() {
+    let mut l = limits();
+    l.max_position_value_pct = d(100);
+    // Cost Rs 100: (1000 - 100) / 10 = 90 shares.
+    let s = size_with_cost(&l, &input(), &|_| Tri::Known(d(100))).unwrap();
+    assert_eq!((s.qty, s.risk_at_stop), (90, d(900)));
+    // Cost equal to the floor behaves as the floor.
+    let s = size_with_cost(&l, &input(), &|_| Tri::Known(d(60))).unwrap();
+    assert_eq!((s.qty, s.risk_at_stop), (94, d(940)));
+}
+
+#[test]
+fn step_down_uses_the_floor_at_the_final_quantity() {
+    // Cost is Rs 1 below 80 shares, Rs 200 above: the first estimate (one lot) is under the floor;
+    // the step-down finds the largest qty whose max(cost, 60) + risk fits Rs 1,000.
+    let mut l = limits();
+    l.max_position_value_pct = d(100);
+    let cost = |q: u32| Tri::Known(if q <= 80 { d(1) } else { d(200) });
+    let s = size_with_cost(&l, &input(), &cost).unwrap();
+    // Estimated qty 94 -> cost 200 -> 1140 > 1000; steps down to 80: 800 + max(1, 60) = 860.
+    assert_eq!((s.qty, s.risk_at_stop), (80, d(800)));
+    assert!(s.risk_at_stop + d(60) <= s.budget);
+}
+
+#[test]
+fn production_floor_sizes_a_normal_equity_entry_with_a_small_real_cost() {
+    // Real config/risk.toml; the floor and percentages are read from it, never set here.
+    let l = GateConfig::from_toml_str(include_str!("../../../config/risk.toml"))
+        .unwrap()
+        .effective(&Baseline::none());
+    let floor = l.min_charges_slippage_buffer;
+    let cost = |q: u32| Tri::Known(Decimal::new(i64::from(q) * 5, 1)); // Rs 0.50 a share, under the floor
+    let mut i = input();
+    i.equity = d(100_000);
+    // Rs 500 entry, Rs 10 stop distance: budget Rs 1,000; the cap (25% -> 50 shares) binds.
+    let s = size_with_cost(&l, &i, &cost).unwrap();
+    assert_eq!((s.qty, s.risk_at_stop, s.notional), (50, d(500), d(25_000)));
+    assert_eq!(s.budget, d(100_000) * l.max_risk_per_trade_pct / d(100));
+    // Wide cap so the floor binds: (budget - floor) / 10 = 94 shares, risk Rs 940 (raw cost would
+    // give 95); with the production floor of Rs 60 this is the spec's 94 / Rs 940.
+    let mut wide = l.clone();
+    wide.max_position_value_pct = d(100);
+    let s = size_with_cost(&wide, &i, &cost).unwrap();
+    let want = ((s.budget - floor) / d(10)).floor();
+    assert_eq!((Decimal::from(s.qty), s.risk_at_stop), (want, want * d(10)));
+    assert_eq!((s.qty, s.risk_at_stop), (94, d(940)));
+}
+
+#[test]
+fn a_floor_of_zero_or_less_fails_closed() {
+    for f in [d(0), d(-1)] {
+        let mut l = limits();
+        l.min_charges_slippage_buffer = f;
+        assert!(matches!(
+            size(&l, &input()),
+            Err(SizingError::InputUnknown(_))
+        ));
+    }
+}
+
+proptest! {
+    #[test]
+    fn allowance_is_never_below_the_floor_or_over_the_budget(cost_paise in 0i64..50_000) {
+        let mut l = limits();
+        l.max_position_value_pct = d(100);
+        let c = Decimal::new(cost_paise, 2);
+        if let Ok(s) = size_with_cost(&l, &input(), &|_| Tri::Known(c)) {
+            prop_assert!(s.risk_at_stop + c.max(d(60)) <= s.budget);
+            // One more share at the larger allowance would not have fit.
+            let more = s.risk_at_stop + d(10);
+            prop_assert!(more + c.max(d(60)) > s.budget);
+        }
+    }
+}
+
+#[test]
+fn flat_and_closure_paths_agree() {
+    // Backtest passes a closure; the flat `size` wraps the same function: same input, same Sized.
+    let l = limits();
+    let a = size(&l, &input()).unwrap();
+    let b = size_with_cost(&l, &input(), &|_| input().buffer).unwrap();
+    assert_eq!(a, b);
 }
 
 #[test]
