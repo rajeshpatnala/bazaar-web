@@ -946,14 +946,17 @@ mod tests {
         assert_eq!(r.ex.position("ABC", Product::Mis), 0);
     }
 
-    /// TS-142: a real partial square-off fill leaves the alarm up; only the completing fill clears it.
+    /// TS-142-1: a real partial square-off fill leaves the alarm up; only the completing fill clears it.
     #[tokio::test]
     async fn watch_stays_up_through_a_real_partial_square_off_fill() {
         let r = rig("100000").await;
         let mut w = crate::watch::SquareOffWatch::default();
         open_mis_and_reach_square_off(&r).await;
         r.audit.fail.store(true, Ordering::SeqCst);
-        w.on_tick(&r.ex.on_tick(&so_tick(&r, 1)).await);
+        let blocked = r.ex.on_tick(&so_tick(&r, 1)).await;
+        assert_eq!(blocked.blocked_square_offs.len(), 1);
+        assert_eq!(blocked.blocked_square_offs[0].1, ExecError::Storage);
+        w.on_tick(&blocked);
         assert_eq!(w.outstanding(), 1);
         r.audit.fail.store(false, Ordering::SeqCst);
         let mut t = so_tick(&r, 2);
@@ -964,12 +967,30 @@ mod tests {
             "expected a partial fill"
         );
         assert!(!o.fills.is_empty(), "expected some fill");
+        assert!(
+            o.blocked_square_offs.is_empty(),
+            "alarm must stay up because of the partial, not a new block"
+        );
+        let filled: u32 = o.fills.iter().map(|f| f.qty).sum();
+        assert!(filled > 0 && filled < 10, "partial qty {filled}");
+        assert_eq!(
+            r.ex.position("ABC", Product::Mis),
+            i64::from(10 - filled),
+            "remaining position"
+        );
+        assert_eq!(r.ex.working_count(), 1, "order still working");
         w.on_tick(&o);
         assert_eq!(w.outstanding(), 1, "partial fill keeps the alarm");
         assert!(r.ex.has_open_positions());
+        let mut completed = false;
         for s in 3..60 {
-            w.on_tick(&r.ex.on_tick(&so_tick(&r, s)).await);
+            let o = r.ex.on_tick(&so_tick(&r, s)).await;
+            w.on_tick(&o);
+            completed |= o.fills.iter().any(|f| f.complete);
+            let want = usize::from(!completed);
+            assert_eq!(w.outstanding(), want, "tick {s}");
         }
+        assert!(completed, "a completing fill was seen");
         assert_eq!(r.ex.position("ABC", Product::Mis), 0);
         assert_eq!(w.outstanding(), 0);
         assert!(!r.ex.has_open_positions());
