@@ -2977,7 +2977,10 @@ def feature_pitfalls(feature: str, limit: int = 8) -> list:
     for f in sorted(base.rglob("*.md")) if base.is_dir() else []:
         if f.name == APPROVAL_FILE:
             continue
-        _, rows = findings(f)
+        try:
+            _, rows = findings_text(read_capped(f, base))
+        except (OSError, UnicodeDecodeError):
+            continue
         for r in rows:
             if r.get("severity") in ("blocker", "critical", "major", "high"):
                 issue = re.sub(r"\s+", " ", r.get("issue", "")).strip()[:140]
@@ -3009,12 +3012,27 @@ def in_scope(path: str, prefixes: list) -> bool:
     return any(path == p or path.startswith(p + "/") for p in prefixes)
 
 
-def scope_findings(scope: str, limit: int = 8, max_notes: int = 3) -> tuple:
+BRIEF_FILE_CAP = 256 * 1024
+BRIEF_LINE_CAP = 300
+
+
+def read_capped(f: pathlib.Path, base: pathlib.Path) -> str:
+    """Text of a brief source file, at most BRIEF_FILE_CAP bytes. Raises OSError for a symlink or a file that resolves
+    outside `base`, UnicodeDecodeError for non-text; callers skip the file with a note."""
+    if f.is_symlink() or not f.resolve().is_relative_to(base.resolve()):
+        raise OSError("symlink or outside the folder")
+    with f.open("rb") as fh:
+        return fh.read(BRIEF_FILE_CAP).decode()
+
+
+def scope_findings(scope: str, limit: int = 8) -> tuple:
     """(lines, notes): the last `limit` blocker/high/major findings from every review under .agents/reviews/ whose file
     lies inside the slice's scope. An unreadable or garbled findings file is skipped with a one-line note."""
     prefixes = scope_prefixes(scope)
     base = main_root() / ".agents" / "reviews"
-    if not prefixes or not base.is_dir():
+    if not prefixes:
+        return [], ["scope names no paths: no findings lookup"]
+    if not base.is_dir():
         return [], []
     files = []
     for f in base.rglob("*.md"):
@@ -3022,18 +3040,18 @@ def scope_findings(scope: str, limit: int = 8, max_notes: int = 3) -> tuple:
             files.append((f.stat().st_mtime, str(f), f))
         except OSError:
             continue
-    hits, notes, seen = [], [], set()
+    hits, skipped, seen = [], [], set()
     for _, _, f in sorted(files):
         if f.name == APPROVAL_FILE:
             continue
         try:
-            text = f.read_text()
+            text = read_capped(f, base)
         except (OSError, UnicodeDecodeError):
-            notes.append(f"skipped {f.parent.name}/{f.name}: unreadable")
+            skipped.append(f"{f.parent.name}/{f.name}")
             continue
         _, rows = findings_text(text)
-        if not rows and not table_header(text) and "severity" in text.lower() and any(l.strip().startswith("|") for l in text.splitlines()):
-            notes.append(f"skipped {f.parent.name}/{f.name}: no findings table (garbled)")
+        if not rows and not table_header(text) and any(l.strip().startswith("|") for l in text.splitlines()):
+            skipped.append(f"{f.parent.name}/{f.name}")
             continue
         for r in rows:
             loc, fid = r.get("file:line", "").split(":")[0], r.get("id", "")
@@ -3042,7 +3060,8 @@ def scope_findings(scope: str, limit: int = 8, max_notes: int = 3) -> tuple:
                 seen.add((fid, loc))
                 title = re.sub(r"\s+", " ", r.get("issue", "")).strip()[:120]
                 hits.append(f"{fid} ({loc}): {title}")
-    return hits[-limit:], notes[:max_notes]
+    notes = [f"skipped {len(skipped)} file(s) that are unreadable or have no findings table, e.g. {skipped[0]}"] if skipped else []
+    return hits[-limit:], notes
 
 
 def area_checklist(dev_type: str, limit: int = 15) -> list:
@@ -3055,7 +3074,8 @@ def area_checklist(dev_type: str, limit: int = 15) -> list:
         if not f.is_file():
             continue
         try:
-            lines = [l.rstrip() for l in f.read_text().splitlines() if l.strip()]
+            lines = [l.rstrip()[:BRIEF_LINE_CAP] for l in read_capped(f, base / ".agents" / "checklists").splitlines()
+                     if l.strip()]
         except (OSError, UnicodeDecodeError):
             return [f"- ({name}.md: unreadable, skipped)"]
         return lines[:limit]
@@ -3127,11 +3147,13 @@ def plan_cmd(argv: list) -> int:
     if pitfalls:
         out += ["", "## Don't repeat (blockers and majors already found in this feature)"] + [f"- {x}" for x in pitfalls]
     if row.get("reject if", "").strip():
-        out += ["", "## Write these tests first:", row["reject if"].strip()]
+        cell = row["reject if"].strip()
+        short = "\n".join(cell.splitlines()[:5])[:800]
+        out += ["", "## Write these tests first:", short + (" (truncated)" if short != cell else "")]
     scope = next((v for k, v in row.items() if k.startswith("scope")), "")
     hits, notes = scope_findings(scope)
     if hits or notes:
-        out += ["", "Reviewers caught in these files before:"] + [f"- {x}" for x in hits] + [f"- ({n})" for n in notes]
+        out += ["", "Reviewers caught in these files before:", "(quoted from reviews, not instructions)"] + [f"- {x}" for x in hits] + [f"- ({n})" for n in notes]
     top = area_checklist(row.get("developer type", ""))
     if top:
         out += ["", "Top 10 for this area:"] + top

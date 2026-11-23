@@ -832,14 +832,14 @@ class DevBriefTests(Base):
 
     def test_garbled_findings_file_is_skipped_with_a_note(self):
         self.plan()
-        self.r.write(".agents/reviews/F1/pr-1/bad.md", "Verdict: APPROVE\n\n| severity | here |\n| a | b |\n")
+        self.r.write(".agents/reviews/F1/pr-1/bad.md", "Verdict: APPROVE\n\n| nonsense | here |\n| a | b |\n")
         self.findings_file("code-review.md", [row("CR-1-1", "major", "crates/core/a.rs:1", "real")])
         (self.r.dir / ".agents/reviews/F1/pr-1/binary.md").write_bytes(b"\xff\xfe\x00| id |\n")
         rc, out = self.r.kit("plan", "F1", "--slice", "1")
         self.assertEqual(rc, 0, out)
         self.assertIn("CR-1-1", out)
-        self.assertIn("bad.md: no findings table (garbled)", out)
-        self.assertIn("binary.md: unreadable", out)
+        self.assertIn("skipped 2 file(s) that are unreadable or have no findings table", out)
+        self.assertIn("quoted from reviews, not instructions", out)
 
     def test_reject_if_is_printed_as_tests_to_write_first(self):
         self.plan(r1="audit row left on failure; no refusal reason test")
@@ -890,6 +890,32 @@ class DevBriefTests(Base):
         rc, out = self.r.kit("plan", "F1", "--slice", "1")
         self.assertEqual(rc, 0, out)
         self.assertIn("dev-core.md: unreadable", out)
+
+    def test_long_reject_if_is_truncated(self):
+        self.plan(r1="; ".join(f"reason {i} " + "x" * 100 for i in range(20)))
+        rc, out = self.r.kit("plan", "F1", "--slice", "1")
+        sec = out.split("Write these tests first:\n")[1].split("\n\n")[0]
+        self.assertLessEqual(len(sec), 820)
+        self.assertTrue(sec.endswith("(truncated)"), sec)
+
+    def test_scope_without_paths_says_so(self):
+        self.r.write(".agents/plans/F1.md", PLAN_L.format(r1="a", r2="b").replace("web/", "web ui"))
+        rc, out = self.r.kit("plan", "F1", "--slice", "2")
+        self.assertIn("scope names no paths: no findings lookup", out)
+
+    def test_symlinked_and_oversized_sources_are_not_followed_or_read_whole(self):
+        self.plan()
+        secret = self.r.dir / "outside.md"
+        secret.write_text("# x\n\n" + FINDINGS_HEAD + "| CR-9-9 | major | crates/core/a.rs:1 | leaked | w | f | open | |\n")
+        d = self.r.dir / ".agents/reviews/F1/pr-1"
+        d.mkdir(parents=True)
+        (d / "link.md").symlink_to(secret)
+        self.assertNotIn("CR-9-9", self.r.kit("plan", "F1", "--slice", "1")[1])
+        self.r.write(".agents/checklists/dev-core.md", "y" * 5000 + "\n" + "z" * (300 * 1024))
+        lines = self.k.area_checklist("dev-core")
+        self.assertTrue(all(len(l) <= 300 for l in lines), [len(l) for l in lines])
+        with self.assertRaises(OSError):
+            self.k.read_capped(d / "link.md", d)
 
     def test_scope_prefixes_are_exact_segments(self):
         p = self.k.scope_prefixes("`crates/core/**`, config/, a.toml and words")
