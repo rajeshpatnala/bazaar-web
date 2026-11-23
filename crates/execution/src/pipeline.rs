@@ -1213,7 +1213,7 @@ mod tests {
         *r.gate.verdict.lock().unwrap() = GateOutcome::Block("moved".into());
         assert!(matches!(
             r.pipe.decide(IntentId(5), Approve, "u").await,
-            Outcome::GateBlocked(_)
+            Outcome::GateBlocked(m) if m == "moved"
         ));
         assert_eq!(ids(&r), Vec::<u128>::new());
         assert_eq!(state_of(&r, 5), "blocked");
@@ -1861,7 +1861,7 @@ mod tests {
         *r.gate.verdict.lock().unwrap() = GateOutcome::Block("x".into());
         assert!(matches!(
             r.pipe.decide(IntentId(1), Approve, "u").await,
-            Outcome::GateBlocked(_)
+            Outcome::GateBlocked(m) if m == "x"
         ));
         assert!(r.pipe.queue.repo().rows.lock().unwrap().is_empty());
         // Past the TTL: Expired, no approval row, nothing sent.

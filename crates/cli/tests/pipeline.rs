@@ -396,8 +396,9 @@ async fn state(s: &SqliteStore, id: u128) -> String {
 
 const OWNER: &str = "owner";
 
-fn blocked(o: &Outcome) -> bool {
-    matches!(o, Outcome::GateBlocked(_))
+/// True when the gate refused AND the refusal text names `rule` (known-pitfalls #5).
+fn blocked(o: &Outcome, rule: &str) -> bool {
+    matches!(o, Outcome::GateBlocked(m) if m.contains(rule))
 }
 
 // ---- AC1 -----------------------------------------------------------------------------------
@@ -531,7 +532,7 @@ async fn an_exit_must_shrink_the_position_net_of_other_pending_exits() {
     );
     // 6 pending + 6 more > 10 held: blocked.
     let second = h.submit(env.intent(2, Side::Sell, 6, true)).await.unwrap();
-    assert!(blocked(&second), "{second:?}");
+    assert!(blocked(&second, "no live position to reduce"), "{second:?}");
     assert_eq!(state(&store, 2).await, "blocked");
     // 6 + 4 fits exactly.
     assert_eq!(
@@ -551,7 +552,10 @@ async fn an_exit_must_shrink_the_position_net_of_other_pending_exits() {
     );
     assert_eq!(state(&store, 1).await, "unknown");
     let again = h.submit(env.intent(4, Side::Sell, 1, true)).await.unwrap();
-    assert!(blocked(&again), "6 unknown + 4 pending + 1 > 10: {again:?}");
+    assert!(
+        blocked(&again, "no live position to reduce"),
+        "6 unknown + 4 pending + 1 > 10: {again:?}"
+    );
 }
 
 #[tokio::test]
@@ -579,7 +583,7 @@ async fn an_undecodable_stored_order_makes_pending_exits_unknown_and_blocks_exit
     .await
     .unwrap();
     let out = h.submit(env.intent(1, Side::Sell, 1, true)).await.unwrap();
-    assert!(blocked(&out), "{out:?}");
+    assert!(blocked(&out, "pending exit quantity unknown"), "{out:?}");
     // Entries do not depend on pending exits.
     assert_eq!(
         h.submit(env.intent(2, Side::Buy, 10, false)).await.unwrap(),
@@ -594,11 +598,14 @@ async fn the_cost_model_unknown_blocks_and_a_missing_position_blocks_an_exit() {
     pipe.reload().await.unwrap();
     let h = pipe.spawn();
     let out = h.submit(env.intent(1, Side::Buy, 10, false)).await.unwrap();
-    assert!(blocked(&out), "{out:?}");
+    assert!(blocked(&out, "G02"), "{out:?}");
     assert_eq!(state(&store, 1).await, "blocked");
     let (_, h2, _) = boot(&env).await;
     let out = h2.submit(env.intent(2, Side::Sell, 1, true)).await.unwrap();
-    assert!(blocked(&out), "no live position: {out:?}");
+    assert!(
+        blocked(&out, "no live position to reduce"),
+        "no live position: {out:?}"
+    );
     assert_eq!(env.placed(), Vec::<u128>::new());
 }
 
@@ -632,7 +639,10 @@ async fn kill_switch_reason_is_stored_and_the_gate_reads_it_from_the_store() {
     // Entries blocked at the gate (the context's kill state is the store's); a genuine exit
     // passes while `kill_allow_reduce_only` is true.
     let entry = h.submit(env.intent(1, Side::Buy, 10, false)).await.unwrap();
-    assert!(blocked(&entry), "{entry:?}");
+    assert!(
+        blocked(&entry, "only reduce_only exits are allowed"),
+        "{entry:?}"
+    );
     assert_eq!(
         h.submit(env.intent(2, Side::Sell, 4, true)).await.unwrap(),
         Outcome::Queued
@@ -666,7 +676,10 @@ async fn with_kill_allow_reduce_only_false_an_exit_is_blocked_while_killed() {
     env.advance(2);
     // Killed with the key false: neither a new exit nor the approval of a queued one goes out.
     let new_exit = h.submit(env.intent(2, Side::Sell, 4, true)).await.unwrap();
-    assert!(blocked(&new_exit), "{new_exit:?}");
+    assert!(
+        blocked(&new_exit, "exits are not allowed by configuration"),
+        "{new_exit:?}"
+    );
     let out = h
         .decide(IntentId(1), ApprovalDecision::Approve, OWNER)
         .await
@@ -867,7 +880,10 @@ async fn an_unreadable_kill_switch_reads_as_unknown_and_blocks_entries() {
         .unwrap();
     c.close().await.unwrap();
     let out = h.submit(env.intent(1, Side::Buy, 10, false)).await.unwrap();
-    assert!(blocked(&out), "{out:?}");
+    assert!(
+        blocked(&out, "only reduce_only exits are allowed"),
+        "{out:?}"
+    );
     assert_eq!(env.placed(), Vec::<u128>::new());
 }
 
