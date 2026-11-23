@@ -1533,6 +1533,16 @@ def required_for_ref(feature: str, ref: str):
     return None
 
 
+def ref_base(ref: str) -> str:
+    """Base ref to compare a review folder's branch against (pr-N or a branch name)."""
+    if ref.startswith("pr-") and ref[3:].isdigit():
+        try:
+            return pr_refs(pr_info(ref[3:]))[0]
+        except SystemExit:
+            return base_ref()
+    return base_ref()
+
+
 def missing_reviews(feature: str, ref: str, req: list) -> list:
     """Required review files that don't exist yet or have no verdict."""
     d = review_dir(feature, ref)
@@ -1548,6 +1558,15 @@ def missing_reviews(feature: str, ref: str, req: list) -> list:
         if not f.exists() or not findings(f)[0]:
             out.append(r)
     return out
+
+
+def nit_defers(fname: str) -> bool:
+    """A nit from the code or test reviewer is carried to the feature record's Deferred list instead of costing a fix
+    round (team.md -> nit_policy, default defer). Security and domain/safety reviewers' files never qualify."""
+    if team_setting("nit_policy", "defer").lower() != "defer":
+        return False
+    stem = pathlib.Path(fname).stem
+    return bool(re.match(r"(code-review|tests)([-_.]|\d|$)", stem))
 
 
 def triage_decision(fname: str, r: dict, spots: dict, defer_new: bool, fix_files: set) -> tuple:
@@ -1567,6 +1586,8 @@ def triage_decision(fname: str, r: dict, spots: dict, defer_new: bool, fix_files
         return "", "reviewers suggest different fixes for the same spot"
     if sev not in AUTO_FIX | CHEAP:
         return "", "unknown severity"
+    if sev == "nit" and not safety and nit_defers(fname):
+        return "defer: next slice (nit; team.md nit_policy = defer)", ""
     m = DEFER_RX.search(text)
     if m and sev in CHEAP and not safety:  # only a non-safety minor/nit follows the reviewer's "later slice" by script
         target = m.group(2) or m.group(3)
@@ -1621,7 +1642,40 @@ def triage(argv: list) -> int:
                 spots.setdefault(spot, set()).add(fix.lower())
     ref_arg = argv[argv.index("--ref") + 1] if "--ref" in argv else ""
 
+    def restamp(reason: str) -> None:
+        """An approval older than the branch head is re-stamped when nothing needs judgment, no blocker or fix-now
+        finding is open and every review still covers the head (fresh or carried forward)."""
+        f = approval_path(feature, ref_arg)
+        head = ref_head(feature, ref_arg)
+        old = file_commit(f.read_text())
+        if not head or not old or sha_of(old) == sha_of(head):
+            return
+        base = ref_base(ref_arg)
+        d, rows_all, stale = f.parent, [], []
+        for rf in sorted(d.glob("*.md")):
+            if rf.name == APPROVAL_FILE:
+                continue
+            t = rf.read_text(errors="replace")
+            good, _ = review_fresh(t, head, base, d)
+            if not good:
+                stale.append(rf.name)
+            rows_all += findings_text(t)[1]
+        unfixed = [r.get("id", "?") for r in rows_all if r.get("status", "").lower() in OPEN
+                   and r.get("tech-lead decision", r.get("decision", "")).strip().lower().startswith("fix now")]
+        blockers = open_blockers(rows_all, AUTO_FIX)
+        if stale or unfixed or blockers:
+            print(f"  approval stays at {old[:9]} (branch head {head[:9]}): "
+                  + "; ".join(x for x in (f"reviews not covering head: {', '.join(stale)}" if stale else "",
+                                          f"fix-now not confirmed: {', '.join(unfixed)}" if unfixed else "",
+                                          f"open blockers: {', '.join(blockers)}" if blockers else "") if x))
+            return
+        write_approval(feature, ref_arg, f"triage ({reason}; re-stamped after a fix round)", commit=head)
+        print(f"  approval re-stamped {old[:9]} -> {head[:9]} ({ref_arg}): fixes confirmed, nothing needs judgment")
+
     def maybe_approve(reason: str) -> None:
+        if ref_arg and not dry and approval_path(feature, ref_arg).exists():
+            restamp(reason)
+            return
         if not ref_arg or dry or approval_path(feature, ref_arg).exists():
             return
         req = required_for_ref(feature, ref_arg)
@@ -2013,7 +2067,7 @@ def warm(argv: list) -> int:
 
 SETTING_CHOICES = {"work_mode": ["worktrees", "in-place"], "preload_mode": ["cards", "skills"],
                    "review_rounds": ["full", "fixes-only"], "defer_minor_after_round": ["off", "1", "2"],
-                   "budget_measure": ["tokens", "cost-eq"]}
+                   "budget_measure": ["tokens", "cost-eq"], "nit_policy": ["defer", "fix"]}
 FREE_TEXT = {"envelope_command", "reuse_roles", "integration_branch", "release_branch", "usd_per_million_tokens",
              "subagent_model", "security_block_severities", "records_extra_globs"}
 
@@ -2944,6 +2998,47 @@ VERDICT_WORDS = {"code-review.md": "APPROVE | REQUEST CHANGES", "security.md": "
                  "tests": "SIGN-OFF | CHANGES NEEDED"}
 
 
+VALID_VERDICTS = {"code-review": ("APPROVE", "REQUEST CHANGES", "CHANGES REQUESTED"),
+                  "security": ("PASS", "FAIL", "BLOCK"), "tests": ("SIGN-OFF", "CHANGES NEEDED")}
+APPROVING = ("APPROVE", "PASS", "SIGN-OFF")
+
+
+def verdict_kind(fname: str) -> str:
+    m = re.match(r"(code-review|security|tests)([-_.]|\d|$)", pathlib.Path(fname).stem)
+    return m.group(1) if m else ""
+
+
+def verdict_problems(fname: str, text: str) -> list:
+    """The verdict word must be one merge-check understands (a typo would silently read as 'not approved')."""
+    kind, verdict = verdict_kind(fname), findings_text(text)[0]
+    if not kind or not verdict:
+        return []
+    if verdict.startswith(VALID_VERDICTS[kind]):
+        return []
+    return [f"Verdict '{verdict}' is not valid for {fname}; use one of: {' | '.join(VALID_VERDICTS[kind])}"]
+
+
+def approving_verdict(fname: str, verdict: str) -> bool:
+    kind = verdict_kind(fname)
+    if kind:
+        return verdict.startswith(APPROVING)
+    return verdict.startswith(APPROVING + tuple(w.upper() for d in domain_reviews() for w in d.get("pass", [])))
+
+
+def unresolved_rows(rows: list, fname: str = "") -> list:
+    """Ids of findings still open / fix-now that an approving verdict can't coexist with. Info notes, and nits of the
+    code/test reviewer while nit_policy = defer (triage defers them), are excepted."""
+    out = []
+    for r in rows:
+        dec = r.get("tech-lead decision", r.get("decision", "")).strip().lower()
+        if r.get("severity") == "info" or dec.startswith(CLEARED) or \
+                (r.get("severity") == "nit" and not is_safety(fname, r) and nit_defers(fname)):
+            continue
+        if r.get("status", "").lower() in OPEN:
+            out.append(r.get("id", "?"))
+    return out
+
+
 BULLET_FINDING_RX = re.compile(r"^\s*[-*]\s+.*\b(blocker|major|minor|nit|critical|high|medium)\b", re.I | re.M)
 REQUIRED_COLUMNS = ("id", "severity", "file:line", "issue", "status", "tech-lead decision")
 
@@ -3009,6 +3104,7 @@ def save_review(argv: list) -> int:
                             f"(latest: {packs[-1][:12]}) - copy the \"Reviewed commit\" line exactly")
         else:
             commit = full
+    problems += verdict_problems(src.name, text)
     if problems:
         print("save-review: fix and run again:\n  - " + "\n  - ".join(problems))
         return 1
@@ -3024,6 +3120,12 @@ def save_review(argv: list) -> int:
         round_no = int(stated.group(1)) if stated and (not old or int(stated.group(1)) > old_round) else \
             (old_round + 1 if old and old_commit and old_commit != commit else max(old_round, 1))
         text = set_review_meta(text, commit, round_no, old)
+        stale = round_no >= 2 and approving_verdict(src.name, verdict) and unresolved_rows(rows, src.name)
+        if stale:
+            print("save-review: fix and run again:\n  - Round " + f"{round_no} says {verdict} but these findings are still "
+                  f"open / fix-now: {', '.join(stale)} - set their status to fixed (or accepted risk / disputed with a "
+                  "reason), or keep the verdict as changes requested")
+            return 1
     final = keep_decisions(current, text) if current else text
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text(final)
@@ -3185,14 +3287,52 @@ def own_changes_since(commit: str, head: str, base: str) -> tuple:
     return (not own), (f"{len(own)} commit(s) after the review: {', '.join(own[:4])}" if own else "")
 
 
-def review_fresh(text: str, head: str, base: str) -> tuple:
-    """(ok, detail) for one review file against the branch head."""
+CARRY_MAX_LINES = 20
+
+
+def carry_forward(d: pathlib.Path, commit: str, head: str, base: str) -> tuple:
+    """(ok, detail): a review dated before head still stands when every commit since only touches lines cited by this
+    PR's own minor/nit findings (fix-scope clean), the extra change is <= 20 lines, and no changed file is
+    security-sensitive, a risk-guardian/quant path or a policy file (the kit's docs under .agents/ are exempt, except
+    team.md). Blocking findings, safety findings and anything else keep needing their reviewer."""
+    if not (sha_of(commit) and sha_of(head) and is_ancestor(commit, head)):
+        return False, ""
+    feature, ref = d.parent.name, d.name
+    files = git("diff", "--name-only", commit, head).split()
+    sensitive = SENSITIVE_DEFAULT + POLICY_FILES + stack().get("security_sensitive_globs", [])
+    guarded = [g for dr in domain_reviews() for g in dr.get("globs", [])]
+    hit = [f for f in files if (matches(f, sensitive) or matches(f, guarded))
+           and not (f.startswith(".agents/") and f.endswith(".md") and f != ".agents/team.md")]
+    if hit:
+        return False, f"carry-forward refused: {', '.join(hit[:3])} is security-sensitive / risk / quant / policy"
+    stats = diff_stats(commit, head)
+    lines = sum(a + dl for a, dl, _ in stats)
+    if lines > CARRY_MAX_LINES:
+        return False, f"carry-forward refused: {lines} changed lines since the review (max {CARRY_MAX_LINES})"
+    rep = scope_report(feature, ref, base, head, stats, commit,
+                       only=lambda n, r: r.get("severity") in ("minor", "nit", "low") and not is_safety(n, r), slack=10)
+    if rep["note"] or rep["outside"]:
+        return False, "carry-forward refused: " + (rep["note"] or f"change outside the minor/nit findings ({rep['outside'][0][2:]})")
+    return True, (f"carry-forward: {lines} line(s) in {len(files)} file(s) since the review, only at lines cited by "
+                  "minor/nit findings, no sensitive/risk/quant path")
+
+
+def review_fresh(text: str, head: str, base: str, d: pathlib.Path = None) -> tuple:
+    """(ok, detail) for one review file against the branch head. With `d` (the PR's review folder) a small fix of
+    minor/nit findings keeps the review valid (carry_forward)."""
     if team_setting("require_reviewed_commit", "yes").lower() != "yes":
         return True, ""
     c = file_commit(text)
     if not c:
         return False, "no `Commit:` line (the review doesn't say which commit it covered)"
-    return own_changes_since(c, head, base)
+    ok, detail = own_changes_since(c, head, base)
+    if not ok and d is not None:
+        cf_ok, cf = carry_forward(d, c, head, base)
+        if cf_ok:
+            return True, cf
+        if cf:
+            detail += f"; {cf}"
+    return ok, detail
 
 
 def is_safety(fname: str, row: dict) -> bool:
@@ -3257,7 +3397,7 @@ def round2_context(feature: str, ref: str, names: list, base: str, headref: str,
     return fix_diff(base, headref, since, stats, context) or "(no code changes since the review)", header
 
 
-def scope_report(feature: str, ref: str, base: str, headref: str, stats: list, since: str = "") -> dict:
+def scope_report(feature: str, ref: str, base: str, headref: str, stats: list, since: str = "", only=None, slack: int = 60) -> dict:
     """Map the changes since the last review to the findings that asked for them. A guide for the reviewer and the
     manager, not a guarantee: the round-2 reviewer still reads the whole fix diff."""
     d = review_dir(feature, ref)
@@ -3277,6 +3417,8 @@ def scope_report(feature: str, ref: str, base: str, headref: str, stats: list, s
             continue
         _, rows = findings(d / n)
         for r in rows:
+            if only and not only(n, r):  # e.g. carry-forward counts only minor/nit findings as scope
+                continue
             loc = (r.get("file:line") or "").strip()
             path, _, line = loc.partition(":")
             if not path:
@@ -3293,7 +3435,7 @@ def scope_report(feature: str, ref: str, base: str, headref: str, stats: list, s
         elif l.startswith("@@") and path:
             m = re.search(r"\+(\d+)(?:,(\d+))?", l)
             start = int(m.group(1)) if m else 0
-            ids = [i for i, nums in spots.get(path, []) if not nums or any(abs(n - start) <= 60 for n in nums)]
+            ids = [i for i, nums in spots.get(path, []) if not nums or any(abs(n - start) <= slack for n in nums)]
             stem = pathlib.Path(path).stem.replace("_test", "").replace(".test", "").replace("test_", "")
             test_of = matches(path, tests) and any(stem and stem in pathlib.Path(p).stem for p in spots)
             where = f"{path}:{start}"
@@ -3366,9 +3508,11 @@ def approval_check(feature: str, ref: str, required: list, head: str = "", base:
         text = f.read_text()
         m = re.search(r"^Approved:\s*(.+)$", text, re.M)
         if head:
-            good, detail = review_fresh(text, head, base)
+            good, detail = review_fresh(text, head, base, f.parent)
             if not good:
                 return [("approval covers the current commit", False, detail)]
+            if detail:
+                return [("approval covers the current commit", True, detail), ("approved to merge", True, m.group(1) if m else "")]
         return [("approved to merge", True, m.group(1) if m else "")]
     return [("approved to merge", False, f"no {f.relative_to(ROOT)}: run `just triage {feature} --ref {ref}` (approves when "
                                          "nothing needs judgment) or ask the tech lead to decide and `just approve`")]
@@ -3382,23 +3526,25 @@ def security_block() -> set:
 
 def freshness_checks(d: pathlib.Path, names: list, head: str, base: str) -> list:
     """One line per required review file: does it cover the current commit, and are its fix-now items confirmed?"""
-    res, stale, unfixed = [], [], []
+    res, stale, unfixed, carried = [], [], [], []
     for n in names:
         f = d / n
         if not f.exists():
             continue
         text = f.read_text(errors="replace")
         if head:
-            good, detail = review_fresh(text, head, base)
+            good, detail = review_fresh(text, head, base, d)
             if not good:
                 stale.append(f"{n}: {detail}")
+            elif detail:
+                carried.append(f"{n}: {detail}")
         _, rows = findings_text(text)
         for r in rows:
             dec = r.get("tech-lead decision", r.get("decision", "")).strip().lower()
             if r.get("status", "").lower() in OPEN and dec.startswith("fix now"):
                 unfixed.append(r.get("id", "?"))
     if head:
-        res.append(("reviews cover the current commit", not stale, "; ".join(stale[:4])))
+        res.append(("reviews cover the current commit", not stale, "; ".join(stale[:4]) or "; ".join(carried[:4])))
     res.append(("fix-now findings confirmed fixed", not unfixed,
                 f"still open: {', '.join(unfixed[:10])} - the reviewer re-checks them (minor/nit: the tech lead may "
                 "`just verify-fixes`)" if unfixed else ""))
@@ -3565,7 +3711,8 @@ def merge_check(argv: list, quiet: bool = False) -> int:
               + ("  (only CI is unfinished: `just pr-wait <pr>` waits for free; don't re-check by hand)" if verdict == "PENDING" else ""))
         for name, good, detail in results:
             mark = "ok  " if good is True else "WAIT" if good == PENDING else "FAIL"
-            print(f"  {mark} {name}" + (f" ({detail})" if detail and good is not True else ""))
+            print(f"  {mark} {name}" + (f" ({detail})" if detail and (good is not True or detail.startswith("carry-forward")
+                                                                      or "carry-forward:" in detail) else ""))
         if failed:
             fixes = [fix_hint(name, argv, integ) for name, _, _ in failed]
             fixes = sorted(dict.fromkeys(f for f in fixes if f), key=lambda f: int(f[0]))

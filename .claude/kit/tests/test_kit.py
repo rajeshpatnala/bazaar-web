@@ -76,12 +76,13 @@ class KitRepo:
         return r.returncode, r.stdout + r.stderr
 
     def set(self, name: str, value: str) -> None:
-        t = (self.dir / ".agents" / "team.md").read_text()
         import re
+        t = (self.dir / ".agents" / "team.md").read_text()
         t2 = re.sub(rf"^(\|\s*{name}\s*\|\s*)[^|]*(\|)", rf"\g<1>{value} \2", t, flags=re.M)
-        assert t2 != t, f"no row for {name}"
+        assert re.search(rf"^\|\s*{name}\s*\|", t, re.M), f"no row for {name}"
         (self.dir / ".agents" / "team.md").write_text(t2)
-        self.commit(f"chore: set {name}")  # on the integration branch, so feature branches start from it
+        if self.git("status", "--porcelain"):
+            self.commit(f"chore: set {name}")  # on the integration branch, so feature branches start from it
 
     def gate_pass(self, ref: str) -> None:
         sha = self.git("rev-parse", ref)
@@ -299,6 +300,7 @@ class TriageTests(Base):
 
     def test_new_minor_after_round_one_is_deferred_only_outside_the_fix(self):
         self.r.set("defer_minor_after_round", "1")
+        self.r.set("nit_policy", "fix")
         b = "feat/F1-r"
         self.r.branch(b, {"src/lib.rs": "pub fn a() -> i32 { 2 }\n", "src/util.rs": "pub fn u() {}\n"})
         self.r.review(b, "code-review.md", "REQUEST CHANGES", [row("CR-1-1", "major", dec="fix now (auto)")])
@@ -306,7 +308,7 @@ class TriageTests(Base):
         self.r.write("src/lib.rs", "pub fn a() -> i32 { 3 }\n")
         self.r.commit("fix: CR-1-1")
         self.r.git("switch", "-q", "develop")
-        self.r.review(b, "code-review.md", "APPROVE", [row("CR-1-1", "major", status="fixed", dec="fix now (auto)"),
+        self.r.review(b, "code-review.md", "REQUEST CHANGES", [row("CR-1-1", "major", status="fixed", dec="fix now (auto)"),
                                                      row("CR-1-2", "nit", loc="src/util.rs:1"),
                                                      row("CR-1-3", "nit", loc="src/lib.rs:1")])
         self.r.kit("triage", "F1", "--ref", "feat-F1-r")
@@ -402,6 +404,119 @@ class ReportTests(Base):
         self.assertIn("| cold-start share (agents; envelope left out) | 12%", report)  # 18k of 140k
         self.assertIn("Spend by role", report)
         self.assertNotIn("code-reviewer relaunched", report)
+
+
+class NitCostTests(Base):
+    LIB = "".join(f"pub fn f{i}() -> i32 {{ {i} }}\n" for i in range(30))
+
+    def decision(self, ref, rid, fname="code-review.md"):
+        text = (self.r.dir / f".agents/reviews/F1/{ref}/{fname}").read_text()
+        for line in text.splitlines():
+            if line.startswith(f"| {rid} "):
+                return line.strip().strip("|").split("|")[-1].strip()
+        return None
+
+    def edit(self, b, files):
+        self.r.git("switch", "-q", b)
+        for k, v in files.items():
+            self.r.write(k, v)
+        sha = self.r.commit("fix: small")
+        self.r.git("switch", "-q", "develop")
+        return sha
+
+    def approved_branch(self, rows, name="feat/F1-n", extra=None):
+        self.r.branch(name, {"src/lib.rs": self.LIB, **(extra or {})})
+        self.r.review(name, "code-review.md", "APPROVE", rows)
+        ref = name.replace("/", "-")
+        rc, out = self.r.kit("triage", "F1", "--ref", ref)
+        self.assertIn("approved to merge", out)
+        return name, ref
+
+    def test_nit_is_deferred_by_default_minor_and_security_nit_are_not(self):
+        b = "feat/F1-nd"
+        self.r.branch(b, {"src/auth.rs": "pub fn login() {}\n"})
+        self.r.review(b, "code-review.md", "APPROVE", [row("CR-1-1", "nit"), row("CR-1-2", "minor")])
+        self.r.review(b, "security.md", "PASS", [row("SEC-1-1", "nit", "src/auth.rs:1")])
+        self.r.kit("triage", "F1", "--ref", "feat-F1-nd")
+        self.assertTrue(self.decision("feat-F1-nd", "CR-1-1").startswith("defer: next slice"))
+        self.assertEqual(self.decision("feat-F1-nd", "CR-1-2"), "fix now if cheap (auto)")
+        self.assertEqual(self.decision("feat-F1-nd", "SEC-1-1", "security.md"), "fix now (auto)")
+
+    def test_nit_policy_fix_restores_fix_now(self):
+        self.r.set("nit_policy", "fix")
+        b = "feat/F1-nf"
+        self.r.branch(b, {"src/lib.rs": "pub fn a() -> i32 { 2 }\n"})
+        self.r.review(b, "code-review.md", "APPROVE", [row("CR-1-1", "nit")])
+        self.r.kit("triage", "F1", "--ref", "feat-F1-nf")
+        self.assertEqual(self.decision("feat-F1-nf", "CR-1-1"), "fix now if cheap (auto)")
+
+    def test_save_review_rejects_wrong_verdict_word(self):
+        b = "feat/F1-v"
+        self.r.branch(b, {"src/lib.rs": "pub fn a() -> i32 { 2 }\n"})
+        rc, out = self.r.review(b, "code-review.md", "LGTM", [])
+        self.assertEqual(rc, 1, out)
+        self.assertIn("APPROVE | REQUEST CHANGES", out)
+
+    def test_save_review_round2_approve_with_open_finding_is_refused(self):
+        b = "feat/F1-sr"
+        self.r.branch(b, {"src/lib.rs": "pub fn a() -> i32 { 2 }\n"})
+        self.r.review(b, "code-review.md", "REQUEST CHANGES", [row("CR-1-1", "major", dec="fix now (auto)")])
+        self.edit(b, {"src/lib.rs": "pub fn a() -> i32 { 3 }\n"})
+        rc, out = self.r.review(b, "code-review.md", "APPROVE", [row("CR-1-1", "major", dec="fix now (auto)")])
+        self.assertEqual(rc, 1, out)
+        self.assertIn("CR-1-1", out)
+        self.assertIn("keep the verdict as changes requested", out)
+        # fixed -> accepted; a new open nit does not block the approval (triage defers it)
+        rc, out = self.r.review(b, "code-review.md", "APPROVE", [row("CR-1-1", "major", status="fixed"),
+                                                               row("CR-1-2", "nit")])
+        self.assertEqual(rc, 0, out)
+
+    def test_carry_forward_small_minor_fix_passes_and_says_which_rule(self):
+        b, ref = self.approved_branch([row("CR-1-1", "minor", "src/lib.rs:2", dec="defer: next slice")])
+        self.edit(b, {"src/lib.rs": self.LIB.replace("f1() -> i32 { 1 }", "f1() -> i32 { 11 }")})
+        self.r.gate_pass(b)
+        rc, out = self.r.kit("merge-check", "--branch", b, "--feature", "F1")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("carry-forward", out)
+
+    def test_carry_forward_refused_for_risk_path_big_change_and_blocker_scope(self):
+        b, ref = self.approved_branch([row("CR-1-1", "minor", "src/lib.rs:2", dec="defer: next slice"),
+                                       row("CR-1-2", "major", "src/lib.rs:25", status="fixed")])
+        # a line that only a blocking finding cited: needs its reviewer (also > scope)
+        self.edit(b, {"src/lib.rs": self.LIB.replace("f25() -> i32 { 25 }", "f25() -> i32 { 0 }")})
+        self.r.gate_pass(b)
+        rc, out = self.r.kit("merge-check", "--branch", b, "--feature", "F1")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("reviews cover the current commit", out)
+        self.assertIn("outside the minor/nit findings", out)
+        # risk-guardian path
+        b2, _ = self.approved_branch([row("CR-1-1", "minor", "src/lib.rs:2", dec="defer: next slice")], "feat/F1-n2")
+        self.edit(b2, {"risk/limits.rs": "pub fn l() {}\n"})
+        self.r.gate_pass(b2)
+        rc, out = self.r.kit("merge-check", "--branch", b2, "--feature", "F1")
+        self.assertEqual(rc, 1, out)
+        # more than 20 lines
+        b3, _ = self.approved_branch([row("CR-1-1", "minor", "src/lib.rs:2", dec="defer: next slice")], "feat/F1-n3")
+        self.edit(b3, {"src/lib.rs": "".join(f"pub fn g{i}() -> i32 {{ {i} }}\n" for i in range(30))})
+        self.r.gate_pass(b3)
+        rc, out = self.r.kit("merge-check", "--branch", b3, "--feature", "F1")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("max 20", out)
+
+    def test_triage_restamps_stale_approval_after_a_nit_fix(self):
+        b, ref = self.approved_branch([row("CR-1-1", "nit", "src/lib.rs:2", dec="defer: next slice")])
+        head = self.edit(b, {"src/lib.rs": self.LIB.replace("f1() -> i32 { 1 }", "f1() -> i32 { 11 }")})
+        rc, out = self.r.kit("triage", "F1", "--ref", ref)
+        self.assertIn("re-stamped", out)
+        self.assertIn(head, (self.r.dir / f".agents/reviews/F1/{ref}/approval.md").read_text())
+
+    def test_triage_does_not_restamp_over_a_risk_path_change(self):
+        b, ref = self.approved_branch([row("CR-1-1", "nit", "src/lib.rs:2", dec="defer: next slice")])
+        old = (self.r.dir / f".agents/reviews/F1/{ref}/approval.md").read_text()
+        self.edit(b, {"risk/limits.rs": "pub fn l() {}\n"})
+        rc, out = self.r.kit("triage", "F1", "--ref", ref)
+        self.assertIn("approval stays", out)
+        self.assertEqual(old, (self.r.dir / f".agents/reviews/F1/{ref}/approval.md").read_text())
 
 
 class FunctionTests(unittest.TestCase):
