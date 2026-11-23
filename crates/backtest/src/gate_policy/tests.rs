@@ -312,7 +312,11 @@ fn a_close_above_the_entry_zone_is_refused() {
     assert_eq!(p.approved(), 0);
     assert_eq!(p.rejections().len(), 1);
     // G10 (entry zone: no chasing) is the rule that refused the chase.
-    assert!(p.rejections()[0].rules.contains(&RuleId::G10), "{:?}", p.rejections()[0].rules);
+    assert!(
+        p.rejections()[0].rules.contains(&RuleId::G10),
+        "{:?}",
+        p.rejections()[0].rules
+    );
 }
 
 #[test]
@@ -490,7 +494,11 @@ fn a_margin_shortfall_is_refused() {
     assert!(matches!(v, EntryVerdict::Reject(_)));
     assert_eq!(p.approved(), 0);
     // X03 (cash or margin) is the rule that names the shortfall.
-    assert!(p.rejections()[0].rules.contains(&RuleId::X03), "{:?}", p.rejections()[0].rules);
+    assert!(
+        p.rejections()[0].rules.contains(&RuleId::X03),
+        "{:?}",
+        p.rejections()[0].rules
+    );
 }
 
 #[test]
