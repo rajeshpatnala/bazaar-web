@@ -7,16 +7,20 @@
 //! build has `live-trading`, in which case it is `Unknown` (blocked) until a reconciler exists.
 
 mod driver;
+mod quotes;
 
 pub use driver::{ALARM_SQUARE_OFF, Driver, LedgerPnl, STOP_WAIT, serve_while_driven, stop};
+pub use quotes::GuardedQuotes;
 
 use std::path::Path;
 use std::sync::Arc;
 
 use bazaar_cli::compose::{BuiltPipeline, ComposeError, Ports, UnknownCost, build_pipeline};
+use bazaar_cli::costs::{F9Charges, GateCost};
+use bazaar_cli::specs::InstrumentSnapshot;
 use bazaar_core::calendar::MarketCalendar;
 use bazaar_core::clock::Clock;
-use bazaar_core::config::{RiskConfig, parse_str};
+use bazaar_core::config::{ChargesConfig, RiskConfig, parse_str};
 use bazaar_core::ports::{
     KillSwitchRepo, OrderRepo, PaperLedgerRepo, QuoteSnapshot, QuoteSource, RepoError, SourceError,
 };
@@ -26,11 +30,12 @@ use bazaar_execution::gate_adapter::{GateContext, GateInputsOwned};
 use bazaar_execution::pipeline::{PipelineHandle, ReloadReport};
 use bazaar_execution::types::OrderIntent;
 use bazaar_paper::account::{ChargeSource, LedgerKind, PaperAccount};
-use bazaar_paper::executor::{PaperExecutor, SpecSource};
-use bazaar_paper::fill::{InstrumentSpec, SimConfig};
+use bazaar_paper::executor::PaperExecutor;
+use bazaar_paper::fill::SimConfig;
 use bazaar_paper::squareoff::ValidatedSquareOffTime;
 use bazaar_risk::baseline::{BaselineError, LimitsBaseline};
 use bazaar_risk::config::Baseline;
+use bazaar_risk::gate::CostModel;
 use bazaar_risk::rules::inputs::{DataInputs, EventFlags, EvidenceInputs, MarginInputs};
 use bazaar_risk::snapshot::PortfolioSnapshot;
 use bazaar_risk::types::Tri;
@@ -52,30 +57,52 @@ impl QuoteSource for UnavailableQuotes {
     }
 }
 
-/// No charge estimate wired: the paper account refuses every fill (never books a zero charge).
-#[derive(Debug, Clone, Copy, Default)]
-pub struct UnavailableCharges;
+/// Paper charges: the real F9 model, or `Unavailable` when `charges.toml` could not be turned
+/// into one (the account then refuses every fill; it never books a zero or default charge).
+#[derive(Debug, Clone)]
+pub enum RuntimeCharges {
+    Real(F9Charges),
+    Unavailable,
+}
 
-impl ChargeSource for UnavailableCharges {
+impl ChargeSource for RuntimeCharges {
     fn charge(
         &self,
-        _: &str,
-        _: bool,
-        _: u32,
-        _: Decimal,
-        _: &str,
+        symbol: &str,
+        is_buy: bool,
+        qty: u32,
+        price: Decimal,
+        product: &str,
     ) -> Result<Decimal, SourceError> {
-        Err(SourceError::Unavailable)
+        match self {
+            Self::Real(c) => c.charge(symbol, is_buy, qty, price, product),
+            Self::Unavailable => Err(SourceError::Unavailable),
+        }
     }
 }
 
-/// No instrument specs wired: every instrument is unknown, so paper refuses the order.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct UnknownSpecs;
-
-impl SpecSource for UnknownSpecs {
-    fn spec(&self, _: &str) -> Option<InstrumentSpec> {
-        None
+/// The charge and gate-cost adapters from `charges.toml`. Any failure (unreadable, placeholder,
+/// parse) logs ONE warning and gives `Unavailable` + `UnknownCost`, so every fill and approve is
+/// refused; the server still binds (SEC-150-4, RISK-138-7). No default or zero cost, ever.
+fn cost_adapters(
+    config_dir: &Path,
+    slippage_bps: u32,
+    clock: &Arc<dyn Clock>,
+) -> (RuntimeCharges, Arc<dyn CostModel>) {
+    let built = bazaar_core::config::load::<ChargesConfig>(config_dir)
+        .map_err(|e| e.to_string())
+        .and_then(|c| {
+            let c = Arc::new(c);
+            let f9 = F9Charges::new(c.clone(), clock.clone()).map_err(|e| e.to_string())?;
+            let gate = GateCost::new(c, clock.clone(), slippage_bps).map_err(|e| e.to_string())?;
+            Ok((f9, gate))
+        });
+    match built {
+        Ok((f9, gate)) => (RuntimeCharges::Real(f9), Arc::new(gate)),
+        Err(e) => {
+            tracing::warn!(error = %e, "charges unavailable: every paper fill and approve is refused");
+            (RuntimeCharges::Unavailable, Arc::new(UnknownCost))
+        }
     }
 }
 
@@ -142,7 +169,7 @@ impl GateContext for ProdBase {
 const PAPER_SIM_SEED: u64 = 0;
 
 /// The paper executor type the runtime uses.
-pub type Paper = PaperExecutor<SqliteStore, UnavailableCharges, SqliteStore, UnknownSpecs>;
+pub type Paper = PaperExecutor<SqliteStore, RuntimeCharges, SqliteStore, InstrumentSnapshot>;
 
 /// Shares the paper executor with the tick driver (S2) while the pipeline owns the sending half.
 #[derive(Clone, Debug)]
@@ -155,7 +182,7 @@ impl Executor for SharedPaper {
 }
 
 /// The pipeline the runtime builds.
-pub type Built = BuiltPipeline<SharedPaper, LedgerPnl, UnavailableQuotes, ProdBase>;
+pub type Built<Q, B> = BuiltPipeline<SharedPaper, LedgerPnl, GuardedQuotes<Q>, B>;
 
 /// Why startup stopped; any of these means the server must not bind.
 #[derive(Debug, Error)]
@@ -275,8 +302,45 @@ impl PendingRead for StorePending {
 pub async fn start(
     db: &Path,
     risk_toml: &str,
+    config_dir: &Path,
     clock: Arc<dyn Clock>,
     calendar: MarketCalendar,
+) -> Result<Runtime, StartError> {
+    open_with(
+        db,
+        risk_toml,
+        config_dir,
+        clock,
+        calendar,
+        UnavailableQuotes,
+        ProdBase,
+    )
+    .await
+}
+
+/// Test seam: the production wiring with a chosen quote source and gate base. The quote source
+/// still goes behind `GuardedQuotes`. Compiled only for tests, so `main.rs` cannot reach it.
+#[cfg(test)]
+async fn start_with<Q: QuoteSource + 'static, B: GateContext + 'static>(
+    db: &Path,
+    risk_toml: &str,
+    config_dir: &Path,
+    clock: Arc<dyn Clock>,
+    calendar: MarketCalendar,
+    quotes: Q,
+    base: B,
+) -> Result<Runtime, StartError> {
+    open_with(db, risk_toml, config_dir, clock, calendar, quotes, base).await
+}
+
+async fn open_with<Q: QuoteSource + 'static, B: GateContext + 'static>(
+    db: &Path,
+    risk_toml: &str,
+    config_dir: &Path,
+    clock: Arc<dyn Clock>,
+    calendar: MarketCalendar,
+    quotes: Q,
+    base: B,
 ) -> Result<Runtime, StartError> {
     let store = bazaar_cli::compose::open_store(db).await?;
     let risk: RiskConfig = parse_str(risk_toml).map_err(|e| StartError::Config(e.to_string()))?;
@@ -285,7 +349,8 @@ pub async fn start(
         clock: clock.clone(),
         ttl: chrono::Duration::seconds(i64::from(risk.execution.approval_ttl_secs)),
     });
-    let (mut pipe, paper) = build(&store, risk_toml, clock, calendar).await?;
+    let (mut pipe, paper) =
+        build(&store, risk_toml, config_dir, clock, calendar, quotes, base).await?;
     let report = pipe.reload().await.map_err(StartError::Reload)?;
     Ok(Runtime {
         handle: pipe.spawn(),
@@ -320,17 +385,25 @@ async fn ensure_no_open_lots(store: &SqliteStore) -> Result<(), StartError> {
     Ok(())
 }
 
-async fn build(
+async fn build<Q: QuoteSource + 'static, B: GateContext + 'static>(
     store: &SqliteStore,
     risk_toml: &str,
+    config_dir: &Path,
     clock: Arc<dyn Clock>,
     calendar: MarketCalendar,
-) -> Result<(Built, Arc<Paper>), StartError> {
+    quotes: Q,
+    base: B,
+) -> Result<(Built<Q, B>, Arc<Paper>), StartError> {
     let risk: RiskConfig = parse_str(risk_toml).map_err(|e| StartError::Config(e.to_string()))?;
     let ex = &risk.execution;
+    let (charges, cost) = cost_adapters(config_dir, ex.paper_slippage_bps.equity, &clock);
+    let (specs, warnings) = InstrumentSnapshot::load(store, config_dir, &*clock).await;
+    for w in &warnings {
+        tracing::warn!("{w}");
+    }
     let account = Arc::new(PaperAccount::new(
         store.clone(),
-        UnavailableCharges,
+        charges,
         clock.clone(),
         ex.paper_starting_cash_inr,
     ));
@@ -365,7 +438,7 @@ async fn build(
     let paper = Arc::new(PaperExecutor::new(
         account,
         store.clone(),
-        UnknownSpecs,
+        specs,
         clock.clone(),
         cal,
         SimConfig::from_section(ex, PAPER_SIM_SEED),
@@ -381,18 +454,29 @@ async fn build(
             },
             clock.clone(),
         ),
-        quotes: UnavailableQuotes,
-        base: ProdBase,
+        quotes: GuardedQuotes::new(
+            quotes,
+            clock.clone(),
+            ex.io_timeout(),
+            risk.data.max_quote_age_secs,
+        ),
+        base,
         clock,
         calendar,
         baseline: Arc::new(NoBaseline),
-        cost: Arc::new(UnknownCost),
+        cost,
     };
     Ok((build_pipeline(store, risk_toml, ports).await?, paper))
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unused_async,
+    clippy::unused_async_trait_impl
+)]
 mod tests {
     use bazaar_core::config::{CalendarConfig, load};
     use bazaar_core::ports::{ApprovalDecision, ApprovalRepo, AuditDraft, OrderRepo};
@@ -412,6 +496,10 @@ mod tests {
         Arc::new(FakeClock::at(
             Kolkata.with_ymd_and_hms(2026, 11, 19, 11, 0, 0).unwrap(),
         ))
+    }
+
+    fn cfg() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config")
     }
 
     fn calendar() -> MarketCalendar {
@@ -459,9 +547,15 @@ mod tests {
     async fn no_quote_source_means_the_approve_is_blocked_through_the_real_gate_context() {
         let dir = tempfile::tempdir().unwrap();
         let c = clock();
-        let rt = start(&dir.path().join("x.db"), RISK, c.clone(), calendar())
-            .await
-            .unwrap();
+        let rt = start(
+            &dir.path().join("x.db"),
+            RISK,
+            &cfg(),
+            c.clone(),
+            calendar(),
+        )
+        .await
+        .unwrap();
         assert_eq!(rt.report, ReloadReport::default());
         // Submit may already block (nothing known); either way nothing is ever Placed.
         let out = rt
@@ -490,13 +584,14 @@ mod tests {
         let e = start(
             &dir.path().join("a.db"),
             "nonsense = 1",
+            &cfg(),
             clock(),
             calendar(),
         )
         .await;
         assert!(matches!(e, Err(StartError::Config(_))), "{e:?}");
         // The store path is a directory: the verified open fails.
-        let e = start(dir.path(), RISK, clock(), calendar()).await;
+        let e = start(dir.path(), RISK, &cfg(), clock(), calendar()).await;
         assert!(matches!(e, Err(StartError::Store(_))), "{e:?}");
     }
 
@@ -541,7 +636,7 @@ mod tests {
         .unwrap();
         drop(store);
         c.advance(chrono::Duration::seconds(5));
-        let rt = start(&db, RISK, c, calendar()).await.unwrap();
+        let rt = start(&db, RISK, &cfg(), c, calendar()).await.unwrap();
         assert_eq!(
             (rt.report.blocked, rt.report.resumed),
             (1, 0),
@@ -557,9 +652,15 @@ mod tests {
     async fn a_non_exit_is_refused_while_the_kill_switch_is_engaged() {
         let dir = tempfile::tempdir().unwrap();
         let c = clock();
-        let rt = start(&dir.path().join("x.db"), RISK, c.clone(), calendar())
-            .await
-            .unwrap();
+        let rt = start(
+            &dir.path().join("x.db"),
+            RISK,
+            &cfg(),
+            c.clone(),
+            calendar(),
+        )
+        .await
+        .unwrap();
         assert!(!rt.kill_switch.read().await.engaged);
         rt.handle
             .set_kill_switch(true, "owner", "stop")
@@ -585,7 +686,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("x.db");
         let c = clock();
-        let rt = start(&db, RISK, c.clone(), calendar()).await.unwrap();
+        let rt = start(&db, RISK, &cfg(), c.clone(), calendar())
+            .await
+            .unwrap();
         let mut conn = SqliteConnectOptions::new()
             .filename(&db)
             .connect()
@@ -613,7 +716,7 @@ mod tests {
         let sat = Arc::new(FakeClock::at(
             Kolkata.with_ymd_and_hms(2026, 11, 21, 11, 0, 0).unwrap(),
         ));
-        let rt = start(&dir.path().join("x.db"), RISK, sat, calendar()).await;
+        let rt = start(&dir.path().join("x.db"), RISK, &cfg(), sat, calendar()).await;
         assert!(rt.is_ok(), "{:?}", rt.err());
     }
 
@@ -625,8 +728,16 @@ mod tests {
         let db = dir.path().join("x.db");
         let c = clock();
         // A flat ledger (opening only) reopens fine.
-        drop(start(&db, RISK, c.clone(), calendar()).await.unwrap());
-        drop(start(&db, RISK, c.clone(), calendar()).await.unwrap());
+        drop(
+            start(&db, RISK, &cfg(), c.clone(), calendar())
+                .await
+                .unwrap(),
+        );
+        drop(
+            start(&db, RISK, &cfg(), c.clone(), calendar())
+                .await
+                .unwrap(),
+        );
         let store = bazaar_cli::compose::open_store(&db).await.unwrap();
         let epoch = PaperLedgerRepo::current_epoch(&store).await.unwrap()[0].epoch;
         PaperLedgerRepo::append(
@@ -642,7 +753,7 @@ mod tests {
         .await
         .unwrap();
         drop(store);
-        let e = start(&db, RISK, c, calendar()).await;
+        let e = start(&db, RISK, &cfg(), c, calendar()).await;
         match e {
             Err(StartError::Paper(m)) => assert!(m.contains("open paper lots may exist"), "{m}"),
             other => panic!("expected a refusal, got {other:?}"),
@@ -656,7 +767,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("x.db");
         let c = clock();
-        drop(start(&db, RISK, c.clone(), calendar()).await.unwrap());
+        drop(
+            start(&db, RISK, &cfg(), c.clone(), calendar())
+                .await
+                .unwrap(),
+        );
         let store = bazaar_cli::compose::open_store(&db).await.unwrap();
         let epoch = PaperLedgerRepo::current_epoch(&store).await.unwrap()[0].epoch;
         let add = |kind: &str| LedgerEntry {
@@ -716,5 +831,362 @@ mod tests {
         assert_eq!(got.snapshot.kill_switch, Tri::Known(false));
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.inputs(&i)));
         assert!(r.is_err(), "must panic on an async worker");
+    }
+
+    // ---- BZ-521 S2 wiring: real charges and specs, guarded quotes, the test seam -------------
+
+    use std::collections::BTreeMap;
+
+    use bazaar_core::instrument::{Exchange, Instrument, InstrumentType};
+    use bazaar_core::ports::InstrumentRepo;
+    use bazaar_paper::fill::Tick;
+    use bazaar_risk::rules::behaviour::EntryZone;
+    use bazaar_risk::rules::exposure::ExposureInputs;
+
+    fn d(s: &str) -> Decimal {
+        s.parse().unwrap()
+    }
+
+    /// Passes the gate for a flat paper account (the cli pipeline test's fixture, TESTEQ).
+    #[derive(Clone)]
+    struct OpenBase(Arc<FakeClock>);
+    impl GateContext for OpenBase {
+        fn inputs(&self, i: &OrderIntent) -> Option<GateInputsOwned> {
+            let now = self.0.now_ist();
+            let mut s = PortfolioSnapshot::unknown();
+            s.as_of = Tri::Known(now);
+            s.positions = Tri::Known(vec![]);
+            s.consecutive_losses = Tri::Known(0);
+            s.day_pnl = Tri::Known(Decimal::ZERO);
+            s.week_pnl = Tri::Known(Decimal::ZERO);
+            s.week_start = Tri::Known(chrono::NaiveDate::from_ymd_opt(2026, 11, 30).unwrap());
+            for f in [
+                &mut s.entries_today,
+                &mut s.orders_last_minute,
+                &mut s.orders_today,
+                &mut s.overrides_today,
+                &mut s.overrides_week,
+            ] {
+                *f = Tri::Known(0);
+            }
+            s.kill_switch = Tri::Known(false);
+            s.charges_buffer = Tri::Known(d("20"));
+            s.starting_cash = Tri::Known(d("250000"));
+            s.realised_pnl = Tri::Known(Decimal::ZERO);
+            s.equity_mtm = Tri::Known(d("250000"));
+            s.marks = Tri::Known(vec![]);
+            s.last_losing_exits = Tri::Known(vec![]);
+            let end = now.date_naive();
+            let series = (0..100u32)
+                .map(|i| {
+                    (
+                        end - chrono::Duration::days(i64::from(99 - i)),
+                        Decimal::new(i64::from(i % 7) - 3, 3),
+                    )
+                })
+                .collect();
+            let mut g = ProdBase.inputs(&intent(&self.0, 0, Side::Buy, false))?;
+            g.snapshot = s;
+            g.data.inputs_as_of = Tri::Known(now);
+            g.data.evidence = EvidenceInputs {
+                oos_trades: Tri::Known(100),
+                profit_factor: Tri::Known(d("2")),
+                expectancy_r: Tri::Known(d("0.3")),
+                walk_forward_pass: Tri::Known(true),
+            };
+            g.data.stock_fno_underlying = Tri::Known(None);
+            g.data.events = EventFlags {
+                results_window: Tri::Known(false),
+                policy_day: Tri::Known(false),
+                option_on_own_expiry: Tri::Known(false),
+            };
+            g.data.session_open = Tri::Known(true);
+            g.data.margin = MarginInputs {
+                qty: 10,
+                required: Tri::Known(d("5000")),
+                available: Tri::Known(d("250000")),
+            };
+            g.entry_zone = Tri::Known(EntryZone {
+                low: d("1930"),
+                high: d("1960"),
+            });
+            g.exposure = Some(ExposureInputs {
+                sectors: BTreeMap::from([(i.symbol.clone(), "IT".to_string())]),
+                returns: BTreeMap::from([(i.symbol.clone(), series)]),
+            });
+            g.instrument = Some(Instrument {
+                tradingsymbol: i.symbol.clone(),
+                ..master_row()
+            });
+            g.stop = Some(d("1940"));
+            g.proposed_price = Some(d("1950"));
+            g.pending_exit_qty = Some(Decimal::ZERO);
+            Some(g)
+        }
+    }
+
+    /// The fixture calendar closes at 14:00, so the paper square-off moves to 13:30. The sizing
+    /// floor on the charges allowance is lowered to Rs 1: the real cost of ONE share is far
+    /// below the Rs 15 fixture floor (see the F10 record, BZ-521 S2 note).
+    fn fixture_risk() -> String {
+        RISK.replace("15:15", "13:30").replace(
+            "min_charges_slippage_buffer = \"15\"",
+            "min_charges_slippage_buffer = \"1\"",
+        )
+    }
+
+    fn master_row() -> Instrument {
+        Instrument {
+            instrument_token: 1001,
+            exchange_token: 4,
+            tradingsymbol: "TESTEQ".into(),
+            name: "TEST EQUITY".into(),
+            exchange: Exchange::Nse,
+            instrument_type: InstrumentType::Equity,
+            segment: "NSE".into(),
+            expiry: None,
+            strike: None,
+            tick_size: d("0.05"),
+            lot_size: 1,
+        }
+    }
+
+    /// A quote at 1950, stamped with the fake clock's now.
+    struct GoodQuote(Arc<FakeClock>);
+    impl QuoteSource for GoodQuote {
+        async fn quote(&self, _: &str) -> Result<QuoteSnapshot, SourceError> {
+            Ok(QuoteSnapshot {
+                last: d("1950"),
+                lower_circuit: None,
+                upper_circuit: None,
+                bar_volume: None,
+                at_ist_rfc3339: self.0.now_ist().to_rfc3339(),
+            })
+        }
+    }
+
+    struct Env {
+        _data: tempfile::TempDir,
+        cfg: tempfile::TempDir,
+        db: std::path::PathBuf,
+        clock: Arc<FakeClock>,
+    }
+
+    /// Temp data dir whose master (fetched today) holds TESTEQ, and a temp config dir with the
+    /// fixture calendar and charges and a watchlist of `symbols`.
+    async fn env(symbols: &[&str]) -> Env {
+        let data = tempfile::tempdir().unwrap();
+        let cfg = tempfile::tempdir().unwrap();
+        let fx = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/config");
+        std::fs::copy(fx.join("calendar.toml"), cfg.path().join("calendar.toml")).unwrap();
+        // The cli charges fixture: equity rows for both products (the config fixture has fewer).
+        let charges =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../cli/tests/fixtures/charges.toml");
+        std::fs::copy(charges, cfg.path().join("charges.toml")).unwrap();
+        let list = symbols
+            .iter()
+            .map(|s| format!("\"{s}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        std::fs::write(
+            cfg.path().join("watchlists.toml"),
+            format!(
+                "schema_version = 1\nverified_on = \"2026-01-05\"\nsource = \"test\"\n[[watchlist]]\nname = \"w\"\nsymbols = [{list}]\n"
+            ),
+        )
+        .unwrap();
+        let clock = Arc::new(FakeClock::at(
+            Kolkata.with_ymd_and_hms(2026, 12, 1, 10, 30, 0).unwrap(),
+        ));
+        let db = data.path().join("x.db");
+        let store = bazaar_cli::compose::open_store(&db).await.unwrap();
+        store
+            .upsert_instruments(&[master_row()], clock.now_ist().date_naive())
+            .await
+            .unwrap();
+        drop(store);
+        Env {
+            _data: data,
+            cfg,
+            db,
+            clock,
+        }
+    }
+
+    impl Env {
+        fn calendar(&self) -> MarketCalendar {
+            MarketCalendar::from_config(&load::<CalendarConfig>(self.cfg.path()).unwrap())
+        }
+
+        async fn open(&self) -> Runtime {
+            start_with(
+                &self.db,
+                &fixture_risk(),
+                self.cfg.path(),
+                self.clock.clone(),
+                self.calendar(),
+                GoodQuote(self.clock.clone()),
+                OpenBase(self.clock.clone()),
+            )
+            .await
+            .unwrap()
+        }
+
+        fn order(&self, symbol: &str) -> OrderIntent {
+            OrderIntent {
+                symbol: symbol.into(),
+                qty: 10,
+                kind: bazaar_execution::types::OrderKind::Limit(d("1950")),
+                ..intent(&self.clock, 1, Side::Buy, false)
+            }
+        }
+
+        /// Submit then approve one order; returns the approve outcome.
+        async fn approve(&self, rt: &Runtime, symbol: &str) -> Outcome {
+            let out = rt.handle.submit(self.order(symbol)).await.unwrap();
+            assert_eq!(out, Outcome::Queued, "{out:?}");
+            self.clock.advance(chrono::Duration::seconds(2));
+            rt.handle
+                .decide(IntentId(1), ApprovalDecision::Approve, "owner")
+                .await
+                .unwrap()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_paper_fill_books_the_real_f9_charge_through_the_seam() {
+        let e = env(&["TESTEQ"]).await;
+        let rt = e.open().await;
+        let out = e.approve(&rt, "TESTEQ").await;
+        assert!(matches!(out, Outcome::Placed(_)), "{out:?}");
+        assert_eq!(rt.paper.working_count(), 1);
+        // A limit buy fills only when the price trades through the limit.
+        let mut t = bazaar_paper::executor::TickOutcome::default();
+        for price in ["1950", "1945"] {
+            e.clock.advance(chrono::Duration::seconds(1));
+            t = rt
+                .paper
+                .on_tick(&Tick {
+                    symbol: "TESTEQ".into(),
+                    price: d(price),
+                    volume: 1_000_000,
+                    lower_circuit: None,
+                    upper_circuit: None,
+                    at: e.clock.now_ist(),
+                })
+                .await;
+        }
+        assert!(t.rejected.is_empty(), "{:?}", t.rejected);
+        let fill = &t.fills[0];
+        let cfg = Arc::new(load::<ChargesConfig>(e.cfg.path()).unwrap());
+        let clock: Arc<dyn Clock> = e.clock.clone();
+        let want = F9Charges::new(cfg, clock)
+            .unwrap()
+            .charge("TESTEQ", true, fill.qty, fill.price, "mis")
+            .unwrap();
+        assert!(want > Decimal::ZERO);
+        let lines = PaperLedgerRepo::current_epoch(&rt.store).await.unwrap();
+        let charge: Vec<_> = lines.iter().filter(|l| l.kind == "charge").collect();
+        assert_eq!(charge.len(), 1, "{lines:?}");
+        assert_eq!(charge[0].amount, -want);
+        let buy: Vec<_> = lines.iter().filter(|l| l.kind == "buy").collect();
+        assert_eq!(buy[0].amount, -(fill.price * Decimal::from(fill.qty)));
+        let pos = rt
+            .paper
+            .position("TESTEQ", bazaar_execution::types::Product::Mis);
+        assert_eq!(pos, 10);
+    }
+
+    #[tokio::test]
+    async fn a_passing_quote_source_alone_does_not_open_production() {
+        // The production base with a perfect quote source: still Blocked, never placed.
+        let e = env(&["TESTEQ"]).await;
+        let rt = start_with(
+            &e.db,
+            &fixture_risk(),
+            e.cfg.path(),
+            e.clock.clone(),
+            e.calendar(),
+            GoodQuote(e.clock.clone()),
+            ProdBase,
+        )
+        .await
+        .unwrap();
+        let out = rt.handle.submit(e.order("TESTEQ")).await.unwrap();
+        assert!(blocked(&out), "{out:?}");
+        assert_eq!(rt.paper.working_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn production_start_with_real_charges_and_specs_still_blocks_every_approve() {
+        let e = env(&["TESTEQ"]).await;
+        let rt = start(
+            &e.db,
+            &fixture_risk(),
+            e.cfg.path(),
+            e.clock.clone(),
+            e.calendar(),
+        )
+        .await
+        .unwrap();
+        let out = rt.handle.submit(e.order("TESTEQ")).await.unwrap();
+        assert!(blocked(&out), "{out:?}");
+        assert_eq!(rt.paper.working_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn bad_charges_refuse_the_order_and_the_server_still_starts() {
+        for body in [
+            None,
+            Some("schema_version = 1\nplaceholder = true\n"),
+            Some("garbage"),
+        ] {
+            let e = env(&["TESTEQ"]).await;
+            let f = e.cfg.path().join("charges.toml");
+            match body {
+                None => std::fs::remove_file(&f).unwrap(),
+                Some(b) => std::fs::write(&f, b).unwrap(),
+            }
+            let rt = e.open().await; // starts: the kill switch stays reachable
+            assert!(rt.kill_switch.read().await.readable);
+            let out = rt.handle.submit(e.order("TESTEQ")).await.unwrap();
+            assert!(blocked(&out), "{body:?}: {out:?}");
+            assert_eq!(rt.paper.working_count(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_symbol_outside_the_paper_universe_is_refused_before_any_charge() {
+        let e = env(&["TESTEQ"]).await;
+        let rt = e.open().await;
+        let out = e.approve(&rt, "OTHER").await;
+        assert!(matches!(out, Outcome::ExecFailed(_)), "{out:?}");
+        assert_eq!(rt.paper.working_count(), 0);
+        let lines = PaperLedgerRepo::current_epoch(&rt.store).await.unwrap();
+        assert!(lines.iter().all(|l| l.kind == "opening"), "{lines:?}");
+    }
+
+    #[tokio::test]
+    async fn a_stale_master_gives_no_specs_so_the_order_is_refused() {
+        let e = env(&["TESTEQ"]).await;
+        e.clock.advance(chrono::Duration::days(30));
+        let rt = e.open().await;
+        let out = rt.handle.submit(e.order("TESTEQ")).await.unwrap();
+        if out == Outcome::Queued {
+            e.clock.advance(chrono::Duration::seconds(2));
+            let out = rt
+                .handle
+                .decide(IntentId(1), ApprovalDecision::Approve, "owner")
+                .await
+                .unwrap();
+            assert!(!matches!(out, Outcome::Placed(_)), "{out:?}");
+        }
+        assert_eq!(rt.paper.working_count(), 0);
+    }
+
+    #[test]
+    fn unavailable_charges_never_return_a_charge() {
+        let r = RuntimeCharges::Unavailable.charge("TESTEQ", true, 10, d("50"), "mis");
+        assert_eq!(r, Err(SourceError::Unavailable));
     }
 }

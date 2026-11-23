@@ -103,6 +103,7 @@ async fn shutdown_signal() {
     tracing::info!("shutdown signal received");
 }
 
+#[allow(clippy::too_many_lines)] // one linear startup sequence; each step must fail before the bind
 async fn serve(port_flag: Option<u16>) -> anyhow::Result<()> {
     // Dev fallback file: absent is fine, malformed is an error.
     match dotenvy::dotenv() {
@@ -165,9 +166,15 @@ async fn serve(port_flag: Option<u16>) -> anyhow::Result<()> {
     let calendar = MarketCalendar::from_config(&config.calendar);
     // Store open, build, reload once, spawn. Any error exits non-zero BEFORE the port is bound
     // (RISK-133-3): nothing is served on a failed start.
-    let rt = runtime::start(&data_dir.join(DB_FILE), &risk_toml, clock.clone(), calendar)
-        .await
-        .context("starting the order pipeline")?;
+    let rt = runtime::start(
+        &data_dir.join(DB_FILE),
+        &risk_toml,
+        &config_dir,
+        clock.clone(),
+        calendar,
+    )
+    .await
+    .context("starting the order pipeline")?;
     tracing::info!(report = ?rt.report, "pipeline reloaded");
     let state = AppState::new(
         security.clone(),
