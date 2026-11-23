@@ -1,4 +1,4 @@
-# Known pitfalls (read before coding; <= 15 lines)
+# Known pitfalls (read before coding; <= 20 lines)
 
 Patterns reviewers flagged again and again (from ~160 blocker/major findings, PRs 113-137). The manager updates this after
 each feature's efficiency review: add what keeps recurring, drop what stopped. Last update: 2026-11-23.
