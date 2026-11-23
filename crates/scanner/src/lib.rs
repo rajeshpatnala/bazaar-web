@@ -5,6 +5,8 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod assemble;
+pub mod gate_ctx;
 pub mod ports;
 pub mod result;
 pub mod runner;
@@ -13,7 +15,9 @@ pub mod sizing;
 pub mod types;
 pub mod universe;
 
-pub use ports::{BanList, BanListStatus, EventCalendar, EvidenceSource};
+pub use assemble::{AssembleCx, assemble};
+pub use gate_ctx::{ContextUnavailable, ScanGateContext};
+pub use ports::{BanList, BanListStatus, EventCalendar, EvidenceSource, GateContextSource};
 pub use result::{BlockReason, BlockedIdea, ScanResult, ScanVerdict};
 pub use runner::{
     Candidate, CircuitState, Hit, ScanContext, ScanError, ScanOutput, UniverseEntry, build,

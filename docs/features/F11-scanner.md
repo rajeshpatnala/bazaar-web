@@ -48,3 +48,10 @@ Decisions / deferred: `EVENT_WINDOW_DAYS` (5) and the profit-factor-2.0 full-sco
 
 Fix round (PR 118): ranking is structural (proven above low-evidence, then capped score desc, symbol, token); "proven" needs >= `min_trades_evidence` trades, out of sample, net of costs, PF > 1 and avg_r > 0; non-finite evidence is unusable and not shown in `Scored.evidence`; confluence is 0 with fewer than 2 enabled families. Deferred (QUAN-118-3, RISK-118-2): `EVENT_WINDOW_DAYS` and `PF_FULL_SCORE` stay code constants; move to `[scanner]` with loader validation (window 1..=30, full-score PF > 1) and owner confirmation. Step 4 acceptance (QUAN-118-4, RISK-118-3): derive `families_total` from enabled strategies' families in config, validate it, never from hits. Also deferred: a contract test for the real `EvidenceSource` (no trades closed after `as_of`) when it lands.
 Step 4 acceptance (SEC-118-1): event `note` text is config-sourced and goes into `Warning::EventNearby`; escape it when rendered (UI/Why text). Event kind is shown as a plain label, not the Debug repr.
+
+## Slice 6 note (gate port, assemble, truncate)
+`assemble.rs` gates each idea alone against the same snapshot and cash, with its own per-instrument data (`GateContextSource::data_for`; the scanner overlays its evidence and event facts, anything it does not hold stays Unknown). "Passed" means passes by itself, not all shown ideas together; the gate re-runs at approval. The `max_results` cut is silent by design (lowest-ranked passing ideas only). The recommendation id names instrument and bar only, never an approval key.
+Limitation until slice 8: in `semi_auto` the scan holds no approval, so G16 "approval not on record" fails every idea and all are blocked (test pins `[G01, G16]`). Paper (default) is unaffected. Nothing is loosened.
+- RISK-165-2 ApprovalPending marker + RISK-165-3 G16-aware sizing: defer: slice 8 (risk crate; owner wording first).
+- Visible per-idea-gating line and cut count: defer: slice 7.
+- Second order sees the first at approval: defer: F12.

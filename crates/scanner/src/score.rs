@@ -157,7 +157,7 @@ fn regime_component(hits: &[Hit]) -> f64 {
 
 /// The hit the recommendation will be built on: an allowed fit first, then higher reference
 /// reward:risk, then lower strategy id.
-fn primary(hits: &[Hit]) -> Option<&Hit> {
+pub(crate) fn primary(hits: &[Hit]) -> Option<&Hit> {
     hits.iter().min_by(|a, b| {
         matches!(a.fit, Fit::Penalised(_))
             .cmp(&matches!(b.fit, Fit::Penalised(_)))
