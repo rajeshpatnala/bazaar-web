@@ -792,3 +792,33 @@ fn both_stamps_use_the_scan_clock() {
         r.ideas()[0].gate().evaluated_at
     );
 }
+
+#[test]
+fn a_source_results_day_is_not_hidden_by_a_scanner_without_warnings() {
+    let src = with_data(ok_source(), |_| {
+        let mut d = data();
+        d.events.results_window = Tri::Known(true);
+        Ok(d)
+    });
+    let r = run(TEXT, 5, &src, &[scored("AAA", 1, 80)]);
+    assert_eq!(r.ideas().len(), 1, "{:?}", r.blocked());
+    assert_eq!(r.ideas()[0].gate().overridable_failures, vec![RuleId::G07]);
+    assert!(!r.ideas()[0].gate().passed);
+    let src = with_data(ok_source(), |_| {
+        let mut d = data();
+        d.events.policy_day = Tri::Known(true);
+        Ok(d)
+    });
+    let r = run(TEXT, 5, &src, &[scored("AAA", 1, 80)]);
+    assert_eq!(r.ideas()[0].gate().overridable_failures, vec![RuleId::G07]);
+}
+
+#[test]
+fn long_source_errors_are_bounded_in_the_block_reason() {
+    let src = with_data(ok_source(), |_| Err(ContextUnavailable("x".repeat(10_000))));
+    let r = run(TEXT, 5, &src, &[scored("AAA", 1, 80)]);
+    let BlockReason::GateInputsUnavailable(m) = &r.blocked()[0].reason else {
+        unreachable!("{:?}", r.blocked()[0]);
+    };
+    assert_eq!(m.chars().count(), MAX_REASON_CHARS + 3);
+}

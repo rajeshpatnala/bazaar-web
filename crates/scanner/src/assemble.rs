@@ -172,6 +172,26 @@ fn agreeing_families(s: &Scored) -> u32 {
 /// The scanner's own facts replace the source's for evidence and event flags; a fact it cannot
 /// vouch for stays `Unknown`, which the gate refuses. Evidence counts only when out of sample and
 /// net of costs (as `Recommendation::new` does), else G01 sees nothing.
+fn stricter(a: Tri<bool>, b: Tri<bool>) -> Tri<bool> {
+    match (a, b) {
+        (Tri::Unknown, _) | (_, Tri::Unknown) => Tri::Unknown,
+        (Tri::Known(x), Tri::Known(y)) => Tri::Known(x || y),
+    }
+}
+
+/// Source and gate error text is copied into a `BlockReason` shown to the owner: bound its length.
+const MAX_REASON_CHARS: usize = 200;
+
+fn bounded(e: &impl std::fmt::Display) -> String {
+    let s = e.to_string();
+    if s.chars().count() <= MAX_REASON_CHARS {
+        return s;
+    }
+    let mut out: String = s.chars().take(MAX_REASON_CHARS).collect();
+    out.push_str("...");
+    out
+}
+
 fn overlay(mut data: DataInputs, s: &Scored) -> DataInputs {
     data.evidence = match s
         .evidence
@@ -191,18 +211,19 @@ fn overlay(mut data: DataInputs, s: &Scored) -> DataInputs {
             walk_forward_pass: data.evidence.walk_forward_pass,
         },
     };
-    if s.warnings.contains(&Warning::EventsNotChecked) {
-        data.events.results_window = Tri::Unknown;
-        data.events.policy_day = Tri::Unknown;
-    } else if s
-        .warnings
-        .iter()
-        .any(|w| matches!(w, Warning::EventNearby(_)))
-    {
-        data.events.results_window = Tri::Known(true);
+    // The stricter of the source and the scanner: Unknown beats Known(true) beats Known(false),
+    // so a source that says "results day" is never hidden by a scanner with no warning.
+    let (results, policy) = if s.warnings.contains(&Warning::EventsNotChecked) {
+        (Tri::Unknown, Tri::Unknown)
     } else {
-        data.events.results_window = Tri::Known(false);
-    }
+        let near = s
+            .warnings
+            .iter()
+            .any(|w| matches!(w, Warning::EventNearby(_)));
+        (Tri::Known(near), Tri::Known(false))
+    };
+    data.events.results_window = stricter(data.events.results_window, results);
+    data.events.policy_day = stricter(data.events.policy_day, policy);
     data
 }
 
@@ -268,7 +289,7 @@ fn idea(
     let mut data = overlay(
         cx.source
             .data_for(inst, h)
-            .map_err(|e| BlockReason::GateInputsUnavailable(e.to_string()))?,
+            .map_err(|e| BlockReason::GateInputsUnavailable(bounded(&e)))?,
         s,
     );
     data.margin.qty = sized.size.qty;
@@ -294,7 +315,7 @@ fn idea(
     let ev = cx
         .gate
         .evaluate(&intent, ctx.snapshot(), &inputs)
-        .map_err(|e| BlockReason::GateReject(e.to_string()))?;
+        .map_err(|e| BlockReason::GateReject(bounded(&e)))?;
     if ev.ctx().limits != *ctx.limits() {
         return Err(BlockReason::LimitsChanged);
     }
@@ -345,7 +366,7 @@ pub fn assemble(
     let (mut ideas, mut blocked) = (Vec::new(), Vec::new());
     for s in scored {
         let out = match (&ctx, primary(&s.candidate.hits)) {
-            (Err(e), _) => Err(BlockReason::GateInputsUnavailable(e.to_string())),
+            (Err(e), _) => Err(BlockReason::GateInputsUnavailable(bounded(&e))),
             (Ok(_), None) => Err(BlockReason::Sizing(
                 "the candidate has no signal".to_owned(),
             )),
