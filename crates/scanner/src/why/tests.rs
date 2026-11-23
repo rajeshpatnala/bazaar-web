@@ -724,3 +724,39 @@ fn confidence_is_a_score_never_a_percent() {
     }
     assert!(render(&full())[2].contains("Score 80 out of 100"));
 }
+
+#[test]
+fn gate_line_trusts_the_lists_not_the_passed_flag() {
+    // passed = true over a hard failure: blocked, naming the rule (RISK-166-11).
+    let mut g = gate(&[]);
+    g.passed = true;
+    g.hard_failures = vec![RuleId::G16];
+    assert_eq!(
+        gate_line(&g),
+        "Blocked by the safety checks: failed checks that cannot be overridden (G16)."
+    );
+    // passed = false with every list empty: no empty reason, a "do not act" line.
+    let mut g = gate(&[]);
+    g.passed = false;
+    assert_eq!(
+        gate_line(&g),
+        "Blocked by the safety checks, but the reason is not available: do not act on this."
+    );
+    // A paper_only id the overridable list does not carry is not shown as overridable.
+    let mut g = gate(&[]);
+    g.passed = false;
+    g.paper_only = vec![RuleId::G01];
+    assert_eq!(
+        gate_line(&g),
+        "Blocked by the safety checks: failed checks that cannot be overridden (G01)."
+    );
+}
+
+#[test]
+fn a_carried_event_warning_is_not_shown_as_no_events() {
+    let mut s = spec(vec![events(true, &[])]);
+    s.warnings = vec![Warning::EventNearby("results".into())];
+    let l = render(&make(s));
+    let e = line(&l, "A date to know is near");
+    assert!(!e.contains("No results or policy dates"), "{e}");
+}

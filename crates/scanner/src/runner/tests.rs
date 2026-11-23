@@ -18,7 +18,7 @@ impl Clock for FixedClock {
     }
 }
 
-struct FakeBan(BanListStatus);
+pub(crate) struct FakeBan(BanListStatus);
 impl BanList for FakeBan {
     fn status(&self) -> BanListStatus {
         self.0.clone()
@@ -75,9 +75,14 @@ impl Strategy for Fake {
     }
 }
 
-type Seen = Arc<Mutex<Vec<(usize, NaiveDate)>>>;
+pub(crate) type Seen = Arc<Mutex<Vec<(usize, NaiveDate)>>>;
 
-fn fake(id: &'static str, rr: i64, stock_trend: Trend, seen: &Seen) -> Box<dyn Strategy> {
+pub(crate) fn fake(
+    id: &'static str,
+    rr: i64,
+    stock_trend: Trend,
+    seen: &Seen,
+) -> Box<dyn Strategy> {
     fake_with(id, rr, stock_trend, false, seen)
 }
 
@@ -120,13 +125,13 @@ fn fake_raw(id: &'static str, rr: i64, stock_trend: Trend, weak: bool, seen: &Se
     }
 }
 
-fn day(i: usize) -> DateTime<Tz> {
+pub(crate) fn day(i: usize) -> DateTime<Tz> {
     let base = Kolkata.with_ymd_and_hms(2025, 12, 29, 15, 30, 0).unwrap();
     base + chrono::Duration::days(i64::try_from(i).unwrap())
 }
 
 /// Steadily rising series: a settled Up trend for both market and stock.
-fn rising(n: usize, vol: u64) -> Vec<Candle> {
+pub(crate) fn rising(n: usize, vol: u64) -> Vec<Candle> {
     (0..n)
         .map(|i| {
             let c = Decimal::from(100) + Decimal::from(i64::try_from(i).unwrap()) / Decimal::TWO;
@@ -136,7 +141,7 @@ fn rising(n: usize, vol: u64) -> Vec<Candle> {
         .collect()
 }
 
-fn entry(sym: &str, bars: Vec<Candle>) -> UniverseEntry {
+pub(crate) fn entry(sym: &str, bars: Vec<Candle>) -> UniverseEntry {
     UniverseEntry {
         instrument: Instrument {
             instrument_token: 1,
@@ -156,13 +161,13 @@ fn entry(sym: &str, bars: Vec<Candle>) -> UniverseEntry {
     }
 }
 
-struct Env {
+pub(crate) struct Env {
     cfg: StrategiesConfig,
     regime: RegimeParams,
     cal: MarketCalendar,
 }
 
-fn env() -> Env {
+pub(crate) fn env() -> Env {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config");
     let cfg: StrategiesConfig = config::load(&dir).unwrap();
     Env {
@@ -172,16 +177,16 @@ fn env() -> Env {
     }
 }
 
-const N: usize = 320;
+pub(crate) const N: usize = 320;
 
-fn fresh_ban(symbols: &[&str]) -> FakeBan {
+pub(crate) fn fresh_ban(symbols: &[&str]) -> FakeBan {
     FakeBan(BanListStatus::Available {
         symbols: symbols.iter().map(|s| (*s).to_owned()).collect(),
         as_of: Some(day(N - 1)),
     })
 }
 
-fn scan(
+pub(crate) fn scan(
     e: &Env,
     ban: &FakeBan,
     strategies: &mut [Box<dyn Strategy>],
