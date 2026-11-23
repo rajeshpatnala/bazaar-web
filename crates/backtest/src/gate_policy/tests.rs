@@ -311,7 +311,8 @@ fn a_close_above_the_entry_zone_is_refused() {
     assert_eq!(out.trades.len(), 0);
     assert_eq!(p.approved(), 0);
     assert_eq!(p.rejections().len(), 1);
-    assert_ne!(p.rejections()[0].rules.len(), 0);
+    // G10 (entry zone: no chasing) is the rule that refused the chase.
+    assert!(p.rejections()[0].rules.contains(&RuleId::G10), "{:?}", p.rejections()[0].rules);
 }
 
 #[test]
@@ -487,7 +488,9 @@ fn a_margin_shortfall_is_refused() {
     let mut p = GatePolicy::new(&spec, &r.gate, env(good_evidence(), &quiet)).unwrap();
     let v = p.decide(&signal_at(r.bars[0].close_time()), &sized(), d("5000"));
     assert!(matches!(v, EntryVerdict::Reject(_)));
-    assert_ne!(p.rejections()[0].rules.len(), 0);
+    assert_eq!(p.approved(), 0);
+    // X03 (cash or margin) is the rule that names the shortfall.
+    assert!(p.rejections()[0].rules.contains(&RuleId::X03), "{:?}", p.rejections()[0].rules);
 }
 
 #[test]
