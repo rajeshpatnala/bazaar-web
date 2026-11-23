@@ -67,7 +67,8 @@ pub const IDEMPOTENCY_CAP: usize = 256;
 
 type Remembered = (String, bool, crate::dto::DecisionOutcomeDto);
 
-/// First reply per (actor, order, key), so a retried POST returns the first outcome.
+/// First reply per (actor, order, key), so a retried POST returns the first outcome. In memory
+/// only: lost on restart, and a key evicted at the cap replays as 409 (BZ-512 persists keys).
 #[derive(Debug, Clone, Default)]
 pub struct IdempotencyCache(Arc<Mutex<VecDeque<Remembered>>>);
 
@@ -178,7 +179,7 @@ pub struct AppState {
     /// Pending-approval read port; `None` until wired (the list route answers 503).
     pending: Option<Arc<dyn PendingRead>>,
     /// Replies of the decision route by `Idempotency-Key`.
-    pub idempotency: IdempotencyCache,
+    idempotency: IdempotencyCache,
     /// Alarms for `GET /status`.
     pub alarms: AlarmBoard,
 }
@@ -215,6 +216,12 @@ impl AppState {
             idempotency: IdempotencyCache::default(),
             alarms: AlarmBoard::new(),
         }
+    }
+
+    /// Replies of the decision route by `Idempotency-Key`.
+    #[must_use]
+    pub fn idempotency(&self) -> &IdempotencyCache {
+        &self.idempotency
     }
 
     /// Wire the running pipeline and the kill-switch read port.

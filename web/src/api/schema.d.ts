@@ -33,7 +33,10 @@ export interface paths {
         /**
          * Approve or decline one pending order. Approve re-checks the TTL and re-runs the gate with a
          *     fresh quote; with no quote source every approve ends `blocked` and nothing is sent. A second
-         *     decision is 409; the same `Idempotency-Key` returns the first reply.
+         *     decision is 409; the same `Idempotency-Key` returns the first reply, but only for final
+         *     outcomes (declined, expired, placed). The cache is in memory: a restart or an eviction at 256
+         *     keys turns a replay into 409, and two simultaneous requests with one key race (the second
+         *     may get 409); BZ-512 persists keys.
          */
         post: operations["decide"];
         delete?: never;
@@ -93,7 +96,11 @@ export interface components {
         ApprovalDto: {
             /** @description Proposed at, RFC 3339 IST. */
             created_at: string;
-            /** @description Approve is refused after this instant (RFC 3339 IST). */
+            /**
+             * @description Approve is refused after this instant (RFC 3339 IST). It is `created_at` plus the approval
+             *     TTL, which is intended and conservative: the live path counts from queue time (never
+             *     earlier), so the UI must disable approve once this has passed.
+             */
             expires_at: string;
             /** @description Intent id (32 lowercase hex digits). */
             id: string;
@@ -270,6 +277,14 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

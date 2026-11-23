@@ -27,8 +27,12 @@ use bazaar_execution::{
 };
 use bazaar_risk::types::Side;
 use bazaar_server::{
+    dto::{DecisionOutcomeDto, OutcomeKind},
     runtime::{LedgerPnl, NoBaseline, ProdBase, StorePending, UnavailableQuotes},
-    state::{KillSwitchRead, KillSwitchReading, ReadFuture},
+    state::{
+        IDEMPOTENCY_CAP, IdempotencyCache, KillSwitchRead, KillSwitchReading, PendingFuture,
+        PendingRead, ReadFuture,
+    },
 };
 use chrono::TimeZone;
 use common::{HOST, ORIGIN, TestApp, body_json};
@@ -427,8 +431,101 @@ async fn unwired_pipeline_answers_503_on_both_routes() {
     assert_eq!(body_json(res).await["code"], "pipeline_closed");
 }
 
-/// RISK-131-1: nothing under `routes/` may touch the approval store or its atomic decide.
-const FORBIDDEN: [&str; 2] = ["ApprovalRepo", "decide_and_advance"];
+struct BrokenPending;
+impl PendingRead for BrokenPending {
+    fn list(&self) -> PendingFuture<'_> {
+        Box::pin(async { None })
+    }
+}
+
+#[tokio::test]
+async fn list_is_503_storage_unavailable_when_the_store_read_fails() {
+    let app = TestApp::with_state(false, |s| s.with_pending(Arc::new(BrokenPending)));
+    let cookie = app.login().await;
+    let res = app.get("/api/v1/approvals", Some(&cookie)).await;
+    assert_eq!(res.status(), 503);
+    assert_eq!(body_json(res).await["code"], "storage_unavailable");
+}
+
+#[tokio::test]
+async fn unknown_intent_is_404_and_is_not_remembered() {
+    let r = rig(&[1]).await;
+    for _ in 0..2 {
+        let res = r
+            .post(&hex(99), Some(KEY), r#"{"decision":"approve"}"#)
+            .await;
+        assert_eq!(res.status(), 404);
+        assert_eq!(body_json(res).await["code"], "not_found");
+    }
+    assert_eq!(r.order_state(1).await, "pending_approval");
+    assert_eq!(r.rec.placed(), Vec::<IntentId>::new());
+}
+
+#[tokio::test]
+async fn undecodable_pending_row_is_skipped_not_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_store(&dir.path().join("u.db")).await.unwrap();
+    let clock = Arc::new(FakeClock::at(
+        chrono_tz::Asia::Kolkata
+            .with_ymd_and_hms(2026, 11, 19, 11, 0, 0)
+            .unwrap(),
+    ));
+    let draft = AuditDraft {
+        ts_ist_rfc3339: clock.now_ist().to_rfc3339(),
+        actor: "seed".into(),
+        kind: "proposed".into(),
+        payload: "{}".into(),
+    };
+    let bad = OrderRecord {
+        intent_id: 7,
+        version: 0,
+        state: "pending_approval".into(),
+        payload: "not a payload".into(),
+    };
+    OrderRepo::insert(&store, bad, draft, chain_hash)
+        .await
+        .unwrap();
+    let pending = StorePending {
+        store,
+        clock,
+        ttl: chrono::Duration::seconds(300),
+    };
+    assert_eq!(pending.list().await.unwrap().len(), 0);
+}
+
+fn remembered(kind: OutcomeKind) -> DecisionOutcomeDto {
+    DecisionOutcomeDto {
+        outcome: kind,
+        detail: None,
+    }
+}
+
+#[test]
+fn idempotency_cache_keeps_the_first_reply_and_evicts_the_oldest_at_the_cap() {
+    let c = IdempotencyCache::default();
+    c.put("k0".into(), true, remembered(OutcomeKind::Declined));
+    c.put("k0".into(), false, remembered(OutcomeKind::Expired));
+    assert_eq!(c.get("k0"), Some((true, remembered(OutcomeKind::Declined))));
+    for i in 1..IDEMPOTENCY_CAP {
+        c.put(format!("k{i}"), true, remembered(OutcomeKind::Expired));
+    }
+    assert!(c.get("k0").is_some(), "full but not over the cap");
+    c.put("extra".into(), true, remembered(OutcomeKind::Expired));
+    assert!(c.get("k0").is_none(), "oldest evicted");
+    assert!(c.get("k1").is_some() && c.get("extra").is_some());
+}
+
+/// RISK-131-1 and no-place-order: nothing under `routes/` may touch the approval or order
+/// stores, the atomic decide, or the executor.
+const FORBIDDEN: [&str; 7] = [
+    "ApprovalRepo",
+    "decide_and_advance",
+    "OrderRepo",
+    "ApprovedOrder",
+    "Executor",
+    "place(",
+    "bazaar_store",
+];
 
 fn forbidden_hits(text: &str) -> Vec<&'static str> {
     FORBIDDEN.into_iter().filter(|f| text.contains(f)).collect()
@@ -445,14 +542,22 @@ fn routes_never_use_the_approval_repo_or_decide_and_advance() {
         forbidden_hits("pipeline.decide(id, d, actor)"),
         Vec::<&str>::new()
     );
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/routes");
+    assert_eq!(forbidden_hits("x.place(o)"), ["place("]);
+    let mut todo = vec![PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/routes"
+    ))];
     let mut n = 0;
-    for e in std::fs::read_dir(dir).unwrap() {
-        let p = e.unwrap().path();
-        if p.extension().is_some_and(|x| x == "rs") {
-            let hits = forbidden_hits(&std::fs::read_to_string(&p).unwrap());
-            assert!(hits.is_empty(), "{} uses {hits:?}", p.display());
-            n += 1;
+    while let Some(dir) = todo.pop() {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                todo.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                let hits = forbidden_hits(&std::fs::read_to_string(&p).unwrap());
+                assert!(hits.is_empty(), "{} uses {hits:?}", p.display());
+                n += 1;
+            }
         }
     }
     assert!(n >= 5, "scanned {n} route files");

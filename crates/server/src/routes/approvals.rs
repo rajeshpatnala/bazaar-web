@@ -72,7 +72,8 @@ fn outcome_dto(o: Outcome) -> DecisionOutcomeDto {
         Outcome::GuardBlocked(e) => reply(OutcomeKind::GuardBlocked, Some(e.to_string())),
         Outcome::Placed(_) => reply(OutcomeKind::Placed, None),
         Outcome::PlacedUnrecorded(_) => reply(OutcomeKind::PlacedUnrecorded, None),
-        Outcome::ExecFailed(e) => reply(OutcomeKind::ExecFailed, Some(e.to_string())),
+        // A fixed category, never the executor's raw text (RISK-144-6).
+        Outcome::ExecFailed(e) => reply(OutcomeKind::ExecFailed, Some(error_category(&e))),
         // Unreachable after `reject_repeat`; shown as an error, never as success.
         Outcome::AlreadyDecided(_) => reply(OutcomeKind::Error, Some("already decided".into())),
         Outcome::Error(e) => reply(OutcomeKind::Error, Some(error_category(&e))),
@@ -83,6 +84,26 @@ fn error_category(e: &ExecError) -> String {
     match e {
         ExecError::Storage => "storage".to_owned(),
         _ => "execution".to_owned(),
+    }
+}
+
+/// Reply plus whether it may be remembered under the `Idempotency-Key`. Only final outcomes are:
+/// a refusal or error the user may retry must run again, not replay (SEC-144-1). A storage
+/// failure is 503 (the pipeline put the intent back) and an unknown intent is 404.
+fn finish(o: Outcome) -> Result<(DecisionOutcomeDto, bool), ApiError> {
+    match reject_repeat(o)? {
+        Outcome::Error(ExecError::Storage) => Err(ApiError::StorageUnavailable),
+        Outcome::Error(ExecError::InvalidInput("unknown intent")) => Err(ApiError::NotFound),
+        o => {
+            let is_final = matches!(
+                o,
+                Outcome::Declined
+                    | Outcome::Expired
+                    | Outcome::Placed(_)
+                    | Outcome::PlacedUnrecorded(_)
+            );
+            Ok((outcome_dto(o), is_final))
+        }
     }
 }
 
@@ -106,7 +127,10 @@ async fn list(State(s): State<AppState>) -> Result<Json<ApprovalListDto>, ApiErr
 
 /// Approve or decline one pending order. Approve re-checks the TTL and re-runs the gate with a
 /// fresh quote; with no quote source every approve ends `blocked` and nothing is sent. A second
-/// decision is 409; the same `Idempotency-Key` returns the first reply.
+/// decision is 409; the same `Idempotency-Key` returns the first reply, but only for final
+/// outcomes (declined, expired, placed). The cache is in memory: a restart or an eviction at 256
+/// keys turns a replay into 409, and two simultaneous requests with one key race (the second
+/// may get 409); BZ-512 persists keys.
 #[utoipa::path(post, path = "/approvals/{id}/decision", tag = "approvals",
     params(("id" = String, Path, description = "Intent id, 32 hex digits"),
            ("Idempotency-Key" = String, Header, description = "8 to 64 printable characters")),
@@ -114,6 +138,7 @@ async fn list(State(s): State<AppState>) -> Result<Json<ApprovalListDto>, ApiErr
     responses(
         (status = 200, body = DecisionOutcomeDto),
         (status = 401, body = Problem, content_type = "application/problem+json"),
+        (status = 404, body = Problem, content_type = "application/problem+json"),
         (status = 409, body = Problem, content_type = "application/problem+json"),
         (status = 422, body = Problem, content_type = "application/problem+json"),
         (status = 503, body = Problem, content_type = "application/problem+json"),
@@ -129,7 +154,7 @@ async fn decide(
     let key = format!("{}:{id}:{}", sess.actor, idempotency_key(&headers)?);
     let decision = ApprovalDecision::from(body.decision);
     let approve = decision == ApprovalDecision::Approve;
-    if let Some((first_approve, first)) = s.idempotency.get(&key) {
+    if let Some((first_approve, first)) = s.idempotency().get(&key) {
         if first_approve != approve {
             return Err(bad(
                 "Idempotency-Key",
@@ -139,8 +164,10 @@ async fn decide(
         return Ok(Json(first));
     }
     let out = s.pipeline()?.decide(id, decision, &sess.actor).await?;
-    let dto = outcome_dto(reject_repeat(out)?);
-    s.idempotency.put(key, approve, dto.clone());
+    let (dto, is_final) = finish(out)?;
+    if is_final {
+        s.idempotency().put(key, approve, dto.clone());
+    }
     Ok(Json(dto))
 }
 
@@ -149,4 +176,48 @@ pub fn router() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(list))
         .routes(routes!(decide))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storage_failure_is_retryable_503_and_unknown_intent_is_404() {
+        assert_eq!(
+            finish(Outcome::Error(ExecError::Storage)).unwrap_err(),
+            ApiError::StorageUnavailable
+        );
+        assert_eq!(
+            finish(Outcome::Error(ExecError::InvalidInput("unknown intent"))).unwrap_err(),
+            ApiError::NotFound
+        );
+        assert_eq!(
+            finish(Outcome::AlreadyDecided(Box::new(Outcome::Declined))).unwrap_err(),
+            ApiError::AlreadyDecided
+        );
+    }
+
+    #[test]
+    fn only_final_outcomes_are_remembered() {
+        let resolved = ExecError::InvalidInput("order already resolved");
+        for (o, kept) in [
+            (Outcome::Declined, true),
+            (Outcome::Expired, true),
+            (Outcome::GateBlocked("x".into()), false),
+            (Outcome::GuardBlocked(ExecError::KillSwitch), false),
+            (Outcome::Error(ExecError::Unknown), false),
+            (Outcome::Error(resolved), false),
+        ] {
+            let label = format!("{o:?}");
+            assert_eq!(finish(o).unwrap().1, kept, "{label}");
+        }
+    }
+
+    #[test]
+    fn exec_failure_detail_is_a_fixed_category() {
+        let d = outcome_dto(Outcome::ExecFailed(ExecError::InvalidInput("raw text")));
+        assert_eq!(d.detail.as_deref(), Some("execution"));
+    }
 }

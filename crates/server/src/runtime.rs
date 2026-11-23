@@ -235,15 +235,18 @@ impl std::fmt::Debug for StorePending {
 impl PendingRead for StorePending {
     fn list(&self) -> PendingFuture<'_> {
         Box::pin(async move {
-            let rows = OrderRepo::list_in_state(&self.store, "pending_approval", PENDING_LIMIT)
-                .await
-                .ok()?;
+            let state = bazaar_execution::state::OrderState::PendingApproval.as_str();
+            let Ok(rows) = OrderRepo::list_in_state(&self.store, state, PENDING_LIMIT).await else {
+                tracing::warn!(category = "store_read", "pending approvals unreadable");
+                return None;
+            };
             let now = self.clock.now_ist();
             let mut out = Vec::with_capacity(rows.len());
             for r in rows {
                 let id = bazaar_execution::types::IntentId(r.intent_id);
                 // An undecodable row is not listed: reload expires it and audits that.
                 let Some(i) = OrderIntent::from_payload(id, &r.payload, now) else {
+                    tracing::warn!(category = "undecodable_row", "pending order skipped");
                     continue;
                 };
                 out.push(PendingApproval {
@@ -255,6 +258,8 @@ impl PendingRead for StorePending {
                     },
                     qty: i.qty,
                     created_at: i.created_at.to_rfc3339(),
+                    // Counted from creation: never later than the live path, which counts from
+                    // queue time (CR-144-4, RISK-144-5).
                     expires_at: (i.created_at + self.ttl).to_rfc3339(),
                 });
             }

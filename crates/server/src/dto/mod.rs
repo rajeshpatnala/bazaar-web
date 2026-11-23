@@ -121,7 +121,9 @@ pub struct ApprovalDto {
     pub qty: u32,
     /// Proposed at, RFC 3339 IST.
     pub created_at: String,
-    /// Approve is refused after this instant (RFC 3339 IST).
+    /// Approve is refused after this instant (RFC 3339 IST). It is `created_at` plus the approval
+    /// TTL, which is intended and conservative: the live path counts from queue time (never
+    /// earlier), so the UI must disable approve once this has passed.
     pub expires_at: String,
 }
 
