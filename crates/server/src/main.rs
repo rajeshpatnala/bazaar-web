@@ -120,14 +120,31 @@ async fn serve(port_flag: Option<u16>) -> anyhow::Result<()> {
     let data_dir = std::env::var_os("BAZAAR_DATA_DIR")
         .filter(|v| !v.is_empty())
         .map_or_else(|| PathBuf::from("data"), PathBuf::from);
+    // SEC-138-1: a directory we create is owner-only (0700); a pre-existing one is never
+    // chmod-ed, only warned about. The store restricts the database files to 0600.
+    let existed = data_dir.exists();
     std::fs::create_dir_all(&data_dir).context("creating the data directory")?;
-    // SEC-138-1: owner-only directory (the store itself restricts the database files to 0600).
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700))
-            .context("restricting the data directory")?;
+        if existed {
+            let mode = std::fs::metadata(&data_dir)
+                .context("reading the data directory permissions")?
+                .permissions()
+                .mode();
+            if mode & 0o077 != 0 {
+                tracing::warn!(
+                    mode = format!("{:o}", mode & 0o777),
+                    "data directory is group/world accessible"
+                );
+            }
+        } else {
+            std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700))
+                .context("restricting the data directory")?;
+        }
     }
+    #[cfg(not(unix))]
+    let _ = existed;
     let data_dir = std::fs::canonicalize(&data_dir).context("resolving the data directory")?;
     tracing::info!(data_dir = %data_dir.display(), "using data directory");
     let risk_toml =

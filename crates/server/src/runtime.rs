@@ -351,7 +351,11 @@ mod tests {
         assert_eq!(m.compliance_fresh, Tri::Known(false));
         assert_eq!(m.readiness_report, Tri::Known(false));
         assert_eq!(m.owner_opt_in, Tri::Known(false));
-        assert_eq!(m.live, Tri::Known(false)); // default build has no live-trading
+        if cfg!(feature = "live-trading") {
+            assert_eq!(m.live, Tri::Unknown);
+        } else {
+            assert_eq!(m.live, Tri::Known(false));
+        }
         let base = ProdBase
             .inputs(&intent(&clock(), 1, Side::Buy, false))
             .unwrap();
