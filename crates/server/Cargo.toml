@@ -17,6 +17,7 @@ bazaar-execution.workspace = true
 bazaar-paper.workspace = true
 bazaar-risk.workspace = true
 bazaar-store.workspace = true
+rust_decimal.workspace = true
 bazaar-broker = { workspace = true, optional = true }
 anyhow.workspace = true
 axum.workspace = true
@@ -48,3 +49,4 @@ bazaar-core = { workspace = true, features = ["test-util"] }
 http-body-util.workspace = true
 tower = { workspace = true, features = ["util"] }
 insta.workspace = true
+tempfile.workspace = true

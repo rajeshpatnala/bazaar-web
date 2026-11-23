@@ -97,10 +97,12 @@ Fix round (PR 133): `reload` is idempotent (ids already queued or finished are s
 - RISK-96-11 closed 2026-11-22: owner confirmed 300 s approval TTL, 50 bps drift and the other [execution] defaults.
 - RISK-105-9 closed 2026-11-22: owner confirmed `breaker_engages_kill_switch = true`. Not blocking: the latch is restored from the audit log regardless.
 - RISK-136-4: store-backed position check on reopen (positions were a fake in BZ-205 S5). Target: BZ-511 S2.
-- RISK-136-5: real GateContext / ModeEvidence from `risk.toml` and the store; test paper default and `auto` locked; force `mode.live=Known(false)` without `live-trading`. Target: BZ-511 S1.
-- RISK-136-6: assert the listed `risk.toml` keys by name (`io_timeout_secs`, `breaker_engages_kill_switch`, `kill_allow_reduce_only`, ...), not a count of "owner confirmed 2026-11-22". Target: BZ-511 S1.
-- RISK-137-5 (merge condition for BZ-511 S1): the decision-route PR includes the real `GateContext`/`ModeEvidence` test (RISK-136-5) and a test that a non-exit intent is refused while the kill switch is engaged (RISK-100-2).
-- SEC-136-1: debug assertion that `SqliteGateContext::inputs` runs inside `spawn_blocking`. Target: BZ-511 S1.
+- ~~RISK-136-5: real GateContext / ModeEvidence from `risk.toml` and the store; test paper default and `auto` locked; force `mode.live=Known(false)` without `live-trading`. Target: BZ-511 S1.~~ Closed in BZ-511 S1.
+- ~~RISK-136-6: assert the listed `risk.toml` keys by name (`io_timeout_secs`, `breaker_engages_kill_switch`, `kill_allow_reduce_only`, ...), not a count of "owner confirmed 2026-11-22". Target: BZ-511 S1.~~ Closed in BZ-511 S1.
+- ~~RISK-137-5 (merge condition for BZ-511 S1): the decision-route PR includes the real `GateContext`/`ModeEvidence` test (RISK-136-5) and a test that a non-exit intent is refused while the kill switch is engaged (RISK-100-2).~~ Closed in BZ-511 S1 (RISK-136-5 and RISK-100-2 tests in `server/src/runtime.rs`).
+- ~~SEC-136-1: debug assertion that `SqliteGateContext::inputs` runs inside `spawn_blocking`. Target: BZ-511 S1.~~ Closed in BZ-511 S1.
+- SEC-136-1 closed in BZ-511 S1 as a test, not a debug assertion: `Handle::block_on` already panics on an async worker (tokio task ids exist in `spawn_blocking`, so they cannot tell the two apart).
+- BZ-511 S1 deviation: F9 `CostModel` as `ChargeSource` and `SpecSource` from the instrument store are NOT wired (the F9 model needs a `Leg` + DP ledger mapping; `SpecSource` is sync, the instrument repo async). Both fail closed (`UnavailableCharges`, `UnknownSpecs`). Target: a later F10 slice with the quote source.
 - `GuardedExecutor` (slice 2) and the pipeline (slice 3) must both call `KillSwitch::admits`.
 - Defer RISK-96-8 to slice 3; RISK-96-5 to slice 2; SEC-96-2 anchor of latest (seq, hash) to slice 8; CR-96-5 to slice 5.
 - Bound `paper_mis_square_off_ist` against the session calendar (CR-96-5); slice sizes for later F10 slices <= 400 lines (CR-96-6).

@@ -406,8 +406,21 @@ fn owner_confirmed_values_reach_the_pipeline_config() {
     let cfg = PipelineConfig::from_section(&r.execution);
     assert_eq!(cfg.io_timeout(), std::time::Duration::from_secs(5));
     assert_eq!(cfg.approval_ttl_secs(), 300);
-    // The owner's confirmation is recorded in the file (the loader refuses extra keys).
-    assert!(OWNER_RISK.matches("owner confirmed 2026-11-22").count() >= 5);
+    // RISK-136-6: the owner-confirmed keys are asserted by name and value, not by a comment count.
+    let e = &r.execution;
+    assert_eq!(e.approval_ttl_secs, 300);
+    assert_eq!(e.max_quote_drift_bps, 50);
+    assert_eq!(e.max_orders_per_second, 1);
+    assert!(e.kill_allow_reduce_only);
+    assert_eq!(e.kill_switch_release_phrase, "RELEASE KILL SWITCH");
+    assert_eq!(e.paper_starting_cash_inr, d("100000"));
+    assert_eq!(e.paper_max_participation, d("0.1"));
+    assert_eq!(e.paper_stale_after_secs, 5);
+    assert_eq!(e.paper_mis_square_off_ist.to_string(), "15:15:00");
+    assert_eq!(e.paper_slippage_bps.equity, 5);
+    assert_eq!(e.paper_slippage_bps.equity_derivatives, 5);
+    assert_eq!(e.paper_slippage_bps.currency, 2);
+    assert_eq!(e.paper_slippage_bps.commodity, 5);
 }
 
 // ---- AC8 -----------------------------------------------------------------------------------

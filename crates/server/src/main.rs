@@ -3,9 +3,10 @@
 use std::{io::Write as _, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use anyhow::Context as _;
-use bazaar_core::{clock::SystemClock, config::Config};
+use bazaar_cli::commands::DB_FILE;
+use bazaar_core::{calendar::MarketCalendar, clock::SystemClock, config::Config};
 use bazaar_server::{
-    app,
+    app, runtime,
     security::{Security, ensure_loopback, loopback_addr},
     state::AppState,
 };
@@ -115,12 +116,27 @@ async fn serve(port_flag: Option<u16>) -> anyhow::Result<()> {
     let dev = cfg!(debug_assertions);
     let addr = bind_addr(port)?;
     let security = Security::new(port, dev)?;
+    let clock: Arc<SystemClock> = Arc::new(SystemClock);
+    let data_dir = std::env::var_os("BAZAAR_DATA_DIR")
+        .filter(|v| !v.is_empty())
+        .map_or_else(|| PathBuf::from("data"), PathBuf::from);
+    std::fs::create_dir_all(&data_dir).context("creating the data directory")?;
+    let risk_toml =
+        std::fs::read_to_string(config_dir.join("risk.toml")).context("reading risk.toml")?;
+    let calendar = MarketCalendar::from_config(&config.calendar);
+    // Store open, build, reload once, spawn. Any error exits non-zero BEFORE the port is bound
+    // (RISK-133-3): nothing is served on a failed start.
+    let rt = runtime::start(&data_dir.join(DB_FILE), &risk_toml, clock.clone(), calendar)
+        .await
+        .context("starting the order pipeline")?;
+    tracing::info!(report = ?rt.report, "pipeline reloaded");
     let state = AppState::new(
         security.clone(),
-        Arc::new(SystemClock),
+        clock,
         config.risk.mode.execution_mode,
         PathBuf::from(WEB_DIST),
-    );
+    )
+    .with_pipeline(rt.handle.clone(), rt.kill_switch.clone());
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding {addr}"))?;

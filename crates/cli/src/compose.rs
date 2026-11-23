@@ -138,6 +138,9 @@ impl<B: GateContext> SqliteGateContext<B> {
 
 impl<B: GateContext> GateContext for SqliteGateContext<B> {
     fn inputs(&self, intent: &OrderIntent) -> Option<GateInputsOwned> {
+        // SEC-136-1: `Handle::block_on` below panics when called on an async worker (tokio checks
+        // it in every build), so a call outside `spawn_blocking` fails loudly, never deadlocks;
+        // the server's `runtime` tests pin that.
         let mut inp = self.base.inputs(intent)?;
         let now = self.clock.now_ist();
         let (killed, pending) = self.handle.block_on(async {
