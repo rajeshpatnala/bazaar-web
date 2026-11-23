@@ -4,6 +4,44 @@
  */
 
 export interface paths {
+    "/api/v1/approvals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Orders waiting for a decision, with their expiry. */
+        get: operations["list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/approvals/{id}/decision": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Approve or decline one pending order. Approve re-checks the TTL and re-runs the gate with a
+         *     fresh quote; with no quote source every approve ends `blocked` and nothing is sent. A second
+         *     decision is 409; the same `Idempotency-Key` returns the first reply.
+         */
+        post: operations["decide"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/me": {
         parameters: {
             query?: never;
@@ -51,6 +89,29 @@ export interface components {
             /** @description When it was first raised, RFC 3339 IST. */
             since: string;
         };
+        /** @description One order waiting for the user's decision. */
+        ApprovalDto: {
+            /** @description Proposed at, RFC 3339 IST. */
+            created_at: string;
+            /** @description Approve is refused after this instant (RFC 3339 IST). */
+            expires_at: string;
+            /** @description Intent id (32 lowercase hex digits). */
+            id: string;
+            /**
+             * Format: int32
+             * @description Quantity.
+             */
+            qty: number;
+            /** @description `buy` or `sell`. */
+            side: string;
+            /** @description Symbol (control characters escaped). */
+            symbol: string;
+        };
+        /** @description `GET /api/v1/approvals`. */
+        ApprovalListDto: {
+            /** @description Pending orders, oldest first. */
+            approvals: components["schemas"]["ApprovalDto"][];
+        };
         /** @description `GET /api/v1/auth/me`: proof of a live session plus what the UI needs for non-GET calls. */
         AuthMeDto: {
             /** @description Echo this in `X-CSRF-Token` on every non-GET request. */
@@ -65,6 +126,13 @@ export interface components {
          * @enum {string}
          */
         DecisionDto: "approve" | "decline";
+        /** @description Reply of `POST /api/v1/approvals/{id}/decision`. */
+        DecisionOutcomeDto: {
+            /** @description Gate reason or error category (control characters escaped); null when there is none. */
+            detail?: string | null;
+            /** @description How it ended. */
+            outcome: components["schemas"]["OutcomeKind"];
+        };
         /**
          * @description The user's verdict on a pending approval. The actor is never in the body: the server takes it
          *     from the session (SEC-132-1), so an `actor` field is rejected as unknown.
@@ -94,6 +162,11 @@ export interface components {
          * @enum {string}
          */
         ModeDto: "paper" | "semi_auto" | "auto";
+        /**
+         * @description How a decision ended. Only `placed` and `placed_unrecorded` mean an order was sent.
+         * @enum {string}
+         */
+        OutcomeKind: "queued" | "declined" | "expired" | "blocked" | "quote_drifted" | "guard_blocked" | "placed" | "placed_unrecorded" | "exec_failed" | "error";
         /** @description RFC 9457 problem details with the stable machine key `code`. */
         Problem: {
             /** @description Stable machine key; the UI switches on this, never on `detail`. */
@@ -134,6 +207,102 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalListDto"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    decide: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description 8 to 64 printable characters */
+                "Idempotency-Key": string;
+            };
+            path: {
+                /** @description Intent id, 32 hex digits */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DecisionRequestDto"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionOutcomeDto"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     me: {
         parameters: {
             query?: never;

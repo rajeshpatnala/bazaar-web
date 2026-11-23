@@ -2,7 +2,7 @@
 //! port and alarm board).
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     future::Future,
     path::PathBuf,
     pin::Pin,
@@ -33,6 +33,63 @@ pub type ReadFuture<'a> = Pin<Box<dyn Future<Output = KillSwitchReading> + Send 
 pub trait KillSwitchRead: Send + Sync {
     /// Current state; never an error (see [`KillSwitchReading`]).
     fn read(&self) -> ReadFuture<'_>;
+}
+
+/// One order waiting for the user's decision (read model; wire shape is `dto::ApprovalDto`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingApproval {
+    /// Intent id.
+    pub id: u128,
+    /// Symbol, raw text.
+    pub symbol: String,
+    /// `buy` or `sell`.
+    pub side: &'static str,
+    /// Quantity.
+    pub qty: u32,
+    /// When it was proposed, RFC 3339 IST.
+    pub created_at: String,
+    /// Last moment an approve is honoured (created + approval TTL), RFC 3339 IST.
+    pub expires_at: String,
+}
+
+/// `None` means the store could not be read (reported as 503, never as an empty list).
+pub type PendingFuture<'a> =
+    Pin<Box<dyn Future<Output = Option<Vec<PendingApproval>>> + Send + 'a>>;
+
+/// Read-only view of orders awaiting approval. Decisions go only through the pipeline.
+pub trait PendingRead: Send + Sync {
+    /// Pending orders, oldest first.
+    fn list(&self) -> PendingFuture<'_>;
+}
+
+/// Cap on remembered `Idempotency-Key` replies; the oldest is dropped first.
+pub const IDEMPOTENCY_CAP: usize = 256;
+
+type Remembered = (String, bool, crate::dto::DecisionOutcomeDto);
+
+/// First reply per (actor, order, key), so a retried POST returns the first outcome.
+#[derive(Debug, Clone, Default)]
+pub struct IdempotencyCache(Arc<Mutex<VecDeque<Remembered>>>);
+
+impl IdempotencyCache {
+    /// The remembered reply for `key` with the decision that produced it (`true` = approve).
+    #[must_use]
+    pub fn get(&self, key: &str) -> Option<(bool, crate::dto::DecisionOutcomeDto)> {
+        let q = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        q.iter().find(|e| e.0 == key).map(|e| (e.1, e.2.clone()))
+    }
+
+    /// Remember the first reply for `key`; a later `put` of the same key is ignored.
+    pub fn put(&self, key: String, approve: bool, reply: crate::dto::DecisionOutcomeDto) {
+        let mut q = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if q.iter().any(|e| e.0 == key) {
+            return;
+        }
+        if q.len() >= IDEMPOTENCY_CAP {
+            q.pop_front();
+        }
+        q.push_back((key, approve, reply));
+    }
 }
 
 /// One raised alarm.
@@ -118,6 +175,10 @@ pub struct AppState {
     pipeline: Option<PipelineHandle>,
     /// Read-only kill-switch view; `None` until wired; set only with `pipeline`.
     kill_switch: Option<Arc<dyn KillSwitchRead>>,
+    /// Pending-approval read port; `None` until wired (the list route answers 503).
+    pending: Option<Arc<dyn PendingRead>>,
+    /// Replies of the decision route by `Idempotency-Key`.
+    pub idempotency: IdempotencyCache,
     /// Alarms for `GET /status`.
     pub alarms: AlarmBoard,
 }
@@ -150,6 +211,8 @@ impl AppState {
             web_dist,
             pipeline: None,
             kill_switch: None,
+            pending: None,
+            idempotency: IdempotencyCache::default(),
             alarms: AlarmBoard::new(),
         }
     }
@@ -164,6 +227,18 @@ impl AppState {
         self.pipeline = Some(pipeline);
         self.kill_switch = Some(kill_switch);
         self
+    }
+
+    /// Wire the pending-approval read port.
+    #[must_use]
+    pub fn with_pending(mut self, pending: Arc<dyn PendingRead>) -> Self {
+        self.pending = Some(pending);
+        self
+    }
+
+    /// The pending-approval read port, or 503 `pipeline_closed` when it is not wired.
+    pub fn pending(&self) -> Result<&Arc<dyn PendingRead>, ApiError> {
+        self.pending.as_ref().ok_or(ApiError::PipelineClosed)
     }
 
     /// The pipeline, or 503 `pipeline_closed` when it is not wired.

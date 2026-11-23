@@ -18,7 +18,7 @@ use bazaar_core::calendar::MarketCalendar;
 use bazaar_core::clock::Clock;
 use bazaar_core::config::{RiskConfig, parse_str};
 use bazaar_core::ports::{
-    KillSwitchRepo, PaperLedgerRepo, QuoteSnapshot, QuoteSource, RepoError, SourceError,
+    KillSwitchRepo, OrderRepo, PaperLedgerRepo, QuoteSnapshot, QuoteSource, RepoError, SourceError,
 };
 use bazaar_core::segment::{InstrumentKind, Segment};
 use bazaar_execution::executor::{ApprovedOrder, ExecAck, ExecError, Executor};
@@ -38,7 +38,9 @@ use bazaar_store::SqliteStore;
 use rust_decimal::Decimal;
 use thiserror::Error;
 
-use crate::state::{KillSwitchRead, KillSwitchReading, ReadFuture};
+use crate::state::{
+    KillSwitchRead, KillSwitchReading, PendingApproval, PendingFuture, PendingRead, ReadFuture,
+};
 
 /// No quote feed is wired: every quote read fails, so the re-gate blocks (fail closed).
 #[derive(Debug, Clone, Copy, Default)]
@@ -177,6 +179,8 @@ pub struct Runtime {
     pub kill_switch: Arc<dyn KillSwitchRead>,
     pub paper: Arc<Paper>,
     pub store: SqliteStore,
+    /// Orders awaiting a decision (read only).
+    pub pending: Arc<dyn PendingRead>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -209,6 +213,56 @@ impl KillSwitchRead for StoreKillSwitch {
     }
 }
 
+/// Most pending orders listed; more is an unreadable list (503), never a silent cut.
+const PENDING_LIMIT: u32 = 500;
+
+/// Pending orders from the store, with their approval expiry.
+pub struct StorePending {
+    /// The verified store.
+    pub store: SqliteStore,
+    /// Time source for decoding payloads.
+    pub clock: Arc<dyn Clock>,
+    /// Approval TTL from `risk.toml`.
+    pub ttl: chrono::Duration,
+}
+
+impl std::fmt::Debug for StorePending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StorePending").finish_non_exhaustive()
+    }
+}
+
+impl PendingRead for StorePending {
+    fn list(&self) -> PendingFuture<'_> {
+        Box::pin(async move {
+            let rows = OrderRepo::list_in_state(&self.store, "pending_approval", PENDING_LIMIT)
+                .await
+                .ok()?;
+            let now = self.clock.now_ist();
+            let mut out = Vec::with_capacity(rows.len());
+            for r in rows {
+                let id = bazaar_execution::types::IntentId(r.intent_id);
+                // An undecodable row is not listed: reload expires it and audits that.
+                let Some(i) = OrderIntent::from_payload(id, &r.payload, now) else {
+                    continue;
+                };
+                out.push(PendingApproval {
+                    id: r.intent_id,
+                    symbol: i.symbol,
+                    side: match i.side {
+                        bazaar_risk::types::Side::Buy => "buy",
+                        bazaar_risk::types::Side::Sell => "sell",
+                    },
+                    qty: i.qty,
+                    created_at: i.created_at.to_rfc3339(),
+                    expires_at: (i.created_at + self.ttl).to_rfc3339(),
+                });
+            }
+            Some(out)
+        })
+    }
+}
+
 /// Open the verified store at `db`, build the pipeline, `reload()` once, then `spawn()`.
 ///
 /// # Errors
@@ -220,6 +274,12 @@ pub async fn start(
     calendar: MarketCalendar,
 ) -> Result<Runtime, StartError> {
     let store = bazaar_cli::compose::open_store(db).await?;
+    let risk: RiskConfig = parse_str(risk_toml).map_err(|e| StartError::Config(e.to_string()))?;
+    let pending = Arc::new(StorePending {
+        store: store.clone(),
+        clock: clock.clone(),
+        ttl: chrono::Duration::seconds(i64::from(risk.execution.approval_ttl_secs)),
+    });
     let (mut pipe, paper) = build(&store, risk_toml, clock, calendar).await?;
     let report = pipe.reload().await.map_err(StartError::Reload)?;
     Ok(Runtime {
@@ -228,6 +288,7 @@ pub async fn start(
         kill_switch: Arc::new(StoreKillSwitch(store.clone())),
         paper,
         store,
+        pending,
     })
 }
 
