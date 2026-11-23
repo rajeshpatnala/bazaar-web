@@ -14,6 +14,7 @@ pub mod score;
 pub mod sizing;
 pub mod types;
 pub mod universe;
+pub mod why;
 
 pub use assemble::{AssembleCx, assemble};
 pub use gate_ctx::{ContextUnavailable, ScanGateContext};
