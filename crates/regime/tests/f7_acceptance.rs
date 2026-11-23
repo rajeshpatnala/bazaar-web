@@ -78,9 +78,14 @@ fn crash() -> Vec<f64> {
     c
 }
 
-fn label_of(p: &RegimeParams, b: &[Candle], k: Series, x: Extras<'_>) -> (Trend, Tri, VolState) {
-    let s = classify(b, p, k, x).unwrap();
-    (s.trend, s.breakdown, s.vol)
+fn label_of(
+    params: &RegimeParams,
+    candles: &[Candle],
+    kind: Series,
+    extras: Extras<'_>,
+) -> (Trend, Tri, VolState) {
+    let state = classify(candles, params, kind, extras).unwrap();
+    (state.trend, state.breakdown, state.vol)
 }
 
 #[test]
