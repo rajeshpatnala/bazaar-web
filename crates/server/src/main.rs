@@ -121,8 +121,27 @@ async fn serve(port_flag: Option<u16>) -> anyhow::Result<()> {
         .filter(|v| !v.is_empty())
         .map_or_else(|| PathBuf::from("data"), PathBuf::from);
     std::fs::create_dir_all(&data_dir).context("creating the data directory")?;
+    // SEC-138-1: owner-only directory (the store itself restricts the database files to 0600).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700))
+            .context("restricting the data directory")?;
+    }
+    let data_dir = std::fs::canonicalize(&data_dir).context("resolving the data directory")?;
+    tracing::info!(data_dir = %data_dir.display(), "using data directory");
     let risk_toml =
         std::fs::read_to_string(config_dir.join("risk.toml")).context("reading risk.toml")?;
+    // RISK-138-4: the pipeline and the app state must agree on the execution mode.
+    let pipeline_mode =
+        bazaar_core::config::parse_str::<bazaar_core::config::RiskConfig>(&risk_toml)
+            .context("parsing risk.toml")?
+            .mode
+            .execution_mode;
+    anyhow::ensure!(
+        pipeline_mode == config.risk.mode.execution_mode,
+        "execution mode differs between the pipeline and the loaded config"
+    );
     let calendar = MarketCalendar::from_config(&config.calendar);
     // Store open, build, reload once, spawn. Any error exits non-zero BEFORE the port is bound
     // (RISK-133-3): nothing is served on a failed start.

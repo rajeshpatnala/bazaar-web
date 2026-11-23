@@ -26,7 +26,6 @@ use bazaar_paper::fill::{InstrumentSpec, SimConfig};
 use bazaar_paper::squareoff::ValidatedSquareOffTime;
 use bazaar_risk::baseline::{BaselineError, LimitsBaseline};
 use bazaar_risk::config::Baseline;
-use bazaar_risk::gate::ModeEvidence;
 use bazaar_risk::rules::inputs::{DataInputs, EventFlags, EvidenceInputs, MarginInputs};
 use bazaar_risk::snapshot::PortfolioSnapshot;
 use bazaar_risk::types::Tri;
@@ -93,23 +92,9 @@ impl LimitsBaseline for NoBaseline {
     }
 }
 
-/// Mode evidence for a production run (RISK-136-5): no approval digest (the pipeline binds the
-/// user's approval itself), every `auto` unlock flag `Known(false)` so `auto` stays locked, and
-/// `live` `Known(false)` without `live-trading` (`Unknown`, so blocked, with it).
-#[must_use]
-pub fn prod_mode_evidence() -> ModeEvidence {
-    ModeEvidence {
-        approval: None,
-        compliance_fresh: Tri::Known(false),
-        readiness_report: Tri::Known(false),
-        owner_opt_in: Tri::Known(false),
-        live: if cfg!(feature = "live-trading") {
-            Tri::Unknown
-        } else {
-            Tri::Known(false)
-        },
-    }
-}
+/// Mode evidence for a production run (RISK-136-5); defined in `bazaar-cli` so the pipeline
+/// tests exercise the very same function.
+pub use bazaar_cli::compose::prod_mode_evidence;
 
 /// Production market-side gate inputs: nothing is known (no snapshot, data, instrument or stop),
 /// so every entry and exit is blocked until real sources replace this. Only the mode evidence
@@ -155,6 +140,9 @@ impl GateContext for ProdBase {
         })
     }
 }
+
+/// Seed of the paper fill simulator (fixed, so paper fills are reproducible).
+const PAPER_SIM_SEED: u64 = 0;
 
 /// The paper executor type the runtime uses.
 pub type Paper = PaperExecutor<SqliteStore, UnavailableCharges, SqliteStore, UnknownSpecs>;
@@ -274,20 +262,28 @@ async fn build(
     }
     let cal = Arc::new(calendar.clone());
     let segs = [(Segment::Equity, InstrumentKind::CashNonFno)];
-    let square_off = ValidatedSquareOffTime::new(
-        &cal,
-        clock.now_ist().date_naive(),
-        ex.paper_mis_square_off_ist,
-        &segs,
-    )
-    .map_err(|e| StartError::Paper(e.to_string()))?;
+    // RISK-138-5: validate on the latest trading day (today when it is one), so a start on a
+    // weekend or holiday still works and the kill-switch route stays reachable. Covered:
+    // Equity / CashNonFno only (the segments the paper executor accepts today).
+    let today = clock.now_ist().date_naive();
+    let on = if cal
+        .is_trading_day(today, Segment::Equity)
+        .map_err(|e| StartError::Paper(e.to_string()))?
+    {
+        today
+    } else {
+        cal.prev_trading_day(today, Segment::Equity)
+            .map_err(|e| StartError::Paper(e.to_string()))?
+    };
+    let square_off = ValidatedSquareOffTime::new(&cal, on, ex.paper_mis_square_off_ist, &segs)
+        .map_err(|e| StartError::Paper(e.to_string()))?;
     let paper = Arc::new(PaperExecutor::new(
         account,
         store.clone(),
         UnknownSpecs,
         clock.clone(),
         cal,
-        SimConfig::from_section(ex, 0),
+        SimConfig::from_section(ex, PAPER_SIM_SEED),
         square_off,
     ));
     let ports = Ports {
@@ -480,7 +476,58 @@ mod tests {
             .submit(intent(&c, 1, Side::Buy, false))
             .await
             .unwrap();
+        // The reason text is pinned in the cli pipeline tests, where the quote is known; here
+        // (no quote source) the block is "no fresh quote" and the store state is what matters.
         assert!(blocked(&out), "{out:?}");
+        assert_eq!(rt.paper.working_count(), 0);
+    }
+
+    /// Unreadable kill-switch state is reported unreadable and orders stay blocked.
+    #[tokio::test]
+    async fn an_unreadable_kill_switch_state_is_reported_unreadable_and_blocks() {
+        use sqlx::{ConnectOptions, Connection, sqlite::SqliteConnectOptions};
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("x.db");
+        let c = clock();
+        let rt = start(&db, RISK, c.clone(), calendar()).await.unwrap();
+        let mut conn = SqliteConnectOptions::new()
+            .filename(&db)
+            .connect()
+            .await
+            .unwrap();
+        sqlx::query("DROP TABLE kill_switch")
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        conn.close().await.unwrap();
+        assert!(!rt.kill_switch.read().await.readable);
+        let out = rt
+            .handle
+            .submit(intent(&c, 1, Side::Buy, false))
+            .await
+            .unwrap();
+        assert!(blocked(&out), "{out:?}");
+    }
+
+    /// RISK-138-5: a start on a Saturday (or holiday) still succeeds, so the kill-switch route
+    /// is reachable.
+    #[tokio::test]
+    async fn start_succeeds_on_a_weekend() {
+        let dir = tempfile::tempdir().unwrap();
+        let sat = Arc::new(FakeClock::at(
+            Kolkata.with_ymd_and_hms(2026, 11, 21, 11, 0, 0).unwrap(),
+        ));
+        let rt = start(&dir.path().join("x.db"), RISK, sat, calendar()).await;
+        assert!(rt.is_ok(), "{:?}", rt.err());
+    }
+
+    #[test]
+    fn the_real_risk_toml_is_paper_mode() {
+        let r = parse_str::<RiskConfig>(include_str!("../../../config/risk.toml")).unwrap();
+        assert_eq!(
+            r.mode.execution_mode,
+            bazaar_core::mode::ExecutionMode::Paper
+        );
     }
 
     /// SEC-136-1: the store-backed context blocks on the store, so it works inside

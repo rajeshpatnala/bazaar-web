@@ -50,3 +50,4 @@ http-body-util.workspace = true
 tower = { workspace = true, features = ["util"] }
 insta.workspace = true
 tempfile.workspace = true
+sqlx.workspace = true
