@@ -3,8 +3,9 @@
 //!
 //! `qty = floor((equity x risk% - buffer) / per-unit risk)`, floored to lots, then capped by the
 //! position-value cap (G14), then (overridden trades) by `size_factor`, floored to lots again.
-//! Finally the size steps down a lot at a time until `risk at stop + cost(qty) <= budget`, where
-//! the cost (charges + slippage) is worked out for that quantity (`size_with_cost`).
+//! Finally the size steps down a lot at a time until `risk at stop + allowance(qty) <= budget`,
+//! where the allowance is `max(cost(qty), min_charges_slippage_buffer)`: the configured floor means
+//! "assume at least this much cost", it never refuses a cheap order (`size_with_cost`).
 //!
 //! Scope: `size` is for stop-defined linear instruments (equity, futures) only. Options sizing is
 //! out of F6 scope: a short option leg has unbounded loss and a bought option risks its premium,
@@ -96,7 +97,8 @@ pub struct SizingInput {
     pub lot_size: u32,
     pub tick_size: Decimal,
     /// Total estimated charges + slippage, rupees, used by [`size`] as a flat figure (compute it
-    /// for the largest candidate quantity); `Unknown` rejects. [`size_with_cost`] ignores it.
+    /// for the largest candidate quantity); the allowance is `max(buffer, floor)`; `Unknown` and
+    /// negative values reject. [`size_with_cost`] ignores it.
     pub buffer: Tri<Decimal>,
     /// Apply `override.size_factor` (an overridden trade).
     pub overridden: bool,
@@ -210,6 +212,10 @@ pub fn size_with_cost(
     cost: &dyn Fn(u32) -> Tri<Decimal>,
 ) -> Result<Sized, SizingError> {
     validate(input)?;
+    // A hand-built limits struct with a floor <= 0 must not weaken "never below the floor".
+    if limits.min_charges_slippage_buffer <= Decimal::ZERO {
+        return Err(SizingError::InputUnknown("the charges and slippage floor"));
+    }
     // Allowance for a quantity: `max(cost, floor)`. Unknown or negative cost fails; the floor is
     // the configured `min_charges_slippage_buffer` (assume at least that much cost), so the
     // allowance is never below it. Same function for backtest, paper and live.

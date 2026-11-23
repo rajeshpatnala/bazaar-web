@@ -436,20 +436,53 @@ fn step_down_uses_the_floor_at_the_final_quantity() {
 
 #[test]
 fn production_floor_sizes_a_normal_equity_entry_with_a_small_real_cost() {
-    // Real config/risk.toml, floor read from it (not set here); a Rs 25,000 order costs a few rupees.
+    // Real config/risk.toml; the floor and percentages are read from it, never set here.
     let l = GateConfig::from_toml_str(include_str!("../../../config/risk.toml"))
         .unwrap()
         .effective(&Baseline::none());
-    assert_eq!(l.min_charges_slippage_buffer, d(60));
+    let floor = l.min_charges_slippage_buffer;
+    let cost = |q: u32| Tri::Known(Decimal::new(i64::from(q) * 5, 1)); // Rs 0.50 a share, under the floor
     let mut i = input();
     i.equity = d(100_000);
-    let cost = |q: u32| Tri::Known(Decimal::new(i64::from(q) * 5, 1)); // Rs 0.50 a share
+    // Rs 500 entry, Rs 10 stop distance: budget Rs 1,000; the cap (25% -> 50 shares) binds.
     let s = size_with_cost(&l, &i, &cost).unwrap();
-    let cap = d(100_000) * l.max_position_value_pct / d(100);
-    assert!(s.notional <= cap && s.qty > 0);
-    assert_eq!(s.risk_at_stop, Decimal::from(s.qty) * d(10));
-    assert!(s.risk_at_stop + l.min_charges_slippage_buffer <= s.budget);
+    assert_eq!((s.qty, s.risk_at_stop, s.notional), (50, d(500), d(25_000)));
     assert_eq!(s.budget, d(100_000) * l.max_risk_per_trade_pct / d(100));
+    // Wide cap so the floor binds: (budget - floor) / 10 = 94 shares, risk Rs 940 (raw cost would
+    // give 95); with the production floor of Rs 60 this is the spec's 94 / Rs 940.
+    let mut wide = l.clone();
+    wide.max_position_value_pct = d(100);
+    let s = size_with_cost(&wide, &i, &cost).unwrap();
+    let want = ((s.budget - floor) / d(10)).floor();
+    assert_eq!((Decimal::from(s.qty), s.risk_at_stop), (want, want * d(10)));
+    assert_eq!((s.qty, s.risk_at_stop), (94, d(940)));
+}
+
+#[test]
+fn a_floor_of_zero_or_less_fails_closed() {
+    for f in [d(0), d(-1)] {
+        let mut l = limits();
+        l.min_charges_slippage_buffer = f;
+        assert!(matches!(
+            size(&l, &input()),
+            Err(SizingError::InputUnknown(_))
+        ));
+    }
+}
+
+proptest! {
+    #[test]
+    fn allowance_is_never_below_the_floor_or_over_the_budget(cost_paise in 0i64..50_000) {
+        let mut l = limits();
+        l.max_position_value_pct = d(100);
+        let c = Decimal::new(cost_paise, 2);
+        if let Ok(s) = size_with_cost(&l, &input(), &|_| Tri::Known(c)) {
+            prop_assert!(s.risk_at_stop + c.max(d(60)) <= s.budget);
+            // One more share at the larger allowance would not have fit.
+            let more = s.risk_at_stop + d(10);
+            prop_assert!(more + c.max(d(60)) > s.budget);
+        }
+    }
 }
 
 #[test]
