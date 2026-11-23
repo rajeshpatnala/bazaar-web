@@ -4,3 +4,5 @@
 - [UI direction B](project_ui_direction_b.md) — owner chose light premium preview B for F13 (2026-11-20)
 - [Manager decides](feedback_manager_decides.md) — owner offline: take recommended options, keep going; queue owner-only items
 - [DuckDB: system lib](project_keep_duckdb.md) — keep DuckDB but link system lib (BZ-106); Dockerfile later
+- [Trade lifecycle expectation](project_trade_lifecycle_expectation.md) — owner wants daily position tracking and hold/sell/add decisions, not one-shot ideas (2026-11-23)
+- [Review economy](feedback_review_economy.md) — security reviewer only when sensitive; verify-fixes for minors; risk-guardian always on its paths
