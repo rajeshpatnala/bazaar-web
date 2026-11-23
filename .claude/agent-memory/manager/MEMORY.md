@@ -6,3 +6,4 @@
 - [DuckDB: system lib](project_keep_duckdb.md) — keep DuckDB but link system lib (BZ-106); Dockerfile later
 - [Trade lifecycle expectation](project_trade_lifecycle_expectation.md) — owner wants daily position tracking and hold/sell/add decisions, not one-shot ideas (2026-11-23)
 - [Review economy](feedback_review_economy.md) — security reviewer only when sensitive; verify-fixes for minors; risk-guardian always on its paths
+- [First-pass quality](feedback_first_pass_quality.md) — checklist-first, failure modes in plans, self-review gate, 400-line stop; baseline 72% round-2
