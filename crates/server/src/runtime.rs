@@ -84,26 +84,31 @@ impl ChargeSource for RuntimeCharges {
 /// The charge and gate-cost adapters from `charges.toml`. Any failure (unreadable, placeholder,
 /// parse) logs ONE warning and gives `Unavailable` + `UnknownCost`, so every fill and approve is
 /// refused; the server still binds (SEC-150-4, RISK-138-7). No default or zero cost, ever.
+/// Known limit (RISK-152-5): `GateCost` has no symbol, so it prices every intent as NSE equity
+/// (worst of MIS and CNC); the paper executor refuses non-NSE-EQ symbols through the spec
+/// snapshot, and a future executor must only be fed equity intents.
 fn cost_adapters(
     config_dir: &Path,
     slippage_bps: u32,
     clock: &Arc<dyn Clock>,
 ) -> (RuntimeCharges, Arc<dyn CostModel>) {
     let built = bazaar_core::config::load::<ChargesConfig>(config_dir)
-        .map_err(|e| e.to_string())
+        .map_err(|_| ())
         .and_then(|c| {
             let c = Arc::new(c);
-            let f9 = F9Charges::new(c.clone(), clock.clone()).map_err(|e| e.to_string())?;
-            let gate = GateCost::new(c, clock.clone(), slippage_bps).map_err(|e| e.to_string())?;
+            let f9 = F9Charges::new(c.clone(), clock.clone()).map_err(|_| ())?;
+            let gate = GateCost::new(c, clock.clone(), slippage_bps).map_err(|_| ())?;
             Ok((f9, gate))
         });
-    match built {
-        Ok((f9, gate)) => (RuntimeCharges::Real(f9), Arc::new(gate)),
-        Err(e) => {
-            tracing::warn!(error = %e, "charges unavailable: every paper fill and approve is refused");
-            (RuntimeCharges::Unavailable, Arc::new(UnknownCost))
-        }
+    if let Ok((f9, gate)) = built {
+        return (RuntimeCharges::Real(f9), Arc::new(gate));
     }
+    // Fixed category only: the parser text can carry file lines and snippets (SEC-152-1).
+    tracing::warn!(
+        category = "charges_unavailable",
+        "charges unavailable: every paper fill and approve is refused"
+    );
+    (RuntimeCharges::Unavailable, Arc::new(UnknownCost))
 }
 
 /// No broker baseline: `Baseline::none()`.
@@ -398,8 +403,13 @@ async fn build<Q: QuoteSource + 'static, B: GateContext + 'static>(
     let ex = &risk.execution;
     let (charges, cost) = cost_adapters(config_dir, ex.paper_slippage_bps.equity, &clock);
     let (specs, warnings) = InstrumentSnapshot::load(store, config_dir, &*clock).await;
-    for w in &warnings {
-        tracing::warn!("{w}");
+    if !warnings.is_empty() {
+        // Fixed category and a count; the warning texts are not echoed (SEC-152-2).
+        tracing::warn!(
+            category = "instrument_master",
+            count = warnings.len(),
+            "instrument master warnings: symbols without specs are refused"
+        );
     }
     let account = Arc::new(PaperAccount::new(
         store.clone(),
@@ -522,6 +532,14 @@ mod tests {
 
     fn blocked(o: &Outcome) -> bool {
         matches!(o, Outcome::GateBlocked(_))
+    }
+
+    /// The gate's refusal text; fails the test for any other outcome.
+    fn reason(o: &Outcome) -> &str {
+        match o {
+            Outcome::GateBlocked(r) => r,
+            other => panic!("expected GateBlocked, got {other:?}"),
+        }
     }
 
     #[test]
@@ -929,10 +947,16 @@ mod tests {
     /// floor on the charges allowance is lowered to Rs 1: the real cost of ONE share is far
     /// below the Rs 15 fixture floor (see the F10 record, BZ-521 S2 note).
     fn fixture_risk() -> String {
-        RISK.replace("15:15", "13:30").replace(
+        let out = RISK.replace("15:15", "13:30").replace(
             "min_charges_slippage_buffer = \"15\"",
             "min_charges_slippage_buffer = \"1\"",
-        )
+        );
+        assert!(out.contains("13:30"), "square-off replace was a no-op");
+        assert!(
+            out.contains("min_charges_slippage_buffer = \"1\""),
+            "floor replace was a no-op"
+        );
+        out
     }
 
     fn master_row() -> Instrument {
@@ -975,6 +999,12 @@ mod tests {
     /// Temp data dir whose master (fetched today) holds TESTEQ, and a temp config dir with the
     /// fixture calendar and charges and a watchlist of `symbols`.
     async fn env(symbols: &[&str]) -> Env {
+        env_aged(symbols, 0).await
+    }
+
+    /// As `env`, with the master fetched `master_age_days` days ago. Also holds a BSE equity and
+    /// an NSE future on the master, which the paper universe must refuse.
+    async fn env_aged(symbols: &[&str], master_age_days: i64) -> Env {
         let data = tempfile::tempdir().unwrap();
         let cfg = tempfile::tempdir().unwrap();
         let fx = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/config");
@@ -1000,8 +1030,25 @@ mod tests {
         ));
         let db = data.path().join("x.db");
         let store = bazaar_cli::compose::open_store(&db).await.unwrap();
+        let bse = Instrument {
+            instrument_token: 1002,
+            exchange_token: 5,
+            tradingsymbol: "TESTBSE".into(),
+            exchange: Exchange::Bse,
+            ..master_row()
+        };
+        let fut = Instrument {
+            instrument_token: 1003,
+            exchange_token: 6,
+            tradingsymbol: "TESTFUT".into(),
+            exchange: Exchange::Nfo,
+            instrument_type: InstrumentType::Future,
+            segment: "NFO-FUT".into(),
+            ..master_row()
+        };
+        let fetched = clock.now_ist().date_naive() - chrono::Duration::days(master_age_days);
         store
-            .upsert_instruments(&[master_row()], clock.now_ist().date_naive())
+            .upsert_instruments(&[master_row(), bse, fut], fetched)
             .await
             .unwrap();
         drop(store);
@@ -1077,20 +1124,29 @@ mod tests {
                 .await;
         }
         assert!(t.rejected.is_empty(), "{:?}", t.rejected);
+        assert_eq!(t.fills.len(), 1, "{:?}", t.fills);
         let fill = &t.fills[0];
-        let cfg = Arc::new(load::<ChargesConfig>(e.cfg.path()).unwrap());
-        let clock: Arc<dyn Clock> = e.clock.clone();
-        let want = F9Charges::new(cfg, clock)
-            .unwrap()
-            .charge("TESTEQ", true, fill.qty, fill.price, "mis")
-            .unwrap();
-        assert!(want > Decimal::ZERO);
+        assert_eq!((fill.qty, fill.price), (10, d("1950")));
+        // Hand-derived from the cli fixture charges.toml (NSE equity_intraday buy, turnover
+        // 10 x FILLPRICE): brokerage = lower of Rs 20 and 0.03%; STT 0; exchange 0.00307%; SEBI
+        // Rs 10 per crore; IPFT 0.0000001%; stamp 0.003%; GST 18% on brokerage + SEBI + exchange. Lines round half-up: 5.85 + 0.60 + 0.02 + 0 + stamp 1 (0.585 to whole rupees) + GST 1.16 = 8.63.
+        let want = d("8.63");
         let lines = PaperLedgerRepo::current_epoch(&rt.store).await.unwrap();
         let charge: Vec<_> = lines.iter().filter(|l| l.kind == "charge").collect();
         assert_eq!(charge.len(), 1, "{lines:?}");
         assert_eq!(charge[0].amount, -want);
         let buy: Vec<_> = lines.iter().filter(|l| l.kind == "buy").collect();
-        assert_eq!(buy[0].amount, -(fill.price * Decimal::from(fill.qty)));
+        assert_eq!(buy.len(), 1, "{lines:?}");
+        assert_eq!(buy[0].amount, -d("19500"));
+        // Cash after the fill: the opening cash less the buy and the charge, nothing else moved.
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        let opening: Decimal = lines
+            .iter()
+            .filter(|l| l.kind == "opening")
+            .map(|l| l.amount)
+            .sum();
+        let total: Decimal = lines.iter().map(|l| l.amount).sum();
+        assert_eq!(total, opening - d("19500") - want);
         let pos = rt
             .paper
             .position("TESTEQ", bazaar_execution::types::Product::Mis);
@@ -1099,7 +1155,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_passing_quote_source_alone_does_not_open_production() {
-        // The production base with a perfect quote source: still Blocked, never placed.
+        // The production base with a perfect quote source: still Blocked, never placed. The
+        // refusal is the Unknown gate inputs (no proposed price), not a quote problem.
         let e = env(&["TESTEQ"]).await;
         let rt = start_with(
             &e.db,
@@ -1113,13 +1170,25 @@ mod tests {
         .await
         .unwrap();
         let out = rt.handle.submit(e.order("TESTEQ")).await.unwrap();
-        assert!(blocked(&out), "{out:?}");
+        assert_eq!(
+            reason(&out),
+            "no proposed price to measure quote drift from"
+        );
         assert_eq!(rt.paper.working_count(), 0);
     }
 
     #[tokio::test]
-    async fn production_start_with_real_charges_and_specs_still_blocks_every_approve() {
+    async fn production_start_blocks_a_stored_pending_order_at_approve() {
+        // Queue an order through the test composition, then restart as production (real
+        // charges and specs, no quote source) and approve it: the re-gate must block it.
         let e = env(&["TESTEQ"]).await;
+        let rt = e.open().await;
+        assert_eq!(
+            rt.handle.submit(e.order("TESTEQ")).await.unwrap(),
+            Outcome::Queued
+        );
+        drop(rt);
+        e.clock.advance(chrono::Duration::seconds(2));
         let rt = start(
             &e.db,
             &fixture_risk(),
@@ -1129,8 +1198,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let out = rt.handle.submit(e.order("TESTEQ")).await.unwrap();
-        assert!(blocked(&out), "{out:?}");
+        assert_eq!(rt.report.requeued, 1, "{:?}", rt.report);
+        let out = rt
+            .handle
+            .decide(IntentId(1), ApprovalDecision::Approve, "owner")
+            .await
+            .unwrap();
+        assert_eq!(reason(&out), "no fresh quote");
         assert_eq!(rt.paper.working_count(), 0);
     }
 
@@ -1143,44 +1217,98 @@ mod tests {
         ] {
             let e = env(&["TESTEQ"]).await;
             let f = e.cfg.path().join("charges.toml");
+            let clk: Arc<dyn Clock> = e.clock.clone();
+            // Control: the good file builds the real adapters; the bad one does not.
+            assert!(matches!(
+                cost_adapters(e.cfg.path(), 5, &clk).0,
+                RuntimeCharges::Real(_)
+            ));
             match body {
                 None => std::fs::remove_file(&f).unwrap(),
                 Some(b) => std::fs::write(&f, b).unwrap(),
             }
+            assert!(matches!(
+                cost_adapters(e.cfg.path(), 5, &clk).0,
+                RuntimeCharges::Unavailable
+            ));
             let rt = e.open().await; // starts: the kill switch stays reachable
             assert!(rt.kill_switch.read().await.readable);
             let out = rt.handle.submit(e.order("TESTEQ")).await.unwrap();
-            assert!(blocked(&out), "{body:?}: {out:?}");
+            assert!(reason(&out).starts_with("G02:"), "{body:?}: {out:?}");
             assert_eq!(rt.paper.working_count(), 0);
         }
     }
 
     #[tokio::test]
-    async fn a_symbol_outside_the_paper_universe_is_refused_before_any_charge() {
-        let e = env(&["TESTEQ"]).await;
-        let rt = e.open().await;
-        let out = e.approve(&rt, "OTHER").await;
-        assert!(matches!(out, Outcome::ExecFailed(_)), "{out:?}");
-        assert_eq!(rt.paper.working_count(), 0);
-        let lines = PaperLedgerRepo::current_epoch(&rt.store).await.unwrap();
-        assert!(lines.iter().all(|l| l.kind == "opening"), "{lines:?}");
+    async fn only_nse_equity_in_the_master_is_paper_tradable() {
+        // OTHER is not in the master; TESTBSE (BSE equity) and TESTFUT (NSE future) are, and on
+        // the watchlist, but only NSE equity is paper-tradable (QUAN-150-5).
+        for symbol in ["OTHER", "TESTBSE", "TESTFUT"] {
+            let e = env(&["TESTEQ", "TESTBSE", "TESTFUT"]).await;
+            let rt = e.open().await;
+            let out = e.approve(&rt, symbol).await;
+            assert_eq!(
+                out,
+                Outcome::ExecFailed(ExecError::InvalidInput("unknown instrument")),
+                "{symbol}"
+            );
+            assert_eq!(rt.paper.working_count(), 0, "{symbol}");
+            let lines = PaperLedgerRepo::current_epoch(&rt.store).await.unwrap();
+            assert!(
+                lines.iter().all(|l| l.kind == "opening"),
+                "{symbol}: {lines:?}"
+            );
+        }
     }
 
     #[tokio::test]
     async fn a_stale_master_gives_no_specs_so_the_order_is_refused() {
-        let e = env(&["TESTEQ"]).await;
-        e.clock.advance(chrono::Duration::days(30));
+        let e = env_aged(&["TESTEQ"], 30).await;
+        // Precondition: the master really is stale (the snapshot reports a warning).
+        let store = bazaar_cli::compose::open_store(&e.db).await.unwrap();
+        let (_, warnings) = InstrumentSnapshot::load(&store, e.cfg.path(), &*e.clock).await;
+        assert_ne!(warnings.len(), 0);
+        drop(store);
         let rt = e.open().await;
-        let out = rt.handle.submit(e.order("TESTEQ")).await.unwrap();
-        if out == Outcome::Queued {
-            e.clock.advance(chrono::Duration::seconds(2));
-            let out = rt
-                .handle
-                .decide(IntentId(1), ApprovalDecision::Approve, "owner")
-                .await
-                .unwrap();
-            assert!(!matches!(out, Outcome::Placed(_)), "{out:?}");
+        let out = e.approve(&rt, "TESTEQ").await; // asserts Queued first
+        assert_eq!(
+            out,
+            Outcome::ExecFailed(ExecError::InvalidInput("unknown instrument"))
+        );
+        assert_eq!(rt.paper.working_count(), 0);
+    }
+
+    /// A quote an hour old.
+    struct OldQuote(Arc<FakeClock>);
+    impl QuoteSource for OldQuote {
+        #[allow(clippy::unused_async)]
+        async fn quote(&self, _: &str) -> Result<QuoteSnapshot, SourceError> {
+            Ok(QuoteSnapshot {
+                last: d("1950"),
+                lower_circuit: None,
+                upper_circuit: None,
+                bar_volume: None,
+                at_ist_rfc3339: (self.0.now_ist() - chrono::Duration::hours(1)).to_rfc3339(),
+            })
         }
+    }
+
+    #[tokio::test]
+    async fn build_wraps_the_quote_source_in_guarded_quotes() {
+        let e = env(&["TESTEQ"]).await;
+        let rt = start_with(
+            &e.db,
+            &fixture_risk(),
+            e.cfg.path(),
+            e.clock.clone(),
+            e.calendar(),
+            OldQuote(e.clock.clone()),
+            OpenBase(e.clock.clone()),
+        )
+        .await
+        .unwrap();
+        let out = rt.handle.submit(e.order("TESTEQ")).await.unwrap();
+        assert_eq!(reason(&out), "no fresh quote");
         assert_eq!(rt.paper.working_count(), 0);
     }
 
