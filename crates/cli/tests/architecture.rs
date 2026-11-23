@@ -69,6 +69,8 @@ fn allowed(name: &str) -> Option<&'static [&'static str]> {
         // Composition roots may depend on every crate (`bz-architecture` s2), so no edge list.
         // BZ-511 decision: `bazaar-server` depends on `bazaar-cli` for `compose` (store open,
         // pipeline build) so there is ONE composition; nothing depends on `bazaar-server`.
+        // BZ-521 decision: `bazaar-cli` also depends on `bazaar-backtest` (F9 `CostModel`) and
+        // `bazaar-paper` (`ChargeSource`) for the cost adapters in `costs.rs`; domain edges unchanged.
         "bazaar-cli" | "bazaar-server" => return None,
         other => panic!("unknown crate {other}: add it to allowed() (new crate = ADR)"),
     })
@@ -216,4 +218,19 @@ fn no_recipe_or_workflow_uses_all_features() {
     scan_for_all_features(&root.join(".github"), &mut hits);
     scan_for_all_features(&root.join("scripts"), &mut hits);
     assert!(hits.is_empty(), "--all-features found in {hits:?}");
+}
+
+/// BZ-521 S0: the cost adapters need the F9 model and the paper port as normal dependencies.
+#[test]
+fn cli_depends_on_backtest_and_paper_for_the_cost_adapters() {
+    let e = edges(&metadata());
+    let cli = &e["bazaar-cli"];
+    assert!(cli.iter().any(|d| d == "bazaar-backtest"));
+    assert!(cli.iter().any(|d| d == "bazaar-paper"));
+    // No domain crate may depend on the adapters' home.
+    assert!(
+        e.iter()
+            .filter(|(n, _)| allowed(n).is_some())
+            .all(|(_, d)| !d.iter().any(|x| x == "bazaar-cli"))
+    );
 }

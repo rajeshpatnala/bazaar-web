@@ -462,6 +462,7 @@ version = "0.1.0"
 name = "bazaar-cli"
 version = "0.1.0"
 dependencies = [
+ "bazaar-backtest",
  "bazaar-broker",
  "bazaar-core",
  "bazaar-data",
