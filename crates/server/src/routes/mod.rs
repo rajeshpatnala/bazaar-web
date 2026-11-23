@@ -1,6 +1,9 @@
 //! Route handlers (slice F1/server-app). Handlers are thin; no route places an order.
 
+pub mod alarms;
+pub mod approvals;
 pub mod auth;
+pub mod killswitch;
 pub mod status;
 
 use utoipa_axum::router::OpenApiRouter;
@@ -12,4 +15,7 @@ pub fn api() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .merge(auth::router())
         .merge(status::router())
+        .merge(approvals::router())
+        .merge(killswitch::router())
+        .merge(alarms::router())
 }

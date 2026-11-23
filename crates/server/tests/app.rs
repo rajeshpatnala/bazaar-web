@@ -151,3 +151,22 @@ async fn openapi_contract() {
     assert!(paths.keys().all(|p| p.starts_with("/api/v1/")));
     assert!(json["components"]["schemas"]["Problem"].is_object());
 }
+
+#[tokio::test]
+async fn status_shows_raised_alarms_with_control_chars_escaped() {
+    let app = TestApp::new(false);
+    let cookie = app.login().await;
+    let none = body_json(app.get("/api/v1/status", Some(&cookie)).await).await;
+    assert_eq!(none["alarms"], serde_json::json!([]));
+    app.alarms.raise(
+        "square_off_blocked",
+        "blocked \x1b[31m",
+        "2026-01-05T10:00:00+05:30",
+    );
+    let st = body_json(app.get("/api/v1/status", Some(&cookie)).await).await;
+    assert_eq!(st["alarms"][0]["code"], "square_off_blocked");
+    assert_eq!(st["alarms"][0]["message"], "blocked \\x1b[31m");
+    app.alarms.clear("square_off_blocked");
+    let st = body_json(app.get("/api/v1/status", Some(&cookie)).await).await;
+    assert_eq!(st["alarms"], serde_json::json!([]));
+}

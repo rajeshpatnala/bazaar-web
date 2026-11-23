@@ -13,6 +13,9 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use bazaar_execution::{
+    approval::Outcome, executor::ExecError, killswitch::ReleaseError, pipeline::PipelineError,
+};
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -77,6 +80,20 @@ pub enum ApiError {
     Validation(Vec<FieldError>),
     /// 429.
     RateLimited,
+    /// 409 a second decision on an already decided approval.
+    AlreadyDecided,
+    /// 409 the kill switch is engaged; nothing was sent.
+    KillSwitchEngaged,
+    /// 409 the daily-loss breaker is tripped; nothing was sent.
+    BreakerTripped,
+    /// 422 not enough funds; nothing was sent.
+    InsufficientFunds,
+    /// 503 margin could not be read (never estimated); nothing was sent.
+    MarginUnavailable,
+    /// 503 the trading pipeline is stopped or not wired; nothing was done.
+    PipelineClosed,
+    /// 503 a store or audit write failed; nothing changed, safe to retry.
+    StorageUnavailable,
     /// 500; the cause is logged once by the caller, never sent.
     Internal,
 }
@@ -98,8 +115,14 @@ impl ApiError {
             Self::RequestTimeout => StatusCode::REQUEST_TIMEOUT,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            Self::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::Validation(_) | Self::InsufficientFunds => StatusCode::UNPROCESSABLE_ENTITY,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::AlreadyDecided | Self::KillSwitchEngaged | Self::BreakerTripped => {
+                StatusCode::CONFLICT
+            }
+            Self::PipelineClosed | Self::StorageUnavailable | Self::MarginUnavailable => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -122,6 +145,13 @@ impl ApiError {
             Self::UnsupportedMediaType => "unsupported_media_type",
             Self::Validation(_) => "validation_error",
             Self::RateLimited => "rate_limited",
+            Self::AlreadyDecided => "already_decided",
+            Self::KillSwitchEngaged => "kill_switch_engaged",
+            Self::BreakerTripped => "breaker_tripped",
+            Self::InsufficientFunds => "insufficient_funds",
+            Self::MarginUnavailable => "margin_unavailable",
+            Self::PipelineClosed => "pipeline_closed",
+            Self::StorageUnavailable => "storage_unavailable",
             Self::Internal => "internal",
         }
     }
@@ -142,6 +172,13 @@ impl ApiError {
             Self::UnsupportedMediaType => "Unsupported media type",
             Self::Validation(_) => "Validation failed",
             Self::RateLimited => "Too many requests",
+            Self::AlreadyDecided => "Already decided",
+            Self::KillSwitchEngaged => "Kill switch engaged",
+            Self::BreakerTripped => "Daily-loss breaker tripped",
+            Self::InsufficientFunds => "Insufficient funds",
+            Self::MarginUnavailable => "Margin unavailable",
+            Self::PipelineClosed => "Trading pipeline unavailable",
+            Self::StorageUnavailable => "Storage unavailable",
             Self::Internal => "Internal error",
         }
     }
@@ -162,6 +199,13 @@ impl ApiError {
             Self::UnsupportedMediaType => "Content-Type must be application/json.",
             Self::Validation(_) => "One or more fields are invalid.",
             Self::RateLimited => "Slow down and retry shortly.",
+            Self::AlreadyDecided => "This approval was already decided; nothing was sent again.",
+            Self::KillSwitchEngaged => "The kill switch is engaged. Nothing was sent.",
+            Self::BreakerTripped => "The daily-loss breaker has tripped. Nothing was sent.",
+            Self::InsufficientFunds => "Not enough funds for this order. Nothing was sent.",
+            Self::MarginUnavailable => "Margin could not be read. Nothing was sent.",
+            Self::PipelineClosed => "The trading pipeline is not running. Nothing was done.",
+            Self::StorageUnavailable => "A storage write failed. Nothing changed; retry shortly.",
             Self::Internal => "Something went wrong on the server.",
         }
     }
@@ -209,6 +253,46 @@ impl IntoResponse for ApiError {
         res.headers_mut()
             .insert(header::CONTENT_TYPE, HeaderValue::from_static(PROBLEM_JSON));
         res
+    }
+}
+
+impl From<PipelineError> for ApiError {
+    /// Explicit match, no catch-all: a new pipeline error breaks the build until it is mapped.
+    fn from(e: PipelineError) -> Self {
+        match e {
+            PipelineError::TooLong => Self::Validation(vec![FieldError {
+                field: "text".to_owned(),
+                message: "Too long (500 bytes at most).".to_owned(),
+            }]),
+            PipelineError::Closed => Self::PipelineClosed,
+            PipelineError::Exec(ExecError::Storage)
+            | PipelineError::Release(ReleaseError::Storage) => Self::StorageUnavailable,
+            PipelineError::Release(ReleaseError::WrongPhrase) => {
+                Self::Validation(vec![FieldError {
+                    field: "phrase".to_owned(),
+                    message: "The release phrase does not match.".to_owned(),
+                }])
+            }
+            PipelineError::Exec(ExecError::InvalidInput(_)) => Self::Validation(vec![FieldError {
+                field: "order".to_owned(),
+                message: "The order failed a lot, tick, freeze or quantity rule.".to_owned(),
+            }]),
+            PipelineError::Exec(ExecError::KillSwitch) => Self::KillSwitchEngaged,
+            PipelineError::Exec(ExecError::BreakerTripped) => Self::BreakerTripped,
+            PipelineError::Exec(ExecError::RateLimited) => Self::RateLimited,
+            PipelineError::Exec(ExecError::InsufficientFunds) => Self::InsufficientFunds,
+            PipelineError::Exec(ExecError::MarginUnavailable) => Self::MarginUnavailable,
+            // The send outcome is unknown: reconciliation owns it; never described as a user error.
+            PipelineError::Exec(ExecError::Unknown) => Self::Internal,
+        }
+    }
+}
+
+/// A decision on a finished intent is a 409; any other outcome passes through unchanged.
+pub fn reject_repeat(o: Outcome) -> Result<Outcome, ApiError> {
+    match o {
+        Outcome::AlreadyDecided(_) => Err(ApiError::AlreadyDecided),
+        other => Ok(other),
     }
 }
 
@@ -484,5 +568,58 @@ mod tests {
     fn internal_detail_is_generic() {
         let p = ApiError::Internal.problem();
         assert!(!p.detail.contains('/') && !p.detail.to_lowercase().contains("sql"));
+    }
+
+    #[test]
+    fn pipeline_errors_map_to_problems() {
+        let p = ApiError::from(PipelineError::TooLong);
+        assert_eq!(p.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(p.problem().errors.len(), 1);
+        let c = ApiError::from(PipelineError::Closed);
+        assert_eq!(
+            (c.status(), c.code()),
+            (StatusCode::SERVICE_UNAVAILABLE, "pipeline_closed")
+        );
+        for e in [
+            PipelineError::Exec(ExecError::Storage),
+            PipelineError::Release(ReleaseError::Storage),
+        ] {
+            let a = ApiError::from(e);
+            assert_eq!(
+                (a.status(), a.code()),
+                (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable")
+            );
+        }
+        let w = ApiError::from(PipelineError::Release(ReleaseError::WrongPhrase));
+        assert_eq!(w.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let i = ApiError::from(PipelineError::Exec(ExecError::Unknown));
+        assert_eq!(i, ApiError::Internal);
+    }
+
+    #[test]
+    fn exec_rejections_map_to_distinct_codes() {
+        let cases = [
+            (ExecError::KillSwitch, 409, "kill_switch_engaged"),
+            (ExecError::BreakerTripped, 409, "breaker_tripped"),
+            (ExecError::RateLimited, 429, "rate_limited"),
+            (ExecError::InsufficientFunds, 422, "insufficient_funds"),
+            (ExecError::MarginUnavailable, 503, "margin_unavailable"),
+            (ExecError::InvalidInput("lot"), 422, "validation_error"),
+        ];
+        for (e, status, code) in cases {
+            let a = ApiError::from(PipelineError::Exec(e));
+            assert_eq!((a.status().as_u16(), a.code()), (status, code));
+        }
+    }
+
+    #[test]
+    fn repeat_decision_is_409_and_others_pass() {
+        let first = Outcome::AlreadyDecided(Box::new(Outcome::Declined));
+        let e = reject_repeat(first).unwrap_err();
+        assert_eq!(
+            (e.status(), e.code()),
+            (StatusCode::CONFLICT, "already_decided")
+        );
+        assert_eq!(reject_repeat(Outcome::Declined).unwrap(), Outcome::Declined);
     }
 }

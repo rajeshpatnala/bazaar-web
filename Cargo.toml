@@ -18,6 +18,7 @@ bazaar-store = { path = "crates/store" }
 bazaar-execution = { path = "crates/execution" }
 bazaar-risk = { path = "crates/risk" }
 bazaar-paper = { path = "crates/paper" }
+bazaar-cli = { path = "crates/cli" }
 
 # external: versions live ONLY here (F1 set approved by the owner on 2026-11-18)
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }

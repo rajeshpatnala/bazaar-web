@@ -67,6 +67,8 @@ fn allowed(name: &str) -> Option<&'static [&'static str]> {
         "bazaar-paper" => &["bazaar-core", "bazaar-execution"],
         "bazaar-broker" => &["bazaar-core", "bazaar-execution", "bazaar-data"],
         // Composition roots may depend on every crate (`bz-architecture` s2), so no edge list.
+        // BZ-511 decision: `bazaar-server` depends on `bazaar-cli` for `compose` (store open,
+        // pipeline build) so there is ONE composition; nothing depends on `bazaar-server`.
         "bazaar-cli" | "bazaar-server" => return None,
         other => panic!("unknown crate {other}: add it to allowed() (new crate = ADR)"),
     })
@@ -106,6 +108,22 @@ fn no_domain_crate_depends_on_a_composition_root() {
                 .any(|d| d == "bazaar-server" || d == "bazaar-cli"),
             "{name} depends on a composition root"
         );
+    }
+}
+
+/// BZ-511: the one allowed root-to-root edge is `bazaar-server -> bazaar-cli`, never the reverse.
+#[test]
+fn only_server_depends_on_cli_and_never_the_reverse() {
+    for (name, deps) in edges(&metadata()) {
+        if name != "bazaar-server" {
+            assert!(
+                !deps.iter().any(|d| d == "bazaar-cli"),
+                "{name} depends on bazaar-cli"
+            );
+        }
+        if name == "bazaar-cli" {
+            assert!(!deps.iter().any(|d| d == "bazaar-server"));
+        }
     }
 }
 

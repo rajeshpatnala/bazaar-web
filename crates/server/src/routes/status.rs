@@ -25,6 +25,7 @@ async fn status(State(s): State<AppState>) -> Json<StatusDto> {
         version: env!("CARGO_PKG_VERSION").to_owned(),
         mode: s.mode.into(),
         live_enabled: s.live_enabled,
+        alarms: s.alarms.snapshot().into_iter().map(Into::into).collect(),
     })
 }
 

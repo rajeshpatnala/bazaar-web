@@ -4,6 +4,7 @@ use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 
 use crate::{
+    dto::{AlarmDto, DecisionDto, DecisionRequestDto, KillSwitchDto},
     error::{FieldError, Problem},
     routes,
     state::AppState,
@@ -12,7 +13,14 @@ use crate::{
 #[derive(OpenApi)]
 #[openapi(
     info(title = "Bazaar API", version = "1"),
-    components(schemas(Problem, FieldError))
+    components(schemas(
+        Problem,
+        FieldError,
+        AlarmDto,
+        DecisionRequestDto,
+        DecisionDto,
+        KillSwitchDto
+    ))
 )]
 struct ApiDoc;
 
@@ -38,5 +46,15 @@ mod tests {
         assert!(!doc.paths.paths.is_empty());
         assert!(doc.paths.paths.keys().all(|p| p.starts_with("/api/v1/")));
         assert_eq!(doc.info.version, "1");
+    }
+
+    /// The path set is an allowlist: adding a route must edit this list (reviewers check that
+    /// none places an order).
+    #[test]
+    fn paths_equal_the_allowlist_and_none_places_an_order() {
+        let doc = document();
+        let mut got: Vec<&str> = doc.paths.paths.keys().map(String::as_str).collect();
+        got.sort_unstable();
+        assert_eq!(got, ["/api/v1/auth/me", "/api/v1/status"]);
     }
 }

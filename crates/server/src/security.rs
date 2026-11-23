@@ -126,11 +126,18 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 pub struct Session {
     /// CSRF token the client must echo in `X-CSRF-Token` on non-GET requests.
     pub csrf: String,
+    /// Who acts in this session. Set by the server (never read from a request body or header);
+    /// the single-owner app has exactly one actor.
+    pub actor: String,
 }
+
+/// The one actor of a session (single-owner app); recorded on approval and audit rows.
+pub const SESSION_ACTOR: &str = "owner";
 
 impl fmt::Debug for Session {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Session")
+            .field("actor", &self.actor)
             .field("csrf", &"<redacted>")
             .finish()
     }
@@ -240,7 +247,10 @@ impl Security {
         m.insert(
             id.clone(),
             SessionRec {
-                session: Session { csrf },
+                session: Session {
+                    csrf,
+                    actor: SESSION_ACTOR.to_owned(),
+                },
                 created: now,
                 last_seen: now,
             },
@@ -997,6 +1007,7 @@ frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'"
         let tok = token(&s);
         let sess = Session {
             csrf: "supersecretcsrf".into(),
+            actor: SESSION_ACTOR.into(),
         };
         assert!(!format!("{s:?}").contains(&tok));
         assert!(!format!("{sess:?}").contains("supersecretcsrf"));
