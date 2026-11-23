@@ -64,9 +64,20 @@ mod tests {
         let doc = document();
         let mut got: Vec<&str> = doc.paths.paths.keys().map(String::as_str).collect();
         got.sort_unstable();
+        for p in &got {
+            let lower = p.to_ascii_lowercase();
+            assert!(!lower.contains("place"), "{p} names place");
+            assert!(
+                !lower
+                    .split('/')
+                    .any(|seg| seg == "order" || seg == "orders"),
+                "{p} names order"
+            );
+        }
         assert_eq!(
             got,
             [
+                "/api/v1/alarms",
                 "/api/v1/approvals",
                 "/api/v1/approvals/{id}/decision",
                 "/api/v1/auth/me",

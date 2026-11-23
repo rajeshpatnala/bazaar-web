@@ -170,3 +170,82 @@ async fn status_shows_raised_alarms_with_control_chars_escaped() {
     let st = body_json(app.get("/api/v1/status", Some(&cookie)).await).await;
     assert_eq!(st["alarms"], serde_json::json!([]));
 }
+
+/// Every `(path, is_get)` of the generated document, so a new route is covered without editing a list.
+fn operations() -> Vec<(String, bool)> {
+    let json = serde_json::to_value(openapi::document()).unwrap();
+    let mut ops = Vec::new();
+    for (path, item) in json["paths"].as_object().unwrap() {
+        for method in item.as_object().unwrap().keys() {
+            ops.push((path.replace("{id}", "x"), method == "get"));
+        }
+    }
+    assert!(ops.iter().any(|(_, get)| !get), "no write route found");
+    ops
+}
+
+#[tokio::test]
+async fn every_operation_is_401_without_session() {
+    let app = TestApp::new(false);
+    for (path, is_get) in operations() {
+        let res = if is_get {
+            app.get(&path, None).await
+        } else {
+            app.send(
+                Request::post(&path)
+                    .header(header::HOST, HOST)
+                    .header(header::ORIGIN, ORIGIN)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+        };
+        assert_eq!(res.status(), 401, "{path} get={is_get}");
+        assert_eq!(body_json(res).await["code"], "unauthenticated", "{path}");
+    }
+}
+
+#[tokio::test]
+async fn every_post_with_session_but_no_csrf_is_403() {
+    let app = TestApp::new(false);
+    let cookie = app.login().await;
+    for (path, _) in operations().into_iter().filter(|(_, g)| !g) {
+        let res = app
+            .send(
+                Request::post(&path)
+                    .header(header::HOST, HOST)
+                    .header(header::ORIGIN, ORIGIN)
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(res.status(), 403, "{path}");
+        assert_eq!(body_json(res).await["code"], "csrf_invalid", "{path}");
+    }
+}
+
+#[tokio::test]
+async fn alarms_route_lists_escaped_and_capped_alarms() {
+    let app = TestApp::new(false);
+    let cookie = app.login().await;
+    let empty = body_json(app.get("/api/v1/alarms", Some(&cookie)).await).await;
+    assert_eq!(empty, serde_json::json!([]));
+    let long = "m".repeat(5000);
+    app.alarms
+        .raise("b_code\u{202e}", &long, "2026-01-05T10:00:00+05:30");
+    app.alarms
+        .raise("a_code", "x\x1b[31m", "2026-01-05T10:00:00+05:30");
+    let res = app.get("/api/v1/alarms", Some(&cookie)).await;
+    assert_eq!(res.status(), 200);
+    let v = body_json(res).await;
+    assert_eq!(v[0]["code"], "a_code");
+    assert_eq!(v[0]["message"], "x\\x1b[31m");
+    assert_eq!(v[1]["code"], "b_code\\u{202e}");
+    assert!(
+        v[1]["message"].as_str().unwrap().len() < 1000,
+        "message uncapped"
+    );
+    let st = body_json(app.get("/api/v1/status", Some(&cookie)).await).await;
+    assert_eq!(st["alarms"], v);
+}
