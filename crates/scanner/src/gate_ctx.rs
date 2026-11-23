@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 use bazaar_risk::config::EffectiveLimits;
 use bazaar_risk::gate::{CostModel, ModeEvidence};
 use bazaar_risk::rules::exposure::ExposureInputs;
-use bazaar_risk::rules::inputs::DataInputs;
 use bazaar_risk::snapshot::PortfolioSnapshot;
 use rust_decimal::Decimal;
 
@@ -16,14 +15,13 @@ use rust_decimal::Decimal;
 #[error("{0}")]
 pub struct ContextUnavailable(pub String);
 
-/// Gate inputs for one scan. Read once; built only through [`ScanGateContext::new`], which removes
-/// any approval, so nothing a scan produces can look approved (an approval is bound to one order).
+/// Scan-wide gate inputs (per-instrument data comes from `GateContextSource::data_for`). Read
+/// once; built only through [`ScanGateContext::new`], which removes any approval, so nothing a scan produces can look approved (an approval is bound to one order).
 #[derive(Debug)]
 pub struct ScanGateContext {
     snapshot: PortfolioSnapshot,
     limits: EffectiveLimits,
     cost: Box<dyn CostModel>,
-    data: DataInputs,
     mode: ModeEvidence,
     reference_prices: BTreeMap<u64, Decimal>,
     exposure: Option<ExposureInputs>,
@@ -39,7 +37,6 @@ impl ScanGateContext {
         snapshot: PortfolioSnapshot,
         limits: EffectiveLimits,
         cost: Box<dyn CostModel>,
-        data: DataInputs,
         mut mode: ModeEvidence,
         reference_prices: BTreeMap<u64, Decimal>,
         exposure: Option<ExposureInputs>,
@@ -49,7 +46,6 @@ impl ScanGateContext {
             snapshot,
             limits,
             cost,
-            data,
             mode,
             reference_prices,
             exposure,
@@ -66,10 +62,6 @@ impl ScanGateContext {
     #[must_use]
     pub fn cost(&self) -> &dyn CostModel {
         self.cost.as_ref()
-    }
-    #[must_use]
-    pub const fn data(&self) -> &DataInputs {
-        &self.data
     }
     #[must_use]
     pub const fn mode(&self) -> &ModeEvidence {

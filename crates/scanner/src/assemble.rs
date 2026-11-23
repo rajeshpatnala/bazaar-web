@@ -2,7 +2,11 @@
 //! `DecisionGate` on it, and builds the `Recommendation` (advice, never an order; nothing here can
 //! carry an approval). An idea that cannot be sized or evaluated becomes a `BlockedIdea` in the
 //! same rank position, never a silent drop. `max_results` applies after the gate, so blocked
-//! ideas never use up result slots.
+//! ideas never use up result slots; the cut itself is silent by design (it removes only the
+//! lowest-ranked passing ideas, nothing blocked is hidden).
+//!
+//! Each idea is gated alone against the same snapshot and cash: "passed" means it passes by
+//! itself, not that all shown ideas are fine together. The gate re-runs at approval time.
 
 use bazaar_core::config::ScannerConfig;
 use bazaar_core::instrument::Instrument;
@@ -11,10 +15,12 @@ use bazaar_core::money::Qty;
 use bazaar_regime::Fit;
 use bazaar_risk::gate::{Gate, GateInputs};
 use bazaar_risk::rules::behaviour::EntryZone;
+use bazaar_risk::rules::inputs::{DataInputs, EvidenceInputs};
 use bazaar_risk::types::{OrderIntent, Side, Tri};
 use chrono::DateTime;
 use chrono_tz::Tz;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::FromPrimitive;
 
 use crate::gate_ctx::ScanGateContext;
 use crate::ports::GateContextSource;
@@ -92,12 +98,10 @@ fn why(
     lv: &Levels,
     sized: &SizedIdea,
     cx: &AssembleCx<'_>,
+    data: &DataInputs,
 ) -> Vec<WhyFactor> {
     let cand = &scored.candidate;
-    let mut fams: Vec<&str> = cand.hits.iter().map(|x| x.family.as_str()).collect();
-    fams.sort_unstable();
-    fams.dedup();
-    let agreeing = u32::try_from(fams.len()).unwrap_or(u32::MAX);
+    let agreeing = agreeing_families(scored);
     let ev = scored.evidence.as_ref();
     vec![
         WhyFactor::Risk {
@@ -111,7 +115,7 @@ fn why(
         },
         WhyFactor::Confluence {
             families_agreeing: agreeing,
-            families_total: cx.families_total.max(agreeing),
+            families_total: cx.families_total,
             names: agreeing_ids(scored),
         },
         WhyFactor::RegimeFit {
@@ -133,10 +137,16 @@ fn why(
             stop: lv.stop,
             max_hold_bars: hit.signal.exit_plan.time_stop_bars,
         },
-        // A banned or unlisted-ban candidate was dropped by the runner before scoring.
-        WhyFactor::Ban {
-            checked: true,
-            list_date: None,
+        // What the gate saw for this instrument: an Unknown list is "not checked".
+        match &data.ban_list {
+            Tri::Known(b) => WhyFactor::Ban {
+                checked: true,
+                list_date: Some(b.fetched_at.date_naive().to_string()),
+            },
+            Tri::Unknown => WhyFactor::Ban {
+                checked: false,
+                list_date: None,
+            },
         },
         WhyFactor::Events {
             checked: !scored.warnings.contains(&Warning::EventsNotChecked),
@@ -150,6 +160,50 @@ fn why(
                 .collect(),
         },
     ]
+}
+
+fn agreeing_families(s: &Scored) -> u32 {
+    let mut fams: Vec<&str> = s.candidate.hits.iter().map(|x| x.family.as_str()).collect();
+    fams.sort_unstable();
+    fams.dedup();
+    u32::try_from(fams.len()).unwrap_or(u32::MAX)
+}
+
+/// The scanner's own facts replace the source's for evidence and event flags; a fact it cannot
+/// vouch for stays `Unknown`, which the gate refuses. Evidence counts only when out of sample and
+/// net of costs (as `Recommendation::new` does), else G01 sees nothing.
+fn overlay(mut data: DataInputs, s: &Scored) -> DataInputs {
+    data.evidence = match s
+        .evidence
+        .as_ref()
+        .filter(|e| e.costs_applied && e.out_of_sample)
+    {
+        Some(e) => EvidenceInputs {
+            oos_trades: Tri::Known(e.trades),
+            profit_factor: Decimal::from_f64(e.profit_factor).map_or(Tri::Unknown, Tri::Known),
+            expectancy_r: Decimal::from_f64(e.avg_r).map_or(Tri::Unknown, Tri::Known),
+            walk_forward_pass: data.evidence.walk_forward_pass,
+        },
+        None => EvidenceInputs {
+            oos_trades: Tri::Unknown,
+            profit_factor: Tri::Unknown,
+            expectancy_r: Tri::Unknown,
+            walk_forward_pass: data.evidence.walk_forward_pass,
+        },
+    };
+    if s.warnings.contains(&Warning::EventsNotChecked) {
+        data.events.results_window = Tri::Unknown;
+        data.events.policy_day = Tri::Unknown;
+    } else if s
+        .warnings
+        .iter()
+        .any(|w| matches!(w, Warning::EventNearby(_)))
+    {
+        data.events.results_window = Tri::Known(true);
+    } else {
+        data.events.results_window = Tri::Known(false);
+    }
+    data
 }
 
 fn agreeing_ids(s: &Scored) -> Vec<String> {
@@ -181,8 +235,22 @@ fn idea(
         stop: sig.stop,
         targets: sig.targets.clone(),
     };
-    let price = round_levels(&given, inst.tick_size)?.entry_high;
-    let cost = |q: u32| ctx.cost().cost(Side::Buy, q, price);
+    let agreeing = agreeing_families(s);
+    if cx.families_total == 0 || agreeing > cx.families_total {
+        return Err(BlockReason::Sizing(format!(
+            "families_total {} cannot hold {agreeing} agreeing families",
+            cx.families_total
+        )));
+    }
+    let rounded = round_levels(&given, inst.tick_size)?;
+    // Round trip (QUAN-165-1): the buy at the zone top and the stop-out sell at the rounded stop.
+    let cost = |q: u32| match (
+        ctx.cost().cost(Side::Buy, q, rounded.entry_high),
+        ctx.cost().cost(Side::Sell, q, rounded.stop),
+    ) {
+        (Tri::Known(a), Tri::Known(b)) => a.checked_add(b).map_or(Tri::Unknown, Tri::Known),
+        _ => Tri::Unknown,
+    };
     let sized = size_idea(inst, &given, ctx.snapshot(), ctx.limits(), &cost)?;
     let l = &sized.levels;
     let intent = OrderIntent {
@@ -197,7 +265,12 @@ fn idea(
     };
     // X03 judges the need for the sized quantity: a delivery buy needs its full notional plus the
     // charges allowance in cash. `available` stays as the context gave it (Unknown blocks).
-    let mut data = ctx.data().clone();
+    let mut data = overlay(
+        cx.source
+            .data_for(inst, h)
+            .map_err(|e| BlockReason::GateInputsUnavailable(e.to_string()))?,
+        s,
+    );
     data.margin.qty = sized.size.qty;
     data.margin.required = sized
         .notional
@@ -225,13 +298,17 @@ fn idea(
     if ev.ctx().limits != *ctx.limits() {
         return Err(BlockReason::LimitsChanged);
     }
+    // One clock for both stamps; the mode is the one the rules ran under.
     let gate = mode_aware(
-        GateSummary::from_verdict(ev.verdict(), bazaar_core::clock::Clock::now_ist(ev.clock())),
-        cx.gate.mode(),
+        GateSummary::from_verdict(ev.verdict(), cx.now),
+        ev.ctx().mode,
     );
+    let bar_secs = u64::try_from(sig.signal_bar_time.timestamp())
+        .map_err(|_| BlockReason::Sizing("the signal bar time is before 1970".to_owned()))?;
     let parts = RecommendationParts {
-        id: (u128::from(inst.instrument_token) << 64)
-            | u128::from(sig.signal_bar_time.timestamp().unsigned_abs()),
+        // Names the instrument and the bar only: not an approval key (approval binds to the order
+        // digest) and the same on every scan of that bar, whatever the strategy or levels.
+        id: (u128::from(inst.instrument_token) << 64) | u128::from(bar_secs),
         generated_at: cx.now,
         data_as_of: sig.signal_bar_time,
         instrument: iref(inst),
@@ -247,7 +324,7 @@ fn idea(
         confidence: s.score,
         regime: s.candidate.stock_regime.clone(),
         backtest: s.evidence.clone(),
-        why: why(s, h, l, &sized, cx),
+        why: why(s, h, l, &sized, cx, &data),
         warnings: s.warnings.clone(),
         gate,
     };

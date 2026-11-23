@@ -2,18 +2,33 @@
 //! F13 composition adapts F9 stats, the NSE ban list and the events calendar to these traits.
 
 use bazaar_core::config::Event;
+use bazaar_core::instrument::Instrument;
+use bazaar_risk::rules::inputs::DataInputs;
 use chrono::{DateTime, NaiveDate};
 use chrono_tz::Tz;
 
 use crate::gate_ctx::{ContextUnavailable, ScanGateContext};
+use crate::runner::Hit;
 use crate::types::Evidence;
 
-/// Source of the gate inputs (portfolio snapshot, limits, costs, data and mode evidence). Sync, no
-/// network: the composition (BZ-519) fills it from stores already read. Called once per scan.
+/// Source of the gate inputs. Sync, no network: the composition (BZ-519) fills it from stores
+/// already read. `context` is read once per scan (portfolio, limits, costs, mode); `data_for` once
+/// per idea, because evidence, ban, event and quote facts belong to one instrument.
 pub trait GateContextSource: Send + Sync {
     /// # Errors
     /// `ContextUnavailable` when any part cannot be read: every idea is then blocked.
     fn context(&self) -> Result<ScanGateContext, ContextUnavailable>;
+    /// The per-instrument gate data for this idea. The scanner overlays the evidence and event
+    /// facts it holds itself; whatever the source cannot supply must be `Tri::Unknown` (the gate
+    /// then says no).
+    ///
+    /// # Errors
+    /// `ContextUnavailable` when the data cannot be read: only this idea is blocked.
+    fn data_for(
+        &self,
+        instrument: &Instrument,
+        hit: &Hit,
+    ) -> Result<DataInputs, ContextUnavailable>;
 }
 
 /// Backtest statistics for a strategy. `None` means no evidence: the caller must label it so.
