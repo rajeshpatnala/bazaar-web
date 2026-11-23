@@ -38,6 +38,8 @@ Plans follow the size the manager gave (`delivery-process` §2a). **One plan fil
   Keep the slices as ONE table whose first column is the slice number: each developer gets only its slice with
   `just plan <id> --slice <n>` (works in worktrees). Parallelise only slices big enough to repay a second cold start
   (roughly > 150 production lines each); smaller ones go in order to one developer, continued.
+- For each slice, fill failure modes, checklists and 3-5 `reject if` lines (1-2 under ~100 lines) from known-pitfalls, the
+  checklists and `just plan`'s earlier findings.
 - Every step/slice: unit tests in its acceptance criteria and `Verify: T0+T1`; the feature gets one T2 pass at the end
   by the tester (`delivery-process` §4). Never plan T2 inside a slice.
 - **Estimate honestly:** give the expected tokens. If the plan costs more than ~3x what the visible change needs, shrink

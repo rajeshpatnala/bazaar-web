@@ -779,5 +779,125 @@ class FunctionTests(unittest.TestCase):
         self.assertEqual(rows[0]["file:line"], "a.rs:3")
 
 
+PLAN_L = ("# F1: thing\n\n## Goal\ng\n\n## Slices\n| slice | developer type | scope (modules/files owned) | est. lines | live path | reject if |\n"
+          "|---|---|---|---|---|---|\n| 1 | dev-core | `crates/core`, config/x.toml | 200 | no | {r1} |\n| 2 | dev-api | web/ | 200 | no | {r2} |\n")
+
+
+class DevBriefTests(Base):
+    def setUp(self):
+        super().setUp()
+        import importlib.util
+        os.environ["KIT_ROOT"] = str(self.r.dir)
+        spec = importlib.util.spec_from_file_location("kit_devbrief", self.r.dir / ".claude" / "kit" / "kit.py")
+        self.k = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.k)
+
+    def plan(self, r1="audit row left on failure", r2="x"):
+        self.r.write(".agents/plans/F1.md", PLAN_L.format(r1=r1, r2=r2))
+
+    def findings_file(self, name, rows, d="F1/pr-1"):
+        self.r.write(f".agents/reviews/{d}/{name}", "Verdict: REQUEST CHANGES\n\n" + FINDINGS_HEAD
+                     + "".join("| " + " | ".join(x) + " |\n" for x in rows))
+
+    def test_slice_brief_lists_findings_inside_scope_only(self):
+        self.plan()
+        self.findings_file("code-review.md", [
+            row("CR-1-1", "major", "crates/core/src/a.rs:10", "unchecked add"),
+            row("CR-1-2", "major", "crates/core2/src/a.rs:10", "nearby crate, must not match"),
+            row("CR-1-3", "minor", "crates/core/src/b.rs:1", "minor, not listed"),
+            row("CR-1-4", "high", "config/x.toml:3", "no verified_on")])
+        rc, out = self.r.kit("plan", "F1", "--slice", "1")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Reviewers caught in these files before:", out)
+        self.assertIn("CR-1-1 (crates/core/src/a.rs): unchecked add", out)
+        self.assertIn("CR-1-4", out)
+        caught = out.split("Reviewers caught in these files before:")[1]
+        for no in ("CR-1-2", "CR-1-3"):
+            self.assertNotIn(no, caught)
+
+    def test_slice_brief_prints_nothing_without_a_match(self):
+        self.plan()
+        self.findings_file("code-review.md", [row("CR-1-1", "major", "elsewhere/a.rs:1", "x")])
+        rc, out = self.r.kit("plan", "F1", "--slice", "1")
+        self.assertNotIn("Reviewers caught", out)
+
+    def test_slice_brief_caps_findings_at_eight(self):
+        self.plan()
+        self.findings_file("code-review.md", [row(f"CR-1-{i}", "major", f"crates/core/f{i}.rs:1", f"issue {i}")
+                                              for i in range(1, 13)])
+        rc, out = self.r.kit("plan", "F1", "--slice", "1")
+        self.assertEqual(out.count("- CR-1-"), 8, out)
+        self.assertIn("CR-1-12", out)
+        self.assertNotIn("CR-1-4 ", out)
+
+    def test_garbled_findings_file_is_skipped_with_a_note(self):
+        self.plan()
+        self.r.write(".agents/reviews/F1/pr-1/bad.md", "Verdict: APPROVE\n\n| nonsense | here |\n| a | b |\n")
+        self.findings_file("code-review.md", [row("CR-1-1", "major", "crates/core/a.rs:1", "real")])
+        (self.r.dir / ".agents/reviews/F1/pr-1/binary.md").write_bytes(b"\xff\xfe\x00| id |\n")
+        rc, out = self.r.kit("plan", "F1", "--slice", "1")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("CR-1-1", out)
+        self.assertIn("bad.md: no findings table (garbled)", out)
+        self.assertIn("binary.md: unreadable", out)
+
+    def test_reject_if_is_printed_as_tests_to_write_first(self):
+        self.plan(r1="audit row left on failure; no refusal reason test")
+        rc, out = self.r.kit("plan", "F1", "--slice", "1")
+        self.assertIn("Write these tests first:\naudit row left on failure; no refusal reason test", out)
+
+    def test_empty_reject_if_on_an_l_slice_is_flagged(self):
+        self.plan(r2="")
+        w = " ".join(self.k.plan_warnings(PLAN_L.format(r1="a", r2="")))
+        self.assertIn("slice 2: empty 'reject if' cell", w)
+        self.assertNotIn("slice 1: empty", w)
+        w = " ".join(self.k.plan_warnings("# F\n## Slices\n| slice | dev | est. lines |\n|---|---|---|\n| 1 | a | 200 |\n"))
+        self.assertIn("no 'reject if' column", w)
+
+    def test_m_plan_steps_are_not_flagged_for_reject_if(self):
+        w = " ".join(self.k.plan_warnings("# F\n## Steps\n| step | what | est. lines |\n|---|---|---|\n| 1 | a | 200 |\n"))
+        self.assertNotIn("reject if", w)
+
+    def test_fix_list_ends_with_the_pattern_line(self):
+        b = "feat/F1-g"
+        self.r.branch(b, {"src/lib.rs": "pub fn a() -> i32 { 2 }\n"})
+        self.r.review(b, "code-review.md", "REQUEST CHANGES", [row("CR-1-1", "major", dec="fix now (auto)")])
+        rc, out = self.r.kit("fix-list", "--branch", b, "--feature", "F1")
+        self.assertTrue(out.rstrip().endswith("search your whole diff for the same pattern and fix every occurrence; "
+                                              "list where in the handoff."), out)
+
+    def checklist(self, text):
+        self.plan()
+        self.r.write(".agents/checklists/dev-core.md", text)
+
+    def test_area_checklist_is_printed_for_the_developer_type(self):
+        self.checklist("1. checked maths\n2. fail closed\n")
+        rc, out = self.r.kit("plan", "F1", "--slice", "1")
+        self.assertIn("Top 10 for this area:\n1. checked maths\n2. fail closed", out)
+        rc, out = self.r.kit("plan", "F1", "--slice", "2")  # dev-api has no checklist file
+        self.assertNotIn("Top 10", out)
+
+    def test_area_checklist_is_capped_at_fifteen_lines(self):
+        self.checklist("".join(f"rule {i}\n" for i in range(1, 31)))
+        rc, out = self.r.kit("plan", "F1", "--slice", "1")
+        self.assertIn("rule 15", out)
+        self.assertNotIn("rule 16", out)
+
+    def test_garbled_area_checklist_is_a_note_not_a_crash(self):
+        self.plan()
+        (self.r.dir / ".agents/checklists").mkdir(parents=True)
+        (self.r.dir / ".agents/checklists/dev-core.md").write_bytes(b"\xff\xfe\x00bad")
+        rc, out = self.r.kit("plan", "F1", "--slice", "1")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("dev-core.md: unreadable", out)
+
+    def test_scope_prefixes_are_exact_segments(self):
+        p = self.k.scope_prefixes("`crates/core/**`, config/, a.toml and words")
+        self.assertEqual(p, ["crates/core", "config", "a.toml"])
+        self.assertTrue(self.k.in_scope("crates/core/x.rs", p))
+        self.assertFalse(self.k.in_scope("crates/core2/x.rs", p))
+        self.assertFalse(self.k.in_scope("crates/cor", p))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

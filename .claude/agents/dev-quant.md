@@ -28,7 +28,8 @@ rounds and the next step in your area: keep what you know instead of re-reading 
 
 1. Read your slice with `just plan <id> --slice <n>` (or the brief in your prompt) - not the whole plan - then only the files you change (`.agents/codemap.md` before searching).
    Look up rules and patterns with `just docs "<topic>"`; never read whole handbooks.
-1b. Read `.agents/known-pitfalls.md` and the checklists in your slice row; write the tests for the slice's `reject if`
+1b. Read `.agents/known-pitfalls.md` and the checklists in your slice row (the Top 10 in your brief first, the full
+   checklists for anything it does not cover); write the tests for the slice's `reject if`
    lines and failure modes first.
 2. `just new-branch <type>/<feature-id>-<slug>` (stay on it when continued). In `in-place` mode never stash, reset or
    discard changes you didn't make.
