@@ -3424,7 +3424,7 @@ def scope_report(feature: str, ref: str, base: str, headref: str, stats: list, s
             if not path:
                 res["unmapped"].append(r.get("id", "?"))
                 continue
-            nums = [int(x) for x in re.findall(r"\d+", line)[:2]]
+            nums = [int(x) for x in re.findall(r"\d+", line)[:8]]  # "104-105 (and :36, :87)" cites three places
             spots.setdefault(path.strip(), []).append((r.get("id", "?"), nums))
     tests = test_globs_all()
     gen = generated_globs()
