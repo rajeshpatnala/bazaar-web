@@ -1,6 +1,6 @@
 # F11: Scanner (run strategies over a fixture universe, score, rank, Why text, Recommendation)
 
-Status: building (step 1 of 4: config and types). Not investment advice.
+Status: slices 1-7 done (config, universe and runner, scoring, guards, sizing, gate port and assemble, Why text, end-to-end fixture scan test); slice 8 (risk crate: ApprovalPending marker and G16-aware sizing) is still to come, so F11 is not closed. Not investment advice.
 
 Summary: a fixture scan yields ranked, explained, sized, gate-summarised recommendations; no route, no UI.
 Owner area: `crates/scanner`, `[scanner]` in `config/strategies.toml` (typed in `core::config::files`).
@@ -34,6 +34,7 @@ Evidence is empty until F9 runs (all recs `low_evidence`), no options structures
 - `family_of` (scanner runner) is a hardcoded strategy-label map (F8 table); move it to config or `StrategyMeta` later. `circuit_locked` is a caller-supplied flag until a data source exists.
 - SEC-102-3: size caps on ban-list symbols and event lists belong to the F13 adapters (documented on the ports).
 - RISK-102-5 remainder: `GateSummary` fields stay public (checked for consistency in `new`); a per-failure rule level so the UI does not offer an override the mode forbids (G01 is Paper level) comes with the UI/step 4.
+- ~~RISK-166-11, RISK-166-13~~ done in slice 7b (`gate_line` reads the failure lists, never `passed`; event and no-testing wording).
 - Steps 2-4 will be re-cut so each fits `max_slice_changed_lines` (step 1 carried the shared types).
 
 ## Slice 4 note (guards + shared contracts)

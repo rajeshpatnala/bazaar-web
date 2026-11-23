@@ -30,7 +30,7 @@ const FOOTER: &str =
 const BAN_UNCHECKED: &str =
     "The ban list was not checked, so confirm this name is not banned before acting.";
 const EVENTS_UNCHECKED: &str = "Results or policy dates were not checked.";
-const NO_TESTING: &str = "No past testing exists for this method yet. Treat this as an idea to study, not a signal to trust.";
+const NO_TESTING: &str = "No testing result is shown for this method. Treat this as an idea to study, not a signal to trust.";
 const GATE_PASSED: &str = "The risk-rule checks passed when scanned (a pass does not make the trade safe); they run again before any order.";
 
 /// Risk, reward and invalidation lines, the checks that stop a trade, the gate line and the
@@ -306,6 +306,13 @@ fn events_line(rec: &Recommendation) -> String {
     }
     if !seen || rec.warnings().contains(&Warning::EventsNotChecked) {
         EVENTS_UNCHECKED.to_owned()
+    } else if all.is_empty()
+        && rec
+            .warnings()
+            .iter()
+            .any(|w| matches!(w, Warning::EventNearby(_)))
+    {
+        "A date to know is near, but its details are missing: check the results and policy calendar before acting.".to_owned()
     } else if all.is_empty() {
         "No results or policy dates were found in the checked window.".to_owned()
     } else {
@@ -313,7 +320,9 @@ fn events_line(rec: &Recommendation) -> String {
     }
 }
 
-/// The gate line, over `GateSummary` only (kept small so the gate wiring can change it alone).
+/// The gate line, over `GateSummary` only. The failure lists decide, never the `passed` flag: any
+/// listed failure is blocked, a `paper_only` id the overridable list does not carry counts as
+/// not overridable, and a blocked summary with no ids says the reason is unavailable (RISK-166-11).
 fn gate_line(g: &GateSummary) -> String {
     let ids = |v: &[RuleId]| {
         v.iter()
@@ -321,33 +330,49 @@ fn gate_line(g: &GateSummary) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    if g.passed {
-        return GATE_PASSED.to_owned();
-    }
-    let mut parts = Vec::new();
-    if !g.hard_failures.is_empty() {
-        parts.push(format!(
-            "failed checks that cannot be overridden ({})",
-            ids(&g.hard_failures)
-        ));
+    let mut hard = g.hard_failures.clone();
+    let mut paper = Vec::new();
+    for r in &g.paper_only {
+        if g.overridable_failures.contains(r) {
+            if !hard.contains(r) {
+                paper.push(*r);
+            }
+        } else if !hard.contains(r) {
+            hard.push(*r);
+        }
     }
     let soft: Vec<RuleId> = g
         .overridable_failures
         .iter()
         .copied()
-        .filter(|r| !g.paper_only.contains(r))
+        .filter(|r| !g.paper_only.contains(r) && !hard.contains(r))
         .collect();
+    let mut parts = Vec::new();
+    if !hard.is_empty() {
+        parts.push(format!(
+            "failed checks that cannot be overridden ({})",
+            ids(&hard)
+        ));
+    }
     if !soft.is_empty() {
         parts.push(format!(
             "failed checks you can override with a written reason ({})",
             ids(&soft)
         ));
     }
-    if !g.paper_only.is_empty() {
+    if !paper.is_empty() {
         parts.push(format!(
             "failed checks that can be overridden in paper mode only ({})",
-            ids(&g.paper_only)
+            ids(&paper)
         ));
+    }
+    if parts.is_empty() {
+        return if g.passed {
+            GATE_PASSED.to_owned()
+        } else {
+            "Blocked by the safety checks, but the reason is not available: do not act on this."
+                .to_owned()
+        };
     }
     format!("Blocked by the safety checks: {}.", parts.join("; "))
 }

@@ -39,7 +39,7 @@ Order: rupee risk, then why, then what would make it wrong, then the warnings.
 2. Reward: "Target Rs {t1}. On the worst fill you would make about Rs {rr} for every Re 1 you risk. A target is a hope, not a promise."
 3. Why it was picked: "{n_families} of {n_total} method families agree: {names in plain words}." Never "strong buy".
 4. Market fit: "The market is {trend} and this stock is {trend}, {vol} volatility. This method is meant for that kind of market." Weak cell: "This kind of market is allowed for this method but is rougher than ideal, so the score is cut."
-5. Evidence: "Tested on {n} past trades after costs: {pf} profit factor. Fewer than 30 trades means this is low evidence and the score is held down." None: "No past testing exists for this method yet. Treat this as an idea to study, not a signal to trust."
+5. Evidence: "Tested on {n} past trades after costs: {pf} profit factor. Fewer than 30 trades means this is low evidence and the score is held down." None: "No testing result is shown for this method. Treat this as an idea to study, not a signal to trust."
 6. Liquidity: "About Rs {x} crore of this share trades on a typical day, so you can get in and out."
 7. What would make it wrong: "The idea is wrong if the price closes below Rs {stop}, or if it has not worked after {max_hold} days."
 8. Events and bans: "No ban today (list dated {date})." / "Ban list not available, so this name is hidden for safety." / "Results or policy dates were not checked."

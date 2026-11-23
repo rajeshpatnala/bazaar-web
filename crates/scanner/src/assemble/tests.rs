@@ -822,3 +822,124 @@ fn long_source_errors_are_bounded_in_the_block_reason() {
     };
     assert_eq!(m.chars().count(), MAX_REASON_CHARS + 3);
 }
+
+struct E2eEvidence;
+impl crate::ports::EvidenceSource for E2eEvidence {
+    fn for_instrument(&self, _: &str, _: u64, _: DateTime<Tz>) -> Option<Evidence> {
+        Some(evidence(50))
+    }
+    fn for_strategy(&self, _: &str, _: DateTime<Tz>) -> Option<Evidence> {
+        Some(evidence(50))
+    }
+}
+
+/// A real (non-empty, no rows) calendar: absence of events is then a checked fact.
+struct E2eEvents;
+impl crate::ports::EventCalendar for E2eEvents {
+    fn upcoming(&self, _: &str, _: chrono::NaiveDate, _: u32) -> Vec<bazaar_core::config::Event> {
+        Vec::new()
+    }
+    fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn fixture_scan_to_gate_to_why_end_to_end() {
+    use crate::runner::tests as rt;
+    let seen = rt::Seen::default();
+    let env = rt::env();
+    let mut strategies = vec![rt::fake("a", 2, bazaar_regime::Trend::Up, &seen)];
+    // Costs (`Flat`, Rs 20) and evidence (`E2eEvidence`) are stubs: the cost model and the real
+    // evidence stats are covered in the risk and backtest crates, not here.
+    let mut uni = [
+        rt::entry("AAA", rt::rising(rt::N, 1_000_000)),
+        rt::entry("BBB", rt::rising(rt::N, 1_000_000)),
+    ];
+    // A distinct token, so the price map (token 1 only) would expose a token mix-up.
+    uni[1].instrument.instrument_token = 2;
+    let out = rt::scan(
+        &env,
+        &rt::fresh_ban(&["BBB"]),
+        &mut strategies,
+        &uni,
+        &rt::rising(rt::N, 1),
+    )
+    .unwrap();
+    // The banned name is dropped with a reason, never scored.
+    assert_eq!(out.candidates.len(), 1);
+    assert!(
+        out.dropped
+            .iter()
+            .any(|(s, r)| s == "BBB" && *r == crate::universe::DropReason::Banned),
+        "{:?}",
+        out.dropped
+    );
+    // No look-ahead: the strategy saw bars up to the decision bar and none later.
+    let decision = rt::day(rt::N - 1).date_naive();
+    {
+        let seen = seen.lock().unwrap();
+        assert!(!seen.is_empty());
+        assert!(seen.iter().all(|(_, day)| *day <= decision), "{seen:?}");
+        assert_eq!(seen.last().map(|(_, day)| *day), Some(decision));
+    }
+
+    let sc = scanner_cfg(5);
+    let bar = rt::day(rt::N - 1);
+    let sx = crate::score::ScoreContext {
+        cfg: &sc,
+        evidence: &E2eEvidence,
+        events: &E2eEvents,
+        decision_date: bar.date_naive(),
+        as_of: bar,
+        families_total: out.families_total,
+    };
+    let ranked = crate::score::score_and_rank(out.candidates, &sx);
+    let g = gate_cfg(TEXT);
+    let src = source(move || {
+        Ok(ScanGateContext::new(
+            snap(),
+            limits_of(&g),
+            Box::new(Flat),
+            mode(),
+            BTreeMap::from([(1, d("101"))]),
+            Some(exposure()),
+        ))
+    });
+    let gc = gate_cfg(TEXT);
+    let gate = Gate::new(&gc, &Store, &At);
+    let cx = AssembleCx {
+        cfg: &sc,
+        gate: &gate,
+        source: &src,
+        now: now(),
+        families_total: out.families_total,
+    };
+    let result = assemble(&ranked, vec![], &cx);
+    assert_eq!(result.ideas().len(), 1, "{:?}", result.blocked());
+    let rec = &result.ideas()[0];
+    // Levels are the signal's, already on the 0.05 tick; the gate saw this idea's own evidence.
+    assert_eq!(rec.entry_zone(), (d("100"), d("102")));
+    assert_eq!(rec.stop_loss(), d("94"));
+    assert_eq!(rec.targets(), &[d("110")]);
+    assert_eq!(rec.gate().hard_failures, Vec::<RuleId>::new());
+    assert_eq!(rec.gate().overridable_failures, Vec::<RuleId>::new());
+    assert!(rec.gate().passed);
+    assert_eq!(rec.generated_at(), rec.gate().evaluated_at);
+
+    let lines = crate::why::render(rec);
+    let text = lines.join("\n");
+    // Sizing: within the 0.5% risk budget of Rs 1,00,000 (Rs 500, fixture risk.toml) (risk/share 8 at the worst fill, lot 1).
+    let qty = rec.size().qty;
+    assert!(qty > 0 && Decimal::from(qty) * d("8") <= d("500"), "{qty}");
+    // Exact: budget Rs 500 less charges and the buffer, over the risk per share (observed 57; at most 62).
+    assert_eq!(qty, 57);
+    assert_eq!(rec.size().lots, qty);
+    assert!(text.contains(&format!("Quantity {qty}")), "{text}");
+    assert!(text.contains("Target Rs 110."), "{text}");
+    assert!(text.contains("The risk-rule checks passed"), "{text}");
+    assert!(
+        text.contains("Educational tool, not investment advice"),
+        "{text}"
+    );
+}

@@ -392,4 +392,4 @@ fn merge_by_family(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
