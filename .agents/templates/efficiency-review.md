@@ -7,5 +7,7 @@
      - proposes nothing that weakens owner rules or safety guards (merge checks, branch protection, secrets)
      - is aimed at a big share of spend first (the "Spend by role" table): long developer runs, review rounds and the
        manager usually dwarf cold starts; never propose warm reviewers across PRs (they cost more per review)
+     First line, always: "First-pass quality: blocker+major per PR <n> | minor+nit per PR <n> | PRs needing round 2 <n%> |
+     rounds per PR <n>" against the baseline of 2026-11-22 (72% needed round 2, 1.9 rounds per PR), with the trend.
      Cover what the numbers can't show: failed or blocked commands, manual workarounds, things read twice,
      waiting, unclear instructions. Then list what worked and should stay (<= 3 lines). -->
