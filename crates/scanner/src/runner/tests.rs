@@ -581,3 +581,34 @@ fn every_registered_strategy_has_an_explicit_family() {
         assert_ne!(family_of(f.id()), f.id(), "{} needs a family arm", f.id());
     }
 }
+
+#[test]
+fn same_inputs_give_identical_output_whatever_the_universe_order() {
+    let e = env();
+    let m = rising(N, 1);
+    let ban = fresh_ban(&["BAN"]);
+    let mk = || {
+        vec![
+            entry("ZZZ", rising(N, 1_000_000)),
+            entry("AAA", rising(N, 1_000_000)),
+            entry("BAN", rising(N, 1_000_000)),
+            entry("THIN", rising(N, 1)),
+        ]
+    };
+    let fwd = mk();
+    let mut rev = mk();
+    rev.reverse();
+    let (s1, s2, s3) = (Arc::default(), Arc::default(), Arc::default());
+    let mut a = vec![fake("a", 2, Trend::Up, &s1)];
+    let mut b = vec![fake("a", 2, Trend::Up, &s2)];
+    let mut c = vec![fake("a", 2, Trend::Up, &s3)];
+    let o1 = scan(&e, &ban, &mut a, &fwd, &m).unwrap();
+    let o2 = scan(&e, &ban, &mut b, &rev, &m).unwrap();
+    let o3 = scan(&e, &ban, &mut c, &fwd, &m).unwrap();
+    assert_eq!(o1, o2, "input order must not change the output");
+    assert_eq!(o1, o3, "a repeat run is identical");
+    assert_eq!(syms(&o1), ["AAA", "ZZZ"]);
+    let why: BTreeMap<_, _> = o1.dropped.iter().cloned().collect();
+    assert_eq!(why["BAN"], DropReason::Banned);
+    assert!(matches!(why["THIN"], DropReason::Illiquid { .. }));
+}
