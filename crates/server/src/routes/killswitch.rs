@@ -39,8 +39,8 @@ async fn get_state(State(s): State<AppState>) -> Result<Json<KillSwitchDto>, Api
 }
 
 /// Engage the kill switch. Already engaged writes no second row. A failed write is 503, but the
-/// in-process latch stays set, so orders are still refused; the 503 body says so (the GET reads
-/// the store only and shows `engaged: false` until a save succeeds).
+/// in-process latch stays set, so orders are still refused; the 503 body says so, and the GET
+/// shows `engaged: true, latched: true` (stored OR latched).
 #[utoipa::path(post, path = "/killswitch/engage", tag = "killswitch",
     request_body = EngageRequestDto,
     responses(
@@ -59,7 +59,7 @@ async fn engage(
         .set_kill_switch(true, &sess.actor, &body.reason)
         .await
         .map_err(|e| match e {
-            // Latched in this process but not persisted: say so (the GET reads the store only).
+            // Latched in this process but not persisted: say so.
             PipelineError::Exec(ExecError::Storage) => ApiError::KillSwitchNotSaved,
             other => map_err(other),
         })?;

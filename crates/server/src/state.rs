@@ -24,6 +24,8 @@ pub struct KillSwitchReading {
     pub reason: Option<String>,
     /// False when the state could not be read (then `engaged` is true).
     pub readable: bool,
+    /// True when the pipeline's in-process latch is set (shown apart from the stored state).
+    pub latched: bool,
 }
 
 /// Boxed future so the port is object safe without an extra crate.

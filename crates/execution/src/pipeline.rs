@@ -5,6 +5,7 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bazaar_core::clock::Clock;
@@ -69,6 +70,8 @@ pub trait Guarded: Executor {
         typed: &str,
         actor: &str,
     ) -> impl Future<Output = Result<(), ReleaseError>> + Send;
+    /// The kill switch's in-process latch, shared with the handle (read only there).
+    fn latch_flag(&self) -> Arc<AtomicBool>;
 }
 
 impl<E: Executor, R: KillSwitchRepo, P: PnlSource, A: AuditRepo> Guarded
@@ -82,6 +85,9 @@ impl<E: Executor, R: KillSwitchRepo, P: PnlSource, A: AuditRepo> Guarded
     }
     async fn release(&self, typed: &str, actor: &str) -> Result<(), ReleaseError> {
         self.guard().kill().release(typed, actor).await
+    }
+    fn latch_flag(&self) -> Arc<AtomicBool> {
+        self.guard().kill().latch_flag()
     }
 }
 
@@ -116,9 +122,18 @@ enum Cmd {
 #[derive(Debug, Clone)]
 pub struct PipelineHandle {
     tx: mpsc::Sender<Cmd>,
+    latch: Arc<AtomicBool>,
 }
 
 impl PipelineHandle {
+    /// True while the kill switch's in-process latch is set (engaged, or an engage whose save
+    /// failed). Read straight from the shared flag, so it never queues behind a slow command and
+    /// still answers after the pipeline stopped (the last value stays; never "off" by default).
+    #[must_use]
+    pub fn kill_switch_latched(&self) -> bool {
+        self.latch.load(Ordering::SeqCst)
+    }
+
     async fn call<T>(&self, make: impl FnOnce(Reply<T>) -> Cmd) -> Result<T, PipelineError> {
         let (r, rx) = oneshot::channel();
         self.tx
@@ -286,6 +301,7 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
         Self: Send + 'static,
     {
         let (tx, mut rx) = mpsc::channel(64);
+        let latch = self.exec.latch_flag();
         tokio::spawn(async move {
             let mut me = self;
             while let Some(cmd) = rx.recv().await {
@@ -315,7 +331,7 @@ impl<X: Guarded, G: GatePort, Q: QuoteSource, O: OrderRepo, A: ApprovalRepo>
                 }
             }
         });
-        PipelineHandle { tx }
+        PipelineHandle { tx, latch }
     }
 
     async fn run_gate(&self, intent: &OrderIntent, quote: Option<QuoteSnapshot>) -> GateOutcome {
@@ -1550,6 +1566,21 @@ mod tests {
             Outcome::Placed(_)
         ));
         assert_eq!(ids(&r), vec![1, 3]);
+    }
+
+    #[tokio::test]
+    async fn handle_shows_the_latch_set_by_engage_and_cleared_by_release() {
+        let r = rig(10, 0).await;
+        let h = r.pipe.spawn();
+        assert!(!h.kill_switch_latched());
+        h.set_kill_switch(true, "a", "why").await.unwrap();
+        assert!(h.kill_switch_latched());
+        // A clone sees the same flag.
+        assert!(h.clone().kill_switch_latched());
+        h.set_kill_switch(false, "a", "RELEASE KILL SWITCH")
+            .await
+            .unwrap();
+        assert!(!h.kill_switch_latched());
     }
 
     #[tokio::test]

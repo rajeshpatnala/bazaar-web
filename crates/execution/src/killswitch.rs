@@ -50,7 +50,7 @@ pub struct KillSwitch<R: KillSwitchRepo> {
     clock: Arc<dyn Clock>,
     release_phrase: String,
     allow_reduce_only: bool,
-    latch: AtomicBool,
+    latch: Arc<AtomicBool>,
 }
 
 // The phrase is secret-like: never printed.
@@ -81,8 +81,14 @@ impl<R: KillSwitchRepo> KillSwitch<R> {
             clock,
             release_phrase,
             allow_reduce_only,
-            latch: AtomicBool::new(false),
+            latch: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// The in-process latch, shared so a read-only view can show it without a command.
+    #[must_use]
+    pub fn latch_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.latch)
     }
 
     async fn read(&self) -> Result<bool, RepoError> {
