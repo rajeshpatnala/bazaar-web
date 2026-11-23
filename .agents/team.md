@@ -149,6 +149,8 @@ Code review runs on every PR. Security review and testing scale with risk so sma
 | require_feature_t2 | yes |
 | review_rounds | fixes-only |
 | defer_minor_after_round | 1 |
+| nit_policy | defer |
+| unreviewed_fix_max_lines | 20 |
 | security_block_severities | critical, high, medium |
 | require_reviewed_commit | yes |
 `security_review`: `always` or `sensitive-or-large` (auth, config, SQL/migrations, dependency/lock files, CI, Dockerfile, or >= large_pr_lines).
