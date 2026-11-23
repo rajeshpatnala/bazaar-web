@@ -479,14 +479,77 @@ class NitCostTests(Base):
     def approval_text(self, ref):
         return (self.r.dir / f".agents/reviews/F1/{ref}/approval.md").read_text()
 
-    def test_small_fix_after_review_needs_a_re_review_no_carry_forward(self):
-        b, ref = self.approved_branch([row("CR-1-1", "minor", "src/lib.rs:2", dec="defer: next slice")])
-        self.fix_line2(b)
+    FIXNOW = "fix now (auto)"
+
+    def merge_check(self, b):
         self.r.gate_pass(b)
-        rc, out = self.r.kit("merge-check", "--branch", b, "--feature", "F1")
+        return self.r.kit("merge-check", "--branch", b, "--feature", "F1")
+
+    def test_carry_forward_small_fix_now_minor_fix_passes_and_says_which_rule(self):
+        b, ref = self.approved_branch([row("CR-1-1", "minor", "src/lib.rs:2", dec=self.FIXNOW)])
+        self.fix_line2(b)
+        self.r.kit("triage", "F1", "--ref", ref)  # marks the finding fixed: the change touched its cited line
+        rc, out = self.merge_check(b)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("carry-forward", out)
+        self.assertIn("max 20", out)
+
+    def test_carry_forward_off_when_the_setting_is_zero(self):
+        self.r.set("unreviewed_fix_max_lines", "0")
+        b, ref = self.approved_branch([row("CR-1-1", "minor", "src/lib.rs:2", dec=self.FIXNOW)])
+        self.fix_line2(b)
+        rc, out = self.merge_check(b)
         self.assertEqual(rc, 1, out)
         self.assertIn("reviews cover the current commit", out)
-        self.assertNotIn("carry-forward", out)
+        self.assertNotIn("carry-forward:", out)
+
+    def test_carry_forward_refuses_over_the_budget_by_text(self):
+        self.r.set("unreviewed_fix_max_lines", "1")
+        b, ref = self.approved_branch([row("CR-1-1", "minor", "src/lib.rs:2", dec=self.FIXNOW)])
+        self.fix_line2(b)  # 1 added + 1 removed = 2 lines
+        rc, out = self.merge_check(b)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("2 changed lines since the review (max 1, team.md unreviewed_fix_max_lines)", out)
+
+    def test_carry_forward_refuses_a_deferred_finding_and_other_lines(self):
+        b, ref = self.approved_branch([row("CR-1-1", "minor", "src/lib.rs:2", dec="defer: next slice")])
+        self.fix_line2(b)
+        rc, out = self.merge_check(b)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("change outside the fix-now minor/nit findings", out)
+
+    def test_carry_forward_refuses_each_protected_path_by_text(self):
+        rows = [row("CR-1-1", "minor", "src/lib.rs:2", dec=self.FIXNOW)]
+        for i, (path, text) in enumerate([(".claude/kit/x.py", "x = 1\n"), (".agents/team.md", "| a | b |\n"),
+                                          (".agents/owner-rules.md", "- a\n"), ("risk/limits.rs", "pub fn l() {}\n"),
+                                          ("src/auth.rs", "pub fn a() {}\n")]):
+            self.r.git("switch", "-q", "develop")
+            self.r.write(path, text)
+            self.r.commit(f"chore: seed {i}")
+            b, ref = self.approved_branch(rows, f"feat/F1-p{i}")
+            self.edit(b, {path: text.replace("1", "2").replace("a", "c").replace("l()", "m()")})
+            rc, out = self.merge_check(b)
+            self.assertEqual(rc, 1, f"{path}: {out}")
+            self.assertIn("under .claude, a policy file, or a security-sensitive / risk / quant path", out, path)
+
+    def test_carry_forward_refuses_a_file_with_a_security_finding(self):
+        b = "feat/F1-sf2"
+        self.r.branch(b, {"src/lib.rs": self.LIB})
+        self.r.review(b, "code-review.md", "APPROVE", [row("CR-1-1", "minor", "src/lib.rs:2", dec=self.FIXNOW)])
+        self.r.review(b, "security.md", "PASS", [row("SEC-1-1", "info", "src/lib.rs:25", status="fixed")])
+        self.r.kit("triage", "F1", "--ref", "feat-F1-sf2")
+        self.fix_line2(b)
+        rc, out = self.merge_check(b)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("src/lib.rs has a security or safety finding in this PR", out)
+
+    def test_carry_forward_refused_next_to_a_blocking_finding(self):
+        b, ref = self.approved_branch([row("CR-1-1", "minor", "src/lib.rs:2", dec=self.FIXNOW),
+                                       row("CR-1-2", "major", "src/lib.rs:3", status="fixed")])
+        self.fix_line2(b)
+        rc, out = self.merge_check(b)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("next to a blocking finding", out)
 
     def test_triage_confirm_needs_the_cited_line_in_the_hunk(self):
         self.r.branch("feat/F1-tv", {"src/lib.rs": self.LIB})
@@ -614,6 +677,67 @@ class FunctionTests(unittest.TestCase):
             self.assertEqual(k.ref_base("pr-9"), "")
         finally:
             k.pr_info = old
+
+    def test_carry_forward_fails_closed_on_git_errors_and_odd_changes(self):
+        import tempfile as tf
+        r, k = self.repo, self.k
+        d = pathlib.Path(tf.mkdtemp()) / "pr-1"
+        d.mkdir()
+        r.git("switch", "-q", "develop")
+        head0 = r.git("rev-parse", "HEAD")
+        # same commit: nothing changed -> refused, not carried
+        ok, why, _ = k.carry_forward_ids(d, head0, head0, "develop")
+        self.assertFalse(ok)
+        self.assertIn("no changed files", why)
+        # binary change
+        (r.dir / "bin.dat").write_bytes(b"\x00\x01\x02")
+        c1 = r.commit("chore: bin")
+        (r.dir / "bin.dat").write_bytes(b"\x00\x01\x03\x00")
+        c2 = r.commit("fix: bin")
+        ok, why, _ = k.carry_forward_ids(d, c1, c2, "develop")
+        self.assertFalse(ok)
+        self.assertIn("binary or unreadable change in bin.dat", why)
+        # rename and delete
+        r.git("mv", "bin.dat", "bin2.dat")
+        c3 = r.commit("chore: rename")
+        ok, why, _ = k.carry_forward_ids(d, c2, c3, "develop")
+        self.assertFalse(ok)
+        self.assertIn("added, deleted, renamed or type-changed file", why)
+        # mode-only change
+        r.write("m.sh", "echo 1\n")
+        c4 = r.commit("chore: m")
+        (r.dir / "m.sh").chmod(0o755)
+        c5 = r.commit("chore: chmod")
+        ok, why, _ = k.carry_forward_ids(d, c4, c5, "develop")
+        self.assertFalse(ok)
+        self.assertIn("mode only", why)
+        # git itself failing (checked call returns None): refused
+        old = k.git_checked
+        k.git_checked = lambda *a: None
+        try:
+            ok, why, _ = k.carry_forward_ids(d, c4, c5, "develop")
+        finally:
+            k.git_checked = old
+        self.assertFalse(ok)
+        self.assertIn("git diff failed", why)
+
+    def test_only_code_and_test_reviewers_can_carry_a_fix(self):
+        k = self.k
+        for name in ("code-review.md", "tests-core.md", "tests.md"):
+            self.assertTrue(k.reviewer_may_carry(name), name)
+        for name in ("security.md", "risk.md", "quant.md", "approval.md"):
+            self.assertFalse(k.reviewer_may_carry(name), name)
+
+    def test_unreviewed_fix_limit_reads_team_md_and_fails_closed(self):
+        k = self.k
+        old = k.team_setting
+        try:
+            for val, want in (("20", 20), ("0", 0), ("abc", 0), ("-", 0), ("", 0)):
+                k.team_setting = lambda n, d, v=val: v
+                self.assertEqual(k.unreviewed_fix_limit(), want, val)
+        finally:
+            k.team_setting = old
+        self.assertEqual(k.unreviewed_fix_limit(), 20)
 
     def test_lockfile_changes_are_listed(self):
         r = self.repo

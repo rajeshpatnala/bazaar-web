@@ -3353,14 +3353,123 @@ def own_changes_since(commit: str, head: str, base: str) -> tuple:
     return (not own), (f"{len(own)} commit(s) after the review: {', '.join(own[:4])}" if own else "")
 
 
-def review_fresh(text: str, head: str, base: str) -> tuple:
-    """(ok, detail) for one review file against the branch head."""
+def unreviewed_fix_limit() -> int:
+    """team.md -> unreviewed_fix_max_lines: how many lines of a small fix may go in without a re-review (0 = off,
+    every fix is re-reviewed). Anything that is not a plain number counts as 0 (fail closed)."""
+    v = team_setting("unreviewed_fix_max_lines", "20").strip()
+    return int(v) if v.isdigit() else 0
+
+
+def reviewer_may_carry(fname: str) -> bool:
+    """Only the code and test reviewers' findings can carry a fix forward; security, risk, quant and any other
+    domain review always see the change."""
+    stem = pathlib.Path(fname).stem
+    return stem == "code-review" or stem.startswith("tests")
+
+
+def carry_forward(d: pathlib.Path, commit: str, head: str, base: str) -> tuple:
+    ok, detail, _ = carry_forward_ids(d, commit, head, base)
+    return ok, detail
+
+
+def carry_forward_ids(d: pathlib.Path, commit: str, head: str, base: str) -> tuple:
+    """(ok, detail, ids of the findings the change touched).
+    A review dated before head still stands when the commits since only touch lines cited by this PR's own
+    fix-now minor/nit findings from the code/test reviewers, and the whole change is within the team.md budget
+    (unreviewed_fix_max_lines). Fails closed: any git error or unreadable change refuses."""
+    limit = unreviewed_fix_limit()
+    if limit <= 0 or not (sha_of(commit) and sha_of(head) and is_ancestor(commit, head)):
+        return False, "", set()
+
+    def no(why: str) -> tuple:
+        return False, "carry-forward refused: " + why, set()
+
+    feature, ref = d.parent.name, d.name
+    status_out = git_checked("diff", "--no-renames", "--name-status", commit, head)
+    num_out = git_checked("diff", "--no-renames", "--numstat", commit, head)
+    if status_out is None or num_out is None:
+        return no("git diff failed")
+    status = {}
+    for line in status_out.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 2:
+            return no("unreadable change list")
+        status[parts[1]] = parts[0]
+    if not status:
+        return no("no changed files between the reviewed commit and the head")
+    odd = [f"{p} ({st})" for p, st in status.items() if st != "M"]
+    if odd:
+        return no(f"added, deleted, renamed or type-changed file {', '.join(odd[:3])}")
+    stats = []
+    for line in num_out.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3 or not (parts[0].isdigit() and parts[1].isdigit()):
+            return no(f"binary or unreadable change in {parts[-1]}")
+        stats.append((int(parts[0]), int(parts[1]), parts[2]))
+    if {p for _, _, p in stats} != set(status):
+        return no("the change list and the line counts disagree")
+    flat = [p for a, dl, p in stats if a + dl == 0]
+    if flat:
+        return no(f"change without lines (mode only) in {flat[0]}")
+    files = sorted(status)
+    sensitive = [".claude/**"] + SENSITIVE_DEFAULT + POLICY_FILES + stack().get("security_sensitive_globs", [])
+    guarded = [g for dr in domain_reviews() for g in dr.get("globs", [])]
+    hit = [f for f in files if (matches(f, sensitive) or matches(f, guarded))
+           and not (f.startswith(".agents/") and f.endswith(".md") and not matches(f, POLICY_FILES))]
+    if hit:
+        return no(f"{', '.join(hit[:3])} is under .claude, a policy file, or a security-sensitive / risk / quant path")
+    gen = [f for f in files if matches(f, generated_globs())]
+    if gen:
+        return no(f"{gen[0]} is a generated file")
+    lines = sum(a + dl for a, dl, _ in stats)
+    if lines > limit:
+        return no(f"{lines} changed lines since the review (max {limit}, team.md unreviewed_fix_max_lines)")
+    safety_files = set()
+    for n in sorted(x.name for x in d.glob("*.md")):
+        if n == APPROVAL_FILE:
+            continue
+        for r in findings(d / n)[1]:
+            if is_safety(n, r) or pathlib.Path(n).stem == "security":
+                safety_files.add((r.get("file:line") or "").partition(":")[0].strip())
+    touched = [f for f in files if f in safety_files]
+    if touched:
+        return no(f"{touched[0]} has a security or safety finding in this PR")
+
+    def carries(n: str, r: dict) -> bool:
+        dec = (r.get("tech-lead decision") or r.get("decision") or "").strip().lower()
+        return (reviewer_may_carry(n) and r.get("severity") in ("minor", "nit", "low") and not is_safety(n, r)
+                and dec.startswith("fix now"))
+
+    rep = scope_report(feature, ref, base, head, stats, commit, only=carries, slack=10)
+    if rep["note"] or rep["outside"]:
+        return no(rep["note"] or f"change outside the fix-now minor/nit findings ({rep['outside'][0][2:]})")
+    seen = {x[2:].split(":")[0] for x in rep["inside"]}
+    missing = [f for f in files if f not in seen]
+    if missing:
+        return no(f"no hunk could be mapped to a finding for {missing[0]}")
+    blocking = scope_report(feature, ref, base, head, stats, commit, only=lambda n, r: r.get("severity") in AUTO_FIX, slack=10)
+    if blocking["ids"]:
+        return no(f"the change is next to a blocking finding ({', '.join(sorted(blocking['ids'])[:3])})")
+    return True, (f"carry-forward: {lines} line(s) in {len(files)} file(s) since the review (max {limit}), only at lines "
+                  "cited by fix-now minor/nit findings, no sensitive/risk/quant/policy/.claude path"), rep["ids"]
+
+
+def review_fresh(text: str, head: str, base: str, d: pathlib.Path = None) -> tuple:
+    """(ok, detail) for one review file against the branch head. With `d` (the PR's review folder) a small fix of
+    minor/nit findings keeps the review valid (carry_forward)."""
     if team_setting("require_reviewed_commit", "yes").lower() != "yes":
         return True, ""
     c = file_commit(text)
     if not c:
         return False, "no `Commit:` line (the review doesn't say which commit it covered)"
-    return own_changes_since(c, head, base)
+    ok, detail = own_changes_since(c, head, base)
+    if not ok and d is not None:
+        cf_ok, cf = carry_forward(d, c, head, base)
+        if cf_ok:
+            return True, cf
+        if cf:
+            detail += f"; {cf}"
+    return ok, detail
 
 
 def is_safety(fname: str, row: dict) -> bool:
@@ -3425,14 +3534,14 @@ def round2_context(feature: str, ref: str, names: list, base: str, headref: str,
     return fix_diff(base, headref, since, stats, context) or "(no code changes since the review)", header
 
 
-def scope_report(feature: str, ref: str, base: str, headref: str, stats: list, since: str = "") -> dict:
+def scope_report(feature: str, ref: str, base: str, headref: str, stats: list, since: str = "", only=None, slack: int = 60) -> dict:
     """Map the changes since the last review to the findings that asked for them. A guide for the reviewer and the
     manager, not a guarantee: the round-2 reviewer still reads the whole fix diff."""
     d = review_dir(feature, ref)
     names = [f.name for f in sorted(d.glob("*.md"))] if d.exists() else []
     if not since:
         since, _ = last_reviewed_commit(d, [n for n in names if n != APPROVAL_FILE])
-    res = {"since": since, "inside": [], "outside": [], "unmapped": [], "note": ""}
+    res = {"since": since, "inside": [], "outside": [], "unmapped": [], "note": "", "ids": set()}
     if not since or not sha_of(since):
         res["note"] = "no reviewed commit recorded yet: nothing to compare"
         return res
@@ -3445,12 +3554,14 @@ def scope_report(feature: str, ref: str, base: str, headref: str, stats: list, s
             continue
         _, rows = findings(d / n)
         for r in rows:
+            if only and not only(n, r):  # e.g. carry-forward counts only minor/nit findings as scope
+                continue
             loc = (r.get("file:line") or "").strip()
             path, _, line = loc.partition(":")
             if not path:
                 res["unmapped"].append(r.get("id", "?"))
                 continue
-            nums = [int(x) for x in re.findall(r"\d+", line)[:2]]
+            nums = [int(x) for x in re.findall(r"\d+", line)[:8]]  # "104-105 (and :36, :87)" cites three places
             spots.setdefault(path.strip(), []).append((r.get("id", "?"), nums))
     tests = test_globs_all()
     gen = generated_globs()
@@ -3461,7 +3572,7 @@ def scope_report(feature: str, ref: str, base: str, headref: str, stats: list, s
         elif l.startswith("@@") and path:
             m = re.search(r"\+(\d+)(?:,(\d+))?", l)
             start = int(m.group(1)) if m else 0
-            ids = [i for i, nums in spots.get(path, []) if not nums or any(abs(n - start) <= 60 for n in nums)]
+            ids = [i for i, nums in spots.get(path, []) if not nums or any(abs(n - start) <= slack for n in nums)]
             stem = pathlib.Path(path).stem.replace("_test", "").replace(".test", "").replace("test_", "")
             test_of = matches(path, tests) and any(stem and stem in pathlib.Path(p).stem for p in spots)
             where = f"{path}:{start}"
@@ -3469,6 +3580,7 @@ def scope_report(feature: str, ref: str, base: str, headref: str, stats: list, s
                 continue
             if ids:
                 res["inside"].append(f"- {where} ({', '.join(ids[:3])})")
+                res["ids"].update(ids)
             elif test_of:
                 res["inside"].append(f"- {where} (tests for a finding's file)")
             else:
@@ -3534,9 +3646,11 @@ def approval_check(feature: str, ref: str, required: list, head: str = "", base:
         text = f.read_text()
         m = re.search(r"^Approved:\s*(.+)$", text, re.M)
         if head:
-            good, detail = review_fresh(text, head, base)
+            good, detail = review_fresh(text, head, base, f.parent)
             if not good:
                 return [("approval covers the current commit", False, detail)]
+            if detail:
+                return [("approval covers the current commit", True, detail), ("approved to merge", True, m.group(1) if m else "")]
         return [("approved to merge", True, m.group(1) if m else "")]
     return [("approved to merge", False, f"no {f.relative_to(ROOT)}: run `just triage {feature} --ref {ref}` (approves when "
                                          "nothing needs judgment) or ask the tech lead to decide and `just approve`")]
@@ -3550,23 +3664,25 @@ def security_block() -> set:
 
 def freshness_checks(d: pathlib.Path, names: list, head: str, base: str) -> list:
     """One line per required review file: does it cover the current commit, and are its fix-now items confirmed?"""
-    res, stale, unfixed = [], [], []
+    res, stale, unfixed, carried = [], [], [], []
     for n in names:
         f = d / n
         if not f.exists():
             continue
         text = f.read_text(errors="replace")
         if head:
-            good, detail = review_fresh(text, head, base)
+            good, detail = review_fresh(text, head, base, d)
             if not good:
                 stale.append(f"{n}: {detail}")
+            elif detail:
+                carried.append(f"{n}: {detail}")
         _, rows = findings_text(text)
         for r in rows:
             dec = r.get("tech-lead decision", r.get("decision", "")).strip().lower()
             if r.get("status", "").lower() in OPEN and dec.startswith("fix now"):
                 unfixed.append(r.get("id", "?"))
     if head:
-        res.append(("reviews cover the current commit", not stale, "; ".join(stale[:4])))
+        res.append(("reviews cover the current commit", not stale, "; ".join(stale[:4]) or "; ".join(carried[:4])))
     res.append(("fix-now findings confirmed fixed", not unfixed,
                 f"still open: {', '.join(unfixed[:10])} - the reviewer re-checks them (minor/nit: the tech lead may "
                 "`just verify-fixes`)" if unfixed else ""))
@@ -3733,7 +3849,8 @@ def merge_check(argv: list, quiet: bool = False) -> int:
               + ("  (only CI is unfinished: `just pr-wait <pr>` waits for free; don't re-check by hand)" if verdict == "PENDING" else ""))
         for name, good, detail in results:
             mark = "ok  " if good is True else "WAIT" if good == PENDING else "FAIL"
-            print(f"  {mark} {name}" + (f" ({detail})" if detail and good is not True else ""))
+            print(f"  {mark} {name}" + (f" ({detail})" if detail and (good is not True or detail.startswith("carry-forward")
+                                                                      or "carry-forward:" in detail) else ""))
         if failed:
             fixes = [fix_hint(name, argv, integ) for name, _, _ in failed]
             fixes = sorted(dict.fromkeys(f for f in fixes if f), key=lambda f: int(f[0]))
