@@ -70,7 +70,9 @@ pub trait Guarded: Executor {
         typed: &str,
         actor: &str,
     ) -> impl Future<Output = Result<(), ReleaseError>> + Send;
-    /// The kill switch's in-process latch, shared with the handle (read only there).
+    /// The kill switch's in-process latch, shared with the handle (read only there). Contract:
+    /// this MUST be the very flag the guard checks, never a fresh `AtomicBool`, or the GET
+    /// would show "off" while orders are refused.
     fn latch_flag(&self) -> Arc<AtomicBool>;
 }
 
