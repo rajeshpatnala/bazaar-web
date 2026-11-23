@@ -80,6 +80,12 @@ pub enum ApiError {
     Validation(Vec<FieldError>),
     /// 429.
     RateLimited,
+    /// 403 the typed release phrase is wrong, empty or short; nothing was written.
+    ReleasePhraseMismatch,
+    /// 503 an engage could not be saved: orders are still refused in this process (latch).
+    KillSwitchNotSaved,
+    /// 503 the trading pipeline was running and has stopped (differs from never wired).
+    PipelineStopped,
     /// 409 a second decision on an already decided approval.
     AlreadyDecided,
     /// 409 the kill switch is engaged; nothing was sent.
@@ -106,6 +112,7 @@ impl ApiError {
             Self::BadRequest => StatusCode::BAD_REQUEST,
             Self::Unauthenticated => StatusCode::UNAUTHORIZED,
             Self::Forbidden
+            | Self::ReleasePhraseMismatch
             | Self::LaunchTokenInvalid
             | Self::ForbiddenHost
             | Self::ForbiddenOrigin
@@ -120,9 +127,11 @@ impl ApiError {
             Self::AlreadyDecided | Self::KillSwitchEngaged | Self::BreakerTripped => {
                 StatusCode::CONFLICT
             }
-            Self::PipelineClosed | Self::StorageUnavailable | Self::MarginUnavailable => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
+            Self::PipelineClosed
+            | Self::PipelineStopped
+            | Self::KillSwitchNotSaved
+            | Self::StorageUnavailable
+            | Self::MarginUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -145,6 +154,9 @@ impl ApiError {
             Self::UnsupportedMediaType => "unsupported_media_type",
             Self::Validation(_) => "validation_error",
             Self::RateLimited => "rate_limited",
+            Self::ReleasePhraseMismatch => "release_phrase_mismatch",
+            Self::PipelineStopped => "pipeline_stopped",
+            Self::KillSwitchNotSaved => "kill_switch_not_saved",
             Self::AlreadyDecided => "already_decided",
             Self::KillSwitchEngaged => "kill_switch_engaged",
             Self::BreakerTripped => "breaker_tripped",
@@ -172,6 +184,9 @@ impl ApiError {
             Self::UnsupportedMediaType => "Unsupported media type",
             Self::Validation(_) => "Validation failed",
             Self::RateLimited => "Too many requests",
+            Self::ReleasePhraseMismatch => "Release phrase does not match",
+            Self::PipelineStopped => "Trading pipeline stopped",
+            Self::KillSwitchNotSaved => "Kill switch not saved",
             Self::AlreadyDecided => "Already decided",
             Self::KillSwitchEngaged => "Kill switch engaged",
             Self::BreakerTripped => "Daily-loss breaker tripped",
@@ -199,6 +214,13 @@ impl ApiError {
             Self::UnsupportedMediaType => "Content-Type must be application/json.",
             Self::Validation(_) => "One or more fields are invalid.",
             Self::RateLimited => "Slow down and retry shortly.",
+            Self::ReleasePhraseMismatch => {
+                "The typed release phrase does not match. The kill switch is unchanged."
+            }
+            Self::PipelineStopped => "The trading pipeline has stopped. Nothing was done.",
+            Self::KillSwitchNotSaved => {
+                "The kill switch is latched in this process but could not be saved; orders are refused until restart. Retry engaging."
+            }
             Self::AlreadyDecided => "This approval was already decided; nothing was sent again.",
             Self::KillSwitchEngaged => "The kill switch is engaged. Nothing was sent.",
             Self::BreakerTripped => "The daily-loss breaker has tripped. Nothing was sent.",
@@ -267,12 +289,7 @@ impl From<PipelineError> for ApiError {
             PipelineError::Closed => Self::PipelineClosed,
             PipelineError::Exec(ExecError::Storage)
             | PipelineError::Release(ReleaseError::Storage) => Self::StorageUnavailable,
-            PipelineError::Release(ReleaseError::WrongPhrase) => {
-                Self::Validation(vec![FieldError {
-                    field: "phrase".to_owned(),
-                    message: "The release phrase does not match.".to_owned(),
-                }])
-            }
+            PipelineError::Release(ReleaseError::WrongPhrase) => Self::ReleasePhraseMismatch,
             PipelineError::Exec(ExecError::InvalidInput(_)) => Self::Validation(vec![FieldError {
                 field: "order".to_owned(),
                 message: "The order failed a lot, tick, freeze or quantity rule.".to_owned(),
@@ -591,7 +608,15 @@ mod tests {
             );
         }
         let w = ApiError::from(PipelineError::Release(ReleaseError::WrongPhrase));
-        assert_eq!(w.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            (w.status(), w.code()),
+            (StatusCode::FORBIDDEN, "release_phrase_mismatch")
+        );
+        let c = ApiError::PipelineStopped;
+        assert_eq!(
+            (c.status(), c.code()),
+            (StatusCode::SERVICE_UNAVAILABLE, "pipeline_stopped")
+        );
         let i = ApiError::from(PipelineError::Exec(ExecError::Unknown));
         assert_eq!(i, ApiError::Internal);
     }

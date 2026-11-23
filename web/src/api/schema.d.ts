@@ -62,6 +62,64 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/killswitch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Current kill-switch state. An unreadable state is reported `engaged: true, readable: false`. */
+        get: operations["get_state"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/killswitch/engage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Engage the kill switch. Already engaged writes no second row. A failed write is 503, but the
+         *     in-process latch stays set, so orders are still refused; the 503 body says so (the GET reads
+         *     the store only and shows `engaged: false` until a save succeeds).
+         */
+        post: operations["engage"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/killswitch/release": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Release with the typed phrase. A wrong, empty or short phrase is 403 and nothing is written;
+         *     a failed audit write is 503 and the switch stays engaged.
+         */
+        post: operations["release"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/status": {
         parameters: {
             query?: never;
@@ -148,6 +206,11 @@ export interface components {
             /** @description Approve or decline. */
             decision: components["schemas"]["DecisionDto"];
         };
+        /** @description Body of `POST /api/v1/killswitch/engage`. The actor is the session's, never the body's. */
+        EngageRequestDto: {
+            /** @description Why (500 bytes at most; blank is stored as "unspecified"). */
+            reason: string;
+        };
         /** @description One field-level validation message (422). */
         FieldError: {
             /** @description Offending field. */
@@ -155,7 +218,7 @@ export interface components {
             /** @description User-safe message. */
             message: string;
         };
-        /** @description `GET /api/v1/kill-switch`. */
+        /** @description `GET /api/v1/killswitch`. */
         KillSwitchDto: {
             /** @description True when engaged, or when the state could not be read (fail closed). */
             engaged: boolean;
@@ -191,6 +254,11 @@ export interface components {
             title: string;
             /** @description `urn:bazaar:problem:<code>`. */
             type: string;
+        };
+        /** @description Body of `POST /api/v1/killswitch/release`. */
+        ReleaseRequestDto: {
+            /** @description The typed confirmation phrase (500 bytes at most); never logged or echoed. */
+            phrase: string;
         };
         /** @description `GET /api/v1/status` (F1 subset: no feed, broker or calendar fields yet). */
         StatusDto: {
@@ -336,6 +404,143 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_state: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KillSwitchDto"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    engage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EngageRequestDto"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KillSwitchDto"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    release: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReleaseRequestDto"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KillSwitchDto"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

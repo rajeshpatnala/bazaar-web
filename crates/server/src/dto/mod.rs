@@ -190,7 +190,29 @@ pub struct DecisionOutcomeDto {
     pub detail: Option<String>,
 }
 
-/// `GET /api/v1/kill-switch`.
+/// Body of `POST /api/v1/killswitch/engage`. The actor is the session's, never the body's.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EngageRequestDto {
+    /// Why (500 bytes at most; blank is stored as "unspecified").
+    pub reason: String,
+}
+
+/// Body of `POST /api/v1/killswitch/release`.
+#[derive(Clone, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseRequestDto {
+    /// The typed confirmation phrase (500 bytes at most); never logged or echoed.
+    pub phrase: String,
+}
+
+impl std::fmt::Debug for ReleaseRequestDto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReleaseRequestDto").finish_non_exhaustive()
+    }
+}
+
+/// `GET /api/v1/killswitch`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 pub struct KillSwitchDto {
     /// True when engaged, or when the state could not be read (fail closed).
