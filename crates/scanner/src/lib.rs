@@ -12,6 +12,7 @@ pub mod score;
 pub mod sizing;
 pub mod types;
 pub mod universe;
+pub mod why;
 
 pub use ports::{BanList, BanListStatus, EventCalendar, EvidenceSource};
 pub use result::{BlockReason, BlockedIdea, ScanResult, ScanVerdict};
