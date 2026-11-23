@@ -190,3 +190,56 @@ fn cash_fno_kind_is_carried_from_the_master_not_defaulted() {
     let s = map_row(&row(), "X", InstrumentKind::CashFno).unwrap();
     assert_eq!(s.kind, InstrumentKind::CashFno);
 }
+
+type RepoErr = bazaar_core::ports::RepoError;
+
+/// The real store, except `get` fails for one symbol.
+struct FlakyGet<'a>(&'a SqliteStore, &'static str);
+
+impl InstrumentRepo for FlakyGet<'_> {
+    async fn upsert_instruments(
+        &self,
+        rows: &[Instrument],
+        on: chrono::NaiveDate,
+    ) -> Result<bazaar_core::ports::UpsertSummary, RepoErr> {
+        self.0.upsert_instruments(rows, on).await
+    }
+    async fn get(&self, ex: &Exchange, s: &str) -> Result<Option<Instrument>, RepoErr> {
+        if s == self.1 {
+            return Err(RepoErr::Unavailable);
+        }
+        self.0.get(ex, s).await
+    }
+    async fn next_expiry(
+        &self,
+        ex: &Exchange,
+        u: &str,
+        k: &InstrumentType,
+        d: chrono::NaiveDate,
+    ) -> Result<Option<chrono::NaiveDate>, RepoErr> {
+        self.0.next_expiry(ex, u, k, d).await
+    }
+    async fn is_cash_fno(&self, s: &str) -> Result<bool, RepoErr> {
+        self.0.is_cash_fno(s).await
+    }
+    async fn last_fetched_on(&self) -> Result<Option<chrono::NaiveDate>, RepoErr> {
+        self.0.last_fetched_on().await
+    }
+    async fn ping(&self) -> Result<(), RepoErr> {
+        self.0.ping().await
+    }
+}
+
+#[tokio::test]
+async fn a_store_read_error_refuses_that_symbol_and_the_warning_names_the_store() {
+    let (_d, cfg, store) = setup(&["TESTEQ", "BROKEN"]).await;
+    let repo = FlakyGet(&store, "BROKEN");
+    let (snap, w) = InstrumentSnapshot::load(&repo, cfg.path(), &clock(6)).await;
+    assert!(snap.spec("TESTEQ").is_some());
+    assert_eq!(snap.spec("BROKEN"), None);
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(
+        w[0].starts_with("instrument store read failed for 1"),
+        "{w:?}"
+    );
+}

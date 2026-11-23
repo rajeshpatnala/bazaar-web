@@ -92,7 +92,8 @@ fn error_label(e: CommandError) -> &'static str {
 
 /// Freshness of the instrument master against the calendar's last trading day on or before today.
 /// The ONE rule: `check-connections` reports it and the paper spec snapshot (`specs.rs`) is only
-/// served while it holds. The error is a short safe category.
+/// built while it holds. It is checked once, at load time: a long-running process keeps its
+/// snapshot until restart. The error is a short safe category.
 pub(crate) async fn instruments_state<R: InstrumentRepo>(
     store: &R,
     config_dir: &Path,

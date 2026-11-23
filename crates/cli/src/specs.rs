@@ -82,14 +82,20 @@ impl InstrumentSnapshot {
             return (Self::empty(), warnings);
         }
         let mut specs = HashMap::new();
-        let mut skipped = 0_usize;
+        let (mut skipped, mut store_errors) = (0_usize, 0_usize);
         for sym in symbols {
             match spec_for(repo, sym).await {
-                Some(spec) => {
+                Ok(Some(spec)) => {
                     specs.insert(sym.to_owned(), spec);
                 }
-                None => skipped += 1,
+                Ok(None) => skipped += 1,
+                Err(()) => store_errors += 1,
             }
+        }
+        if store_errors > 0 {
+            warnings.push(format!(
+                "instrument store read failed for {store_errors} watchlist symbol(s); they will be refused"
+            ));
         }
         if skipped > 0 {
             warnings.push(format!(
@@ -100,15 +106,18 @@ impl InstrumentSnapshot {
     }
 }
 
-/// The spec of one symbol, or `None` for anything but a valid NSE `EQ` cash instrument.
-async fn spec_for<R: InstrumentRepo>(repo: &R, symbol: &str) -> Option<InstrumentSpec> {
-    let row = repo.get(&Exchange::Nse, symbol).await.ok().flatten()?;
-    let kind = if repo.is_cash_fno(symbol).await.ok()? {
+/// The spec of one symbol: `Ok(None)` for anything but a valid NSE `EQ` cash instrument, `Err`
+/// when the store could not be read (the symbol still gets no spec).
+async fn spec_for<R: InstrumentRepo>(repo: &R, symbol: &str) -> Result<Option<InstrumentSpec>, ()> {
+    let Some(row) = repo.get(&Exchange::Nse, symbol).await.map_err(|_| ())? else {
+        return Ok(None);
+    };
+    let kind = if repo.is_cash_fno(symbol).await.map_err(|_| ())? {
         InstrumentKind::CashFno
     } else {
         InstrumentKind::CashNonFno
     };
-    map_row(&row, symbol, kind)
+    Ok(map_row(&row, symbol, kind))
 }
 
 fn map_row(row: &Instrument, symbol: &str, kind: InstrumentKind) -> Option<InstrumentSpec> {
