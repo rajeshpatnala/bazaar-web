@@ -28,7 +28,34 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # Decides what the PR needs (scripts/ci-scope.py; `just ci-scope` runs the same). Full workspace on push,
+  # workflow_dispatch, PRs not into develop (promotion/release) and when shared files change; fail-safe is full.
+  # Skipped jobs report SKIPPED, which GitHub branch protection and `just merge-check` both count as passing.
+  # pr-title, secrets-scan and deny always run.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.scope.outputs.rust }}
+      web: ${{ steps.scope.outputs.web }}
+      full: ${{ steps.scope.outputs.full }}
+      packages: ${{ steps.scope.outputs.packages }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with: { fetch-depth: 0 }
+      - id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.base_ref }}
+        run: |
+          if [ "$EVENT" = pull_request ] && [ "$BASE" = develop ]; then
+            python3 scripts/ci-scope.py "origin/$BASE" | tee -a "$GITHUB_OUTPUT"
+          else
+            python3 scripts/ci-scope.py origin/develop --full | tee -a "$GITHUB_OUTPUT"
+          fi
+
   lint:
+    needs: changes
+    if: needs.changes.outputs.rust == 'yes'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -42,13 +69,19 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - if: hashFiles('Cargo.toml') != ''
         run: cargo fmt --all -- --check
-      - if: hashFiles('Cargo.toml') != ''
+      - if: hashFiles('Cargo.toml') != '' && needs.changes.outputs.full == 'yes'
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - if: hashFiles('Cargo.toml') != '' && needs.changes.outputs.full != 'yes'
+        name: clippy on changed crates and their dependents
+        env: { PKGS: "${{ needs.changes.outputs.packages }}" }
+        run: cargo clippy $PKGS --all-targets -- -D warnings
       - if: hashFiles('crates/broker/Cargo.toml') != ''
         name: gated broker crate is lint-clean (no live calls)
         run: cargo clippy -p bazaar-broker --features live-trading -- -D warnings
 
   test:
+    needs: changes
+    if: needs.changes.outputs.rust == 'yes'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -63,12 +96,21 @@ jobs:
       - if: hashFiles('Cargo.toml') != ''
         uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2
         with: { tool: "cargo-nextest,cargo-llvm-cov" }
-      - if: hashFiles('Cargo.toml') != ''
+      - if: hashFiles('Cargo.toml') != '' && needs.changes.outputs.full != 'yes'
+        name: tests on changed crates and their dependents (coverage gate runs on the full run)
+        env: { PKGS: "${{ needs.changes.outputs.packages }}" }
+        run: cargo nextest run $PKGS --no-tests=pass
+      - if: hashFiles('Cargo.toml') != '' && needs.changes.outputs.full == 'yes'
         run: cargo llvm-cov nextest --workspace --no-tests=pass --lcov --output-path lcov.info --fail-under-lines 75
-      - if: hashFiles('Cargo.toml') != ''
+      - if: hashFiles('Cargo.toml') != '' && needs.changes.outputs.full == 'yes'
         run: cargo test --doc --workspace
+      - if: hashFiles('Cargo.toml') != '' && needs.changes.outputs.full != 'yes'
+        env: { PKGS: "${{ needs.changes.outputs.packages }}" }
+        run: cargo test --doc $PKGS
 
   web:
+    needs: changes
+    if: needs.changes.outputs.web == 'yes'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -151,6 +193,8 @@ jobs:
   # only; it is committed alongside the server `openapi` command and the web
   # `gen:api` script (F1 slice 7), so the job self-activates then.
   openapi-drift:
+    needs: changes
+    if: needs.changes.outputs.rust == 'yes' || needs.changes.outputs.web == 'yes'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5

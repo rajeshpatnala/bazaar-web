@@ -356,3 +356,7 @@ bench:
 # coverage report (HTML)
 cov:
     cargo llvm-cov nextest --workspace --html
+
+# which CI jobs a change needs (same script CI uses): web / rust / full and the `-p` crate list vs a base
+ci-scope base="origin/develop":
+    @python3 scripts/ci-scope.py {{base}}
