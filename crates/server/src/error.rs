@@ -82,6 +82,8 @@ pub enum ApiError {
     RateLimited,
     /// 403 the typed release phrase is wrong, empty or short; nothing was written.
     ReleasePhraseMismatch,
+    /// 503 an engage could not be saved: orders are still refused in this process (latch).
+    KillSwitchNotSaved,
     /// 503 the trading pipeline was running and has stopped (differs from never wired).
     PipelineStopped,
     /// 409 a second decision on an already decided approval.
@@ -127,6 +129,7 @@ impl ApiError {
             }
             Self::PipelineClosed
             | Self::PipelineStopped
+            | Self::KillSwitchNotSaved
             | Self::StorageUnavailable
             | Self::MarginUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
@@ -153,6 +156,7 @@ impl ApiError {
             Self::RateLimited => "rate_limited",
             Self::ReleasePhraseMismatch => "release_phrase_mismatch",
             Self::PipelineStopped => "pipeline_stopped",
+            Self::KillSwitchNotSaved => "kill_switch_not_saved",
             Self::AlreadyDecided => "already_decided",
             Self::KillSwitchEngaged => "kill_switch_engaged",
             Self::BreakerTripped => "breaker_tripped",
@@ -182,6 +186,7 @@ impl ApiError {
             Self::RateLimited => "Too many requests",
             Self::ReleasePhraseMismatch => "Release phrase does not match",
             Self::PipelineStopped => "Trading pipeline stopped",
+            Self::KillSwitchNotSaved => "Kill switch not saved",
             Self::AlreadyDecided => "Already decided",
             Self::KillSwitchEngaged => "Kill switch engaged",
             Self::BreakerTripped => "Daily-loss breaker tripped",
@@ -213,6 +218,9 @@ impl ApiError {
                 "The typed release phrase does not match. The kill switch is unchanged."
             }
             Self::PipelineStopped => "The trading pipeline has stopped. Nothing was done.",
+            Self::KillSwitchNotSaved => {
+                "The kill switch is latched in this process but could not be saved; orders are refused until restart. Retry engaging."
+            }
             Self::AlreadyDecided => "This approval was already decided; nothing was sent again.",
             Self::KillSwitchEngaged => "The kill switch is engaged. Nothing was sent.",
             Self::BreakerTripped => "The daily-loss breaker has tripped. Nothing was sent.",

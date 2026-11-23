@@ -264,11 +264,59 @@ async fn over_500_bytes_is_422_and_nothing_is_written() {
 #[tokio::test]
 async fn failed_engage_write_is_503_not_200() {
     let r = rig().await;
-    r.exec("DROP TABLE audit_log").await;
+    r.exec("CREATE TRIGGER fail_engage BEFORE INSERT ON kill_switch_events BEGIN SELECT RAISE(ABORT, 'x'); END").await;
     let res = r.post(ENGAGE, r#"{"reason":"x"}"#).await;
     assert_eq!(res.status(), 503);
-    assert_eq!(body_json(res).await["code"], "storage_unavailable");
-    assert_eq!(r.state_rows().await, 0);
+    let v = body_json(res).await;
+    assert_eq!(v["code"], "kill_switch_not_saved");
+    assert!(
+        v["detail"]
+            .as_str()
+            .unwrap()
+            .contains("latched in this process")
+    );
+    assert_eq!(
+        r.count("SELECT COUNT(*) FROM kill_switch WHERE engaged = 1")
+            .await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn blank_reason_is_stored_as_unspecified() {
+    let r = rig().await;
+    assert_eq!(r.post(ENGAGE, r#"{"reason":""}"#).await.status(), 200);
+    assert_eq!(
+        r.count("SELECT COUNT(*) FROM kill_switch_events WHERE reason = 'unspecified'")
+            .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn release_when_not_engaged_is_200_and_writes_nothing() {
+    let r = rig().await;
+    let res = r
+        .post(RELEASE, &format!(r#"{{"phrase":"{PHRASE}"}}"#))
+        .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(body_json(res).await["engaged"], false);
+    assert_eq!((r.state_rows().await, r.audit_rows().await), (0, 0));
+}
+
+#[tokio::test]
+async fn correct_phrase_after_a_refused_attempt_releases() {
+    let r = rig().await;
+    r.post(ENGAGE, r#"{"reason":"x"}"#).await;
+    let bad = r.post(RELEASE, r#"{"phrase":"nope"}"#).await;
+    assert_eq!(bad.status(), 403);
+    assert_eq!(r.get().await["engaged"], true);
+    let ok = r
+        .post(RELEASE, &format!(r#"{{"phrase":"{PHRASE}"}}"#))
+        .await;
+    assert_eq!(ok.status(), 200);
+    assert_eq!(body_json(ok).await["engaged"], false);
+    assert_eq!((r.state_rows().await, r.audit_rows().await), (2, 2));
 }
 
 #[tokio::test]
@@ -327,32 +375,43 @@ async fn unwired_is_503_pipeline_closed_on_all_routes() {
 }
 
 #[tokio::test]
-async fn no_session_or_no_csrf_is_rejected_and_writes_nothing() {
+async fn no_session_or_no_csrf_is_rejected_on_both_writes_and_changes_nothing() {
     let r = rig().await;
-    let base = || {
-        Request::post(ENGAGE)
-            .header(header::HOST, HOST)
-            .header(header::ORIGIN, ORIGIN)
-            .header(header::CONTENT_TYPE, "application/json")
-    };
-    let res = r
-        .app
-        .send(base().body(Body::from(r#"{"reason":"x"}"#)).unwrap())
-        .await;
-    assert_eq!(res.status(), 401);
-    let res = r
-        .app
-        .send(
-            base()
-                .header(header::COOKIE, &r.cookie)
-                .body(Body::from(r#"{"reason":"x"}"#))
-                .unwrap(),
-        )
-        .await;
-    assert_eq!(res.status(), 403);
-    assert_eq!((r.state_rows().await, r.audit_rows().await), (0, 0));
+    r.post(ENGAGE, r#"{"reason":"x"}"#).await;
+    let body_release = format!(r#"{{"phrase":"{PHRASE}"}}"#);
+    for (path, body) in [
+        (ENGAGE, r#"{"reason":"y"}"#),
+        (RELEASE, body_release.as_str()),
+    ] {
+        let base = || {
+            Request::post(path)
+                .header(header::HOST, HOST)
+                .header(header::ORIGIN, ORIGIN)
+                .header(header::CONTENT_TYPE, "application/json")
+        };
+        let res = r
+            .app
+            .send(base().body(Body::from(body.to_owned())).unwrap())
+            .await;
+        assert_eq!(res.status(), 401, "{path}");
+        let res = r
+            .app
+            .send(
+                base()
+                    .header(header::COOKIE, &r.cookie)
+                    .body(Body::from(body.to_owned()))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(res.status(), 403, "{path}");
+        assert_eq!(body_json(res).await["code"], "csrf_invalid");
+    }
+    assert_eq!((r.state_rows().await, r.audit_rows().await), (1, 1));
+    assert_eq!(r.get().await["engaged"], true);
 }
 
+/// Source scan: fragile by nature (a renamed helper evades it). The real guard is the type-level
+/// boundary: `AppState` holds no repo, only the `PipelineHandle` and a read-only port.
 #[test]
 fn routes_use_the_pipeline_handle_not_the_repo_and_escape_the_reason() {
     let src = std::fs::read_to_string(concat!(
