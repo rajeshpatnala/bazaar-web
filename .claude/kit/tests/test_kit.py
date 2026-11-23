@@ -503,6 +503,26 @@ class NitCostTests(Base):
         self.assertEqual(rc, 1, out)
         self.assertIn("max 20", out)
 
+    def test_carry_forward_refused_next_to_a_blocking_finding(self):
+        b, ref = self.approved_branch([row("CR-1-1", "minor", "src/lib.rs:2", dec="defer: next slice"),
+                                       row("CR-1-2", "major", "src/lib.rs:3", status="fixed")])
+        self.edit(b, {"src/lib.rs": self.LIB.replace("f1() -> i32 { 1 }", "f1() -> i32 { 11 }")})
+        self.r.gate_pass(b)
+        rc, out = self.r.kit("merge-check", "--branch", b, "--feature", "F1")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("next to a blocking finding", out)
+
+    def test_triage_confirms_a_small_fix_now_minor_without_a_reviewer(self):
+        self.r.branch("feat/F1-tv", {"src/lib.rs": self.LIB})
+        self.r.review("feat/F1-tv", "code-review.md", "APPROVE", [row("CR-1-1", "minor", "src/lib.rs:2")])
+        self.r.kit("triage", "F1", "--ref", "feat-F1-tv")
+        self.edit("feat/F1-tv", {"src/lib.rs": self.LIB.replace("f1() -> i32 { 1 }", "f1() -> i32 { 11 }")})
+        self.r.gate_pass("feat/F1-tv")
+        rc, out = self.r.kit("triage", "F1", "--ref", "feat-F1-tv")
+        self.assertIn("confirmed by the script", out)
+        rc, out = self.r.kit("merge-check", "--branch", "feat/F1-tv", "--feature", "F1")
+        self.assertEqual(rc, 0, out)
+
     def test_triage_restamps_stale_approval_after_a_nit_fix(self):
         b, ref = self.approved_branch([row("CR-1-1", "nit", "src/lib.rs:2", dec="defer: next slice")])
         head = self.edit(b, {"src/lib.rs": self.LIB.replace("f1() -> i32 { 1 }", "f1() -> i32 { 11 }")})

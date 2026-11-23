@@ -1642,6 +1642,34 @@ def triage(argv: list) -> int:
                 spots.setdefault(spot, set()).add(fix.lower())
     ref_arg = argv[argv.index("--ref") + 1] if "--ref" in argv else ""
 
+    if ref_arg and not dry:  # a small fix of fix-now minors/nits is confirmed by the script, not by a reviewer run
+        head, verified = ref_head(feature, ref_arg), []
+        for f in files:
+            text = f.read_text(errors="replace")
+            c = file_commit(text)
+            if not (head and c and sha_of(c) != sha_of(head)):
+                continue
+            ok, _, ids = carry_forward_ids(f.parent, c, head, ref_base(ref_arg))
+            if not ok:
+                continue
+            lines = text.splitlines()
+            hdr = table_header(text)
+            for i, line in enumerate(lines):
+                cells = line.strip().strip("|").split("|") if line.strip().startswith("|") else []
+                if not cells or cells[0].strip() not in ids or "status" not in hdr:
+                    continue
+                r = dict(zip(hdr, [c_.strip() for c_ in cells]))
+                sev = normalize_severity(r.get("severity", ""))
+                if sev in ("minor", "nit", "low") and not is_safety(f.name, r) and r.get("status", "").lower() in OPEN \
+                        and r.get("tech-lead decision", "").strip().lower().startswith("fix now"):
+                    cells[hdr.index("status")] = f" fixed (verified by triage at {head[:9]}: fix only touched the cited lines) "
+                    lines[i] = "|" + "|".join(cells) + "|"
+                    verified.append(cells[0].strip())
+            if verified:
+                f.write_text("\n".join(lines) + "\n")
+        if verified:
+            print(f"  fix-now minor/nit confirmed by the script (carry-forward rule): {', '.join(verified)}")
+
     def restamp(reason: str) -> None:
         """An approval older than the branch head is re-stamped when nothing needs judgment, no blocker or fix-now
         finding is open and every review still covers the head (fresh or carried forward)."""
@@ -3291,12 +3319,17 @@ CARRY_MAX_LINES = 20
 
 
 def carry_forward(d: pathlib.Path, commit: str, head: str, base: str) -> tuple:
-    """(ok, detail): a review dated before head still stands when every commit since only touches lines cited by this
+    ok, detail, _ = carry_forward_ids(d, commit, head, base)
+    return ok, detail
+
+
+def carry_forward_ids(d: pathlib.Path, commit: str, head: str, base: str) -> tuple:
+    """(ok, detail, ids of the minor/nit findings the change touched): a review dated before head still stands when every commit since only touches lines cited by this
     PR's own minor/nit findings (fix-scope clean), the extra change is <= 20 lines, and no changed file is
     security-sensitive, a risk-guardian/quant path or a policy file (the kit's docs under .agents/ are exempt, except
     team.md). Blocking findings, safety findings and anything else keep needing their reviewer."""
     if not (sha_of(commit) and sha_of(head) and is_ancestor(commit, head)):
-        return False, ""
+        return False, "", set()
     feature, ref = d.parent.name, d.name
     files = git("diff", "--name-only", commit, head).split()
     sensitive = SENSITIVE_DEFAULT + POLICY_FILES + stack().get("security_sensitive_globs", [])
@@ -3304,17 +3337,20 @@ def carry_forward(d: pathlib.Path, commit: str, head: str, base: str) -> tuple:
     hit = [f for f in files if (matches(f, sensitive) or matches(f, guarded))
            and not (f.startswith(".agents/") and f.endswith(".md") and f != ".agents/team.md")]
     if hit:
-        return False, f"carry-forward refused: {', '.join(hit[:3])} is security-sensitive / risk / quant / policy"
+        return False, f"carry-forward refused: {', '.join(hit[:3])} is security-sensitive / risk / quant / policy", set()
     stats = diff_stats(commit, head)
     lines = sum(a + dl for a, dl, _ in stats)
     if lines > CARRY_MAX_LINES:
-        return False, f"carry-forward refused: {lines} changed lines since the review (max {CARRY_MAX_LINES})"
+        return False, f"carry-forward refused: {lines} changed lines since the review (max {CARRY_MAX_LINES})", set()
     rep = scope_report(feature, ref, base, head, stats, commit,
                        only=lambda n, r: r.get("severity") in ("minor", "nit", "low") and not is_safety(n, r), slack=10)
     if rep["note"] or rep["outside"]:
-        return False, "carry-forward refused: " + (rep["note"] or f"change outside the minor/nit findings ({rep['outside'][0][2:]})")
+        return False, "carry-forward refused: " + (rep["note"] or f"change outside the minor/nit findings ({rep['outside'][0][2:]})"), set()
+    blocking = scope_report(feature, ref, base, head, stats, commit, only=lambda n, r: r.get("severity") in AUTO_FIX, slack=10)
+    if blocking["ids"]:
+        return False, f"carry-forward refused: the change is next to a blocking finding ({', '.join(sorted(blocking['ids'])[:3])})", set()
     return True, (f"carry-forward: {lines} line(s) in {len(files)} file(s) since the review, only at lines cited by "
-                  "minor/nit findings, no sensitive/risk/quant path")
+                  "minor/nit findings, no sensitive/risk/quant path"), rep["ids"]
 
 
 def review_fresh(text: str, head: str, base: str, d: pathlib.Path = None) -> tuple:
@@ -3404,7 +3440,7 @@ def scope_report(feature: str, ref: str, base: str, headref: str, stats: list, s
     names = [f.name for f in sorted(d.glob("*.md"))] if d.exists() else []
     if not since:
         since, _ = last_reviewed_commit(d, [n for n in names if n != APPROVAL_FILE])
-    res = {"since": since, "inside": [], "outside": [], "unmapped": [], "note": ""}
+    res = {"since": since, "inside": [], "outside": [], "unmapped": [], "note": "", "ids": set()}
     if not since or not sha_of(since):
         res["note"] = "no reviewed commit recorded yet: nothing to compare"
         return res
@@ -3443,6 +3479,7 @@ def scope_report(feature: str, ref: str, base: str, headref: str, stats: list, s
                 continue
             if ids:
                 res["inside"].append(f"- {where} ({', '.join(ids[:3])})")
+                res["ids"].update(ids)
             elif test_of:
                 res["inside"].append(f"- {where} (tests for a finding's file)")
             else:
