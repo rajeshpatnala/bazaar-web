@@ -6,7 +6,7 @@ use utoipa_axum::router::OpenApiRouter;
 use crate::{
     dto::{
         AlarmDto, ApprovalDto, ApprovalListDto, DecisionDto, DecisionOutcomeDto,
-        DecisionRequestDto, KillSwitchDto, OutcomeKind,
+        DecisionRequestDto, EngageRequestDto, KillSwitchDto, OutcomeKind, ReleaseRequestDto,
     },
     error::{FieldError, Problem},
     routes,
@@ -26,7 +26,9 @@ use crate::{
         ApprovalListDto,
         DecisionOutcomeDto,
         OutcomeKind,
-        KillSwitchDto
+        KillSwitchDto,
+        EngageRequestDto,
+        ReleaseRequestDto
     ))
 )]
 struct ApiDoc;
@@ -68,6 +70,9 @@ mod tests {
                 "/api/v1/approvals",
                 "/api/v1/approvals/{id}/decision",
                 "/api/v1/auth/me",
+                "/api/v1/killswitch",
+                "/api/v1/killswitch/engage",
+                "/api/v1/killswitch/release",
                 "/api/v1/status"
             ]
         );
