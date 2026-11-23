@@ -929,9 +929,11 @@ fn fixture_scan_to_gate_to_why_end_to_end() {
 
     let lines = crate::why::render(rec);
     let text = lines.join("\n");
-    // Sizing: within the 1% risk budget of Rs 1,00,000 (risk/share 8 at the worst fill, lot 1).
+    // Sizing: within the 0.5% risk budget of Rs 1,00,000 (Rs 500, fixture risk.toml) (risk/share 8 at the worst fill, lot 1).
     let qty = rec.size().qty;
-    assert!(qty > 0 && Decimal::from(qty) * d("8") <= d("1000"), "{qty}");
+    assert!(qty > 0 && Decimal::from(qty) * d("8") <= d("500"), "{qty}");
+    // Exact: budget Rs 500 less charges and the buffer, over the risk per share (observed 57; at most 62).
+    assert_eq!(qty, 57);
     assert_eq!(rec.size().lots, qty);
     assert!(text.contains(&format!("Quantity {qty}")), "{text}");
     assert!(text.contains("Target Rs 110."), "{text}");
