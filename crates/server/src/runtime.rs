@@ -1293,7 +1293,7 @@ mod tests {
     /// A quote an hour old.
     struct OldQuote(Arc<FakeClock>);
     impl QuoteSource for OldQuote {
-        #[allow(clippy::unused_async)]
+        #[allow(clippy::unused_async)] // the QuoteSource trait requires an async fn
         async fn quote(&self, _: &str) -> Result<QuoteSnapshot, SourceError> {
             Ok(QuoteSnapshot {
                 last: d("1950"),
@@ -1632,7 +1632,7 @@ mod tests {
     /// A quote just past the drift limit of the proposed price (the limit is 50 bps).
     struct DriftQuote(Arc<FakeClock>);
     impl QuoteSource for DriftQuote {
-        #[allow(clippy::unused_async)]
+        #[allow(clippy::unused_async)] // the QuoteSource trait requires an async fn
         async fn quote(&self, _: &str) -> Result<QuoteSnapshot, SourceError> {
             Ok(QuoteSnapshot {
                 last: d("1960.50"),

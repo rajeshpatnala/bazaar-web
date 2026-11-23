@@ -133,6 +133,7 @@ impl PipelineHandle {
     /// still answers after the pipeline stopped (the last value stays; never "off" by default).
     #[must_use]
     pub fn kill_switch_latched(&self) -> bool {
+        // SeqCst is deliberate: one safety flag shared with the guard; the cost is irrelevant.
         self.latch.load(Ordering::SeqCst)
     }
 
