@@ -219,6 +219,8 @@ pub struct KillSwitchDto {
     pub engaged: bool,
     /// False when the stored state could not be read.
     pub readable: bool,
+    /// True when the pipeline's in-process latch is set (an engage whose save failed shows here).
+    pub latched: bool,
     /// Last engage reason with control characters escaped (SEC-130-2); `null` if none.
     pub reason: Option<String>,
 }
@@ -229,11 +231,14 @@ impl From<KillSwitchReading> for KillSwitchDto {
             engaged,
             reason,
             readable,
+            latched,
         } = r;
         Self {
-            // Unreadable counts as engaged, whatever the port said (fail closed, RISK-137-2).
-            engaged: engaged || !readable,
+            // Unreadable or latched counts as engaged, whatever the port said (fail closed,
+            // RISK-137-2, RISK-144-4).
+            engaged: engaged || latched || !readable,
             readable,
+            latched,
             reason: reason.as_deref().map(escape_control),
         }
     }
@@ -303,6 +308,7 @@ mod tests {
             engaged: true,
             reason: Some("\x1b[31mx\x07".into()),
             readable: true,
+            latched: false,
         });
         assert_eq!(d.reason.as_deref(), Some("\\x1b[31mx\\x07"));
         assert!(!serde_json::to_string(&d).unwrap().contains('\x1b'));
@@ -314,8 +320,20 @@ mod tests {
             engaged: false,
             reason: None,
             readable: false,
+            latched: false,
         });
-        assert!(d.engaged && !d.readable);
+        assert!(d.engaged && !d.readable && !d.latched);
+    }
+
+    #[test]
+    fn a_latched_switch_is_engaged_even_if_the_port_said_off() {
+        let d = KillSwitchDto::from(KillSwitchReading {
+            engaged: false,
+            reason: None,
+            readable: true,
+            latched: true,
+        });
+        assert!(d.engaged && d.readable && d.latched);
     }
 
     #[test]

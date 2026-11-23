@@ -42,11 +42,13 @@ impl KillSwitchRead for StoreRead {
                     engaged,
                     reason: None,
                     readable: true,
+                    latched: false,
                 },
                 Err(_) => KillSwitchReading {
                     engaged: true,
                     reason: None,
                     readable: false,
+                    latched: false,
                 },
             }
         })
@@ -348,6 +350,7 @@ async fn reason_is_escaped_on_the_wire() {
         engaged: true,
         reason: Some("\u{1b}[31mx\u{7}\ny\u{202e}z".into()),
         readable: true,
+        latched: false,
     }))
     .await;
     let res = r.app.get("/api/v1/killswitch", Some(&r.cookie)).await;

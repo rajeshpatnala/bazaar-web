@@ -223,22 +223,30 @@ impl std::fmt::Debug for Runtime {
     }
 }
 
-/// Persisted kill switch, read-only; an unreadable state is reported engaged (fail closed).
-struct StoreKillSwitch(SqliteStore);
+/// Kill switch, read-only: the persisted state OR the pipeline's in-process latch. Either one
+/// engaged means engaged; an unreadable store with the latch off is engaged and `readable: false`.
+struct StoreKillSwitch {
+    store: SqliteStore,
+    handle: PipelineHandle,
+}
 
 impl KillSwitchRead for StoreKillSwitch {
     fn read(&self) -> ReadFuture<'_> {
         Box::pin(async move {
-            match self.0.is_engaged().await {
-                Ok(engaged) => KillSwitchReading {
-                    engaged,
+            // Read the latch first: an engage that lands during the store read is not missed.
+            let latched = self.handle.kill_switch_latched();
+            match self.store.is_engaged().await {
+                Ok(stored) => KillSwitchReading {
+                    engaged: stored || latched,
                     reason: None,
                     readable: true,
+                    latched,
                 },
                 Err(_) => KillSwitchReading {
                     engaged: true,
                     reason: None,
                     readable: false,
+                    latched,
                 },
             }
         })
@@ -357,10 +365,14 @@ async fn open_with<Q: QuoteSource + 'static, B: GateContext + 'static>(
     let (mut pipe, paper) =
         build(&store, risk_toml, config_dir, clock, calendar, quotes, base).await?;
     let report = pipe.reload().await.map_err(StartError::Reload)?;
+    let handle = pipe.spawn();
     Ok(Runtime {
-        handle: pipe.spawn(),
+        kill_switch: Arc::new(StoreKillSwitch {
+            store: store.clone(),
+            handle: handle.clone(),
+        }),
+        handle,
         report,
-        kill_switch: Arc::new(StoreKillSwitch(store.clone())),
         paper,
         store,
         pending,
@@ -1281,7 +1293,7 @@ mod tests {
     /// A quote an hour old.
     struct OldQuote(Arc<FakeClock>);
     impl QuoteSource for OldQuote {
-        #[allow(clippy::unused_async)]
+        #[allow(clippy::unused_async)] // the QuoteSource trait requires an async fn
         async fn quote(&self, _: &str) -> Result<QuoteSnapshot, SourceError> {
             Ok(QuoteSnapshot {
                 last: d("1950"),
@@ -1316,5 +1328,352 @@ mod tests {
     fn unavailable_charges_never_return_a_charge() {
         let r = RuntimeCharges::Unavailable.charge("TESTEQ", true, 10, d("50"), "mis");
         assert_eq!(r, Err(SourceError::Unavailable));
+    }
+
+    // ---- BZ-521 S3: the latch over HTTP, through the seam (RISK-144-4) ----------------------
+
+    use axum::body::Body;
+    use axum::http::{Request, header};
+    use bazaar_core::ports::{AuditRepo, KillSwitchRepo, PaperLedgerRepo};
+    use http_body_util::BodyExt;
+    use sqlx::ConnectOptions;
+    use tower::ServiceExt;
+
+    const HOST: &str = "127.0.0.1:8787";
+    const ORIGIN: &str = "http://127.0.0.1:8787";
+
+    /// The real router over a started test composition, logged in.
+    struct Http {
+        router: axum::Router,
+        cookie: String,
+        csrf: String,
+    }
+
+    async fn call(r: &axum::Router, req: Request<Body>) -> (u16, serde_json::Value) {
+        let res = r.clone().oneshot(req).await.unwrap();
+        let status = res.status().as_u16();
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    async fn http(rt: &Runtime, clock: &Arc<FakeClock>) -> Http {
+        let security = crate::security::Security::new(8787, false).unwrap();
+        let state = crate::state::AppState::new(
+            security.clone(),
+            clock.clone(),
+            bazaar_core::mode::ExecutionMode::Paper,
+            std::path::PathBuf::new(),
+        )
+        .with_pipeline(rt.handle.clone(), rt.kill_switch.clone())
+        .with_pending(rt.pending.clone());
+        let router = crate::app::build(state);
+        let url = security.launch_url(8787, false).unwrap();
+        let path = url.strip_prefix(ORIGIN).unwrap().to_owned();
+        let res = router
+            .clone()
+            .oneshot(
+                Request::get(path)
+                    .header(header::HOST, HOST)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 303);
+        let cookie = res.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let me = Request::get("/api/v1/auth/me")
+            .header(header::HOST, HOST)
+            .header(header::COOKIE, &cookie)
+            .body(Body::empty())
+            .unwrap();
+        let (_, me) = call(&router, me).await;
+        let csrf = me["csrf_token"].as_str().unwrap().to_owned();
+        Http {
+            router,
+            cookie,
+            csrf,
+        }
+    }
+
+    impl Http {
+        async fn get_kill(&self) -> serde_json::Value {
+            let req = Request::get("/api/v1/killswitch")
+                .header(header::HOST, HOST)
+                .header(header::COOKIE, &self.cookie)
+                .body(Body::empty())
+                .unwrap();
+            let (status, v) = call(&self.router, req).await;
+            assert_eq!(status, 200, "{v}");
+            v
+        }
+
+        async fn post_engage(&self) -> (u16, serde_json::Value) {
+            let req = Request::post("/api/v1/killswitch/engage")
+                .header(header::HOST, HOST)
+                .header(header::ORIGIN, ORIGIN)
+                .header(header::COOKIE, &self.cookie)
+                .header("x-csrf-token", &self.csrf)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"reason":"stop"}"#))
+                .unwrap();
+            call(&self.router, req).await
+        }
+
+        async fn approve(&self, id: u128) -> serde_json::Value {
+            self.approve_with(id, "key-0000001").await
+        }
+
+        async fn approve_with(&self, id: u128, key: &str) -> serde_json::Value {
+            let (status, v) = self.approve_raw(id, key).await;
+            assert_eq!(status, 200, "{v}");
+            v
+        }
+
+        async fn approve_raw(&self, id: u128, key: &str) -> (u16, serde_json::Value) {
+            let req = Request::post(format!("/api/v1/approvals/{id:032x}/decision"))
+                .header(header::HOST, HOST)
+                .header(header::ORIGIN, ORIGIN)
+                .header(header::COOKIE, &self.cookie)
+                .header("x-csrf-token", &self.csrf)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", key)
+                .body(Body::from(r#"{"decision":"approve"}"#))
+                .unwrap();
+            call(&self.router, req).await
+        }
+    }
+
+    /// Queue one order, let the approval delay pass; returns the HTTP rig.
+    async fn queued(e: &Env, rt: &Runtime) -> Http {
+        assert_eq!(
+            rt.handle.submit(e.order("TESTEQ")).await.unwrap(),
+            Outcome::Queued
+        );
+        e.clock.advance(chrono::Duration::seconds(2));
+        http(rt, &e.clock).await
+    }
+
+    fn audit(kind: &str) -> AuditDraft {
+        AuditDraft {
+            ts_ist_rfc3339: "2026-12-01T10:31:00+05:30".into(),
+            actor: "test".into(),
+            kind: kind.into(),
+            payload: "{}".into(),
+        }
+    }
+
+    fn flags(v: &serde_json::Value) -> (bool, bool, bool) {
+        (
+            v["engaged"].as_bool().unwrap(),
+            v["readable"].as_bool().unwrap(),
+            v["latched"].as_bool().unwrap(),
+        )
+    }
+
+    /// Run one SQL statement on the test database behind the runtime's back.
+    async fn sql(e: &Env, stmt: &str) {
+        let mut c = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&e.db)
+            .connect()
+            .await
+            .unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(stmt.to_owned()))
+            .execute(&mut c)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_engage_whose_save_fails_is_503_then_shows_latched_and_refuses_the_approve() {
+        let e = env(&["TESTEQ"]).await;
+        let rt = e.open().await;
+        let h = queued(&e, &rt).await;
+        // The store stays readable (off) but refuses the engage write.
+        sql(
+            &e,
+            "CREATE TRIGGER no_engage BEFORE UPDATE ON kill_switch \
+             BEGIN SELECT RAISE(ABORT, 'write refused'); END",
+        )
+        .await;
+        let (status, v) = h.post_engage().await;
+        assert_eq!(status, 503, "{v}");
+        assert_eq!(v["code"], "kill_switch_not_saved", "{v}");
+        assert!(rt.handle.kill_switch_latched());
+        assert_eq!(flags(&h.get_kill().await), (true, true, true));
+        let v = h.approve(1).await;
+        assert_eq!(v["outcome"], "guard_blocked", "{v}");
+        assert_eq!(v["detail"], "kill switch engaged", "{v}");
+        assert_eq!(rt.paper.working_count(), 0);
+        assert_eq!(
+            OrderRepo::get(&rt.store, 1).await.unwrap().unwrap().state,
+            "blocked"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_latched_engage_with_the_store_unreadable_shows_engaged_unreadable_latched() {
+        let e = env(&["TESTEQ"]).await;
+        let rt = e.open().await;
+        let h = http(&rt, &e.clock).await;
+        rt.handle
+            .set_kill_switch(true, "owner", "stop")
+            .await
+            .unwrap();
+        sql(&e, "DROP TABLE kill_switch").await;
+        assert_eq!(flags(&h.get_kill().await), (true, false, true));
+    }
+
+    #[tokio::test]
+    async fn an_engaged_latch_with_the_store_off_shows_engaged_and_refuses_the_approve() {
+        let e = env(&["TESTEQ"]).await;
+        let rt = e.open().await;
+        let h = queued(&e, &rt).await;
+        assert_eq!(flags(&h.get_kill().await), (false, true, false));
+        // Engage, then force the stored state off behind the latch's back.
+        rt.handle
+            .set_kill_switch(true, "owner", "stop")
+            .await
+            .unwrap();
+        KillSwitchRepo::set(
+            &rt.store,
+            false,
+            "forced",
+            audit("kill_switch_released"),
+            chain_hash,
+        )
+        .await
+        .unwrap();
+        assert!(!KillSwitchRepo::is_engaged(&rt.store).await.unwrap());
+        assert_eq!(flags(&h.get_kill().await), (true, true, true));
+        // The approve is refused by the kill switch: guard_blocked, no placement, no ledger line.
+        let v = h.approve(1).await;
+        assert_eq!(v["outcome"], "guard_blocked", "{v}");
+        assert_eq!(v["detail"], "kill switch engaged", "{v}");
+        assert_eq!(rt.paper.working_count(), 0);
+        let lines = PaperLedgerRepo::current_epoch(&rt.store).await.unwrap();
+        assert!(lines.iter().all(|l| l.kind == "opening"), "{lines:?}");
+        let row = OrderRepo::get(&rt.store, 1).await.unwrap().unwrap();
+        assert_eq!(row.state, "blocked");
+        let rows = AuditRepo::read_all(&rt.store).await.unwrap();
+        let blocked: Vec<_> = rows
+            .iter()
+            .filter(|r| r.draft.kind == "guard_blocked")
+            .collect();
+        assert_eq!(blocked.len(), 1, "{rows:?}");
+        // Pin every audit row that moved: nothing placed, one guard_blocked, nothing else new.
+        let ks: Vec<&str> = rows.iter().map(|r| r.draft.kind.as_str()).collect();
+        assert_eq!(
+            ks,
+            [
+                "proposed",
+                "gate_passed",
+                "kill_switch_engaged",
+                "kill_switch_released",
+                "approve",
+                "guard_blocked"
+            ],
+            "no placed/fill row"
+        );
+        // The approvals table holds exactly the one decision, for order 1.
+        let mut conn = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&e.db)
+            .connect()
+            .await
+            .unwrap();
+        let ids: Vec<String> = sqlx::query_scalar("SELECT order_id FROM approvals")
+            .fetch_all(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(ids, ["1"]);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_store_with_the_latch_off_is_engaged_and_not_readable() {
+        let e = env(&["TESTEQ"]).await;
+        let rt = e.open().await;
+        let h = http(&rt, &e.clock).await;
+        let mut c = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&e.db)
+            .connect()
+            .await
+            .unwrap();
+        sqlx::query(sqlx::AssertSqlSafe("DROP TABLE kill_switch".to_owned()))
+            .execute(&mut c)
+            .await
+            .unwrap();
+        assert!(!rt.handle.kill_switch_latched());
+        assert_eq!(flags(&h.get_kill().await), (true, false, false));
+    }
+
+    #[tokio::test]
+    async fn a_good_quote_places_exactly_once_over_http() {
+        let e = env(&["TESTEQ"]).await;
+        let rt = e.open().await;
+        let h = queued(&e, &rt).await;
+        let v = h.approve(1).await;
+        assert_eq!(v["outcome"], "placed", "{v}");
+        assert_eq!(rt.paper.working_count(), 1);
+        // A second approve of the same order places nothing more.
+        let (status, again) = h.approve_raw(1, "key-0000002").await;
+        assert_eq!(
+            (status, again["code"].as_str()),
+            (409, Some("already_decided")),
+            "{again}"
+        );
+        assert_eq!(rt.paper.working_count(), 1);
+    }
+
+    /// A quote just past the drift limit of the proposed price (the limit is 50 bps).
+    struct DriftQuote(Arc<FakeClock>);
+    impl QuoteSource for DriftQuote {
+        #[allow(clippy::unused_async)] // the QuoteSource trait requires an async fn
+        async fn quote(&self, _: &str) -> Result<QuoteSnapshot, SourceError> {
+            Ok(QuoteSnapshot {
+                last: d("1960.50"),
+                lower_circuit: None,
+                upper_circuit: None,
+                bar_volume: None,
+                at_ist_rfc3339: self.0.now_ist().to_rfc3339(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_drifted_quote_gives_quote_drifted_with_new_risk_and_places_nothing() {
+        let e = env(&["TESTEQ"]).await;
+        // Queue under a good quote, then restart with a quote past the drift limit (submit would
+        // already see the drift).
+        let first = e.open().await;
+        assert_eq!(
+            first.handle.submit(e.order("TESTEQ")).await.unwrap(),
+            Outcome::Queued
+        );
+        drop(first);
+        e.clock.advance(chrono::Duration::seconds(2));
+        let rt = start_with(
+            &e.db,
+            &fixture_risk(),
+            e.cfg.path(),
+            e.clock.clone(),
+            e.calendar(),
+            DriftQuote(e.clock.clone()),
+            OpenBase(e.clock.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rt.report.requeued, 1, "{:?}", rt.report);
+        let h = http(&rt, &e.clock).await;
+        let v = h.approve(1).await;
+        assert_eq!(v["outcome"], "quote_drifted", "{v}");
+        assert_eq!(v["detail"], "new_risk=238.5325", "{v}");
+        assert_eq!(rt.paper.working_count(), 0);
+        let lines = PaperLedgerRepo::current_epoch(&rt.store).await.unwrap();
+        assert!(lines.iter().all(|l| l.kind == "opening"), "{lines:?}");
     }
 }

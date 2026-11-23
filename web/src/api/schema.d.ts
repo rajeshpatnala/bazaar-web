@@ -107,8 +107,8 @@ export interface paths {
         put?: never;
         /**
          * Engage the kill switch. Already engaged writes no second row. A failed write is 503, but the
-         *     in-process latch stays set, so orders are still refused; the 503 body says so (the GET reads
-         *     the store only and shows `engaged: false` until a save succeeds).
+         *     in-process latch stays set, so orders are still refused; the 503 body says so, and the GET
+         *     shows `engaged: true, latched: true` (stored OR latched).
          */
         post: operations["engage"];
         delete?: never;
@@ -239,6 +239,8 @@ export interface components {
         KillSwitchDto: {
             /** @description True when engaged, or when the state could not be read (fail closed). */
             engaged: boolean;
+            /** @description True when the pipeline's in-process latch is set (an engage whose save failed shows here). */
+            latched: boolean;
             /** @description False when the stored state could not be read. */
             readable: boolean;
             /** @description Last engage reason with control characters escaped (SEC-130-2); `null` if none. */

@@ -50,6 +50,7 @@ impl KillSwitchRead for QuietKill {
                 engaged: false,
                 reason: None,
                 readable: true,
+                latched: false,
             }
         })
     }
