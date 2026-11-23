@@ -79,6 +79,7 @@ Fix round (PR 133): `reload` is idempotent (ids already queued or finished are s
 - A re-gate refusal writes a `gate_blocked` audit row with actor `pipeline` and no `approvals` row; decision rows (decline, approve that reaches send) carry the session actor. Store-side `audit.actor == actor` assertion stays deferred to BZ-207 (SEC-132-1).
 
 ## Deferred
+- RISK-152-1 / CR-152-1: the Rs 60 sizing floor rejected every equity order once real costs are wired (`BufferBelowFloor`). Fixed in BZ-522: allowance is `max(cost, floor)` in sizing, no `risk.toml` change (floor now means "assume at least Rs 60 cost"; owner confirmed 2026-11-23). BZ-519 depends on BZ-522.
 - RISK-144-4: `GET /killswitch` must show the pipeline latch (pipeline accessor), not only the stored state. Kept on the T2/BZ-206 list.
 - RISK-144-4: the HTTP latch-refusal test (an engaged latch refuses an approve over HTTP) is pending until the production gate can pass. Kept on the T2/BZ-206 list.
 - BZ-511 S5: `GET /api/v1/alarms` added (snapshot of the in-memory board, same escaped `AlarmDto` as `StatusDto.alarms`); route allowlist test also rejects place/order path segments; session-401 and CSRF-403 tests iterate the generated OpenAPI document. Still owed: `GET /killswitch` showing the pipeline latch (S4 follow-up) and the HTTP latch-refusal test once the production gate can pass. Status stays building.

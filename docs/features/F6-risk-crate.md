@@ -56,7 +56,7 @@ Deferred: RISK-52-6 G05 return-series freshness (series end date within N sessio
 | `data.max_snapshot_age_secs` (RG-F6-15, own key) | 10 | 1..=300 |
 | `options.allow_naked_short` (G13) | false | `true` refused |
 | `limits.max_orders_per_day` / `max_notional_per_order_inr` (G16) + ceilings | 12 / 25000 | 1..=1000 / > 0; limit <= ceiling |
-| `limits.min_charges_slippage_buffer` | 60 (rupees) | > 0; placeholder, derive from charges.toml with the F9 cost model |
+| `limits.min_charges_slippage_buffer` | 60 (rupees) | > 0; placeholder, derive from charges.toml with the F9 cost model; meaning (BZ-522, owner 2026-11-23): sizing assumes at least this much cost, allowance = `max(cost, floor)`; it never refuses a cheap order; floor <= 0 fails closed |
 | `limits.cap_equity_at_starting_cash` | true | `false` refused (owner Q2) |
 
 Slice 1b `[hard_limits]` (unverified, owner to confirm): `max_ban_list_age_hours` 24, `max_quote_age_secs` 5, `max_snapshot_age_secs` 10, `latest_expiry_day_no_new_after_ist` 13:30, `min_confirm_delay_secs` 10, `max_size_factor` 0.5, `min_oos_trades` floor 30 (equals the G01 default), `min_correlation_window_days` floor 20 (added in 1c). A higher floor such as 40 is the owner's call (20 matches the loader minimum on purpose). Deferred: symlink and canonical-path check for `events_file` belongs to the events loader (F3/F10).
@@ -91,7 +91,7 @@ Test fixture `fixtures/config/risk.toml` gained the same sections with synthetic
 - Fix round (PR 56): G02/G04b take `risk_ref` (Buy `max(intent, live)`, Sell `min(intent, live)`), G14 keeps `ref_price = max`; the gate (slice 11) must compute both. Opposite holding leaves only when `exit_qty > 0`; G14 rejects mark <= 0 or duplicate marks; symbols compare trimmed, case-insensitive.
 - Owner to confirm (CR-56-3): G02 adds the new order's charges allowance to the held risk of a same-side add.
 - Symbols must reach the gate in canonical instrument-master form (RISK-56-5); gate test in slice 11.
-- Deferred: slice 11/11b pass the charges buffer for the FINAL qty into G02 with a cost-grows-with-qty test (RISK-56-3, QR-56-5; below-floor is raised to the floor, `size` rejects it); slice 12 replays boundaries against shipped `config/risk.toml` (RISK-56-4); F10 validates marks at snapshot build.
+- Deferred: slice 11/11b pass the charges buffer for the FINAL qty into G02 with a cost-grows-with-qty test (RISK-56-3, QR-56-5; below-floor is raised to the floor, `size` uses `max(cost, floor)` since BZ-522); slice 12 replays boundaries against shipped `config/risk.toml` (RISK-56-4); F10 validates marks at snapshot build.
 - Deferred (slice 10b review): slice 11b gate must take `AuditReceipt` by value, compare its digest and config hash with the verdict, test that a failing sink mints no `GatedIntent`, and test a second write for the same `AcceptedOverride` is refused (RISK-58-2, CR-58-3, TS-58-1). `write_acknowledged` takes `&AcceptedOverride` because the gate still needs it to mint.
 
 ## Slice 5b (loss limits: G03, G19)
