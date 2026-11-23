@@ -539,7 +539,49 @@ fn very_long_note_is_capped() {
     let l = lines_of(vec![events(true, &[&"a".repeat(5000)])]);
     assert_eq!(
         line(&l, "Dates to know"),
+        format!("Dates to know: {}....", "a".repeat(MAX_TEXT_CHARS))
+    );
+    // Exactly at the cap: no ellipsis.
+    let l = lines_of(vec![events(true, &[&"a".repeat(MAX_TEXT_CHARS)])]);
+    assert_eq!(
+        line(&l, "Dates to know"),
         format!("Dates to know: {}.", "a".repeat(MAX_TEXT_CHARS))
+    );
+}
+
+#[test]
+fn invisible_and_format_characters_are_dropped_by_group() {
+    let groups: [&[char]; 6] = [
+        &['\u{061C}'],
+        &['\u{2060}', '\u{2061}', '\u{2062}', '\u{2063}', '\u{2064}'],
+        &['\u{00AD}'],
+        &['\u{034F}'],
+        &['\u{180E}'],
+        &['\u{E0000}', '\u{E0041}', '\u{E007F}'],
+    ];
+    for g in groups {
+        let hostile: String = g.iter().flat_map(|c| ['a', *c]).collect();
+        assert_eq!(clean(&hostile), "a".repeat(g.len()), "{g:?}");
+    }
+}
+
+#[test]
+fn many_notes_and_names_give_a_bounded_line() {
+    let notes: Vec<String> = (0..1000).map(|i| format!("n{i}")).collect();
+    let refs: Vec<&str> = notes.iter().map(String::as_str).collect();
+    let l = lines_of(vec![events(true, &refs)]);
+    assert_eq!(
+        line(&l, "Dates to know"),
+        "Dates to know: n0; n1; n2; n3; n4; ... and 995 more."
+    );
+    let names = lines_of(vec![WhyFactor::Confluence {
+        families_agreeing: 1,
+        families_total: 1,
+        names: notes,
+    }]);
+    assert!(
+        line(&names, "1 of 1").contains("n0, n1, n2, n3, n4, ... and 995 more."),
+        "{names:#?}"
     );
 }
 
@@ -551,6 +593,7 @@ fn long_multibyte_note_does_not_split_a_char() {
         .filter(|c| *c == '₹')
         .count();
     assert_eq!(n, MAX_TEXT_CHARS);
+    assert!(line(&l, "Dates to know").ends_with("..."));
 }
 
 #[test]

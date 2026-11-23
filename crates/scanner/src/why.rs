@@ -20,6 +20,8 @@ use crate::types::{Action, GateSummary, Recommendation, Warning, WhyFactor};
 
 /// Longest free-text field shown (characters).
 const MAX_TEXT_CHARS: usize = 120;
+/// Most notes or names shown on one line; the rest is "... and N more".
+const MAX_ITEMS: usize = 5;
 /// One crore in rupees, for the liquidity line.
 const CRORE: i64 = 10_000_000;
 
@@ -132,7 +134,7 @@ fn confluence_line(rec: &Recommendation, agree: u32, total: u32, names: &[String
     let names: Vec<String> = names.iter().map(|n| clean(n)).collect();
     format!(
         "{agree} of {total} method families agree: {}. Score {} out of 100 (a rule-fit score, not a chance of winning).",
-        names.join(", "),
+        join_capped(&names, ", "),
         rec.confidence(),
     )
 }
@@ -307,7 +309,7 @@ fn events_line(rec: &Recommendation) -> String {
     } else if all.is_empty() {
         "No results or policy dates were found in the checked window.".to_owned()
     } else {
-        format!("Dates to know: {}.", all.join("; "))
+        format!("Dates to know: {}.", join_capped(&all, "; "))
     }
 }
 
@@ -359,15 +361,39 @@ fn clean(s: &str) -> String {
             '<' | '>' | '&' | '"' | '\'' => Some(' '),
             c if c.is_whitespace() => Some(' '),
             c if c.is_control() => None,
-            '\u{200B}'..='\u{200F}'
+            '\u{00AD}'
+            | '\u{034F}'
+            | '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
             | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
             | '\u{2066}'..='\u{2069}'
-            | '\u{FEFF}' => None,
+            | '\u{FEFF}'
+            | '\u{E0000}'..='\u{E007F}' => None,
             c => Some(c),
         })
         .collect();
     let collapsed = mapped.split_whitespace().collect::<Vec<_>>().join(" ");
-    collapsed.chars().take(MAX_TEXT_CHARS).collect()
+    if collapsed.chars().count() > MAX_TEXT_CHARS {
+        let cut: String = collapsed.chars().take(MAX_TEXT_CHARS).collect();
+        format!("{cut}...")
+    } else {
+        collapsed
+    }
+}
+
+/// Join at most [`MAX_ITEMS`] items, then "... and N more", so a line stays bounded.
+fn join_capped(items: &[String], sep: &str) -> String {
+    let shown = items.iter().take(MAX_ITEMS).cloned().collect::<Vec<_>>();
+    let mut s = shown.join(sep);
+    if items.len() > MAX_ITEMS {
+        s.push_str(sep);
+        s.push_str("... and ");
+        s.push_str(&(items.len() - MAX_ITEMS).to_string());
+        s.push_str(" more");
+    }
+    s
 }
 
 #[cfg(test)]
