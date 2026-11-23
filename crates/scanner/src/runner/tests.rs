@@ -584,8 +584,8 @@ fn every_registered_strategy_has_an_explicit_family() {
 
 #[test]
 fn same_inputs_give_identical_output_whatever_the_universe_order() {
-    let e = env();
-    let m = rising(N, 1);
+    let cfg_env = env();
+    let market = rising(N, 1);
     let ban = fresh_ban(&["BAN"]);
     let mk = || {
         vec![
@@ -598,13 +598,13 @@ fn same_inputs_give_identical_output_whatever_the_universe_order() {
     let fwd = mk();
     let mut rev = mk();
     rev.reverse();
-    let (s1, s2, s3) = (Arc::default(), Arc::default(), Arc::default());
-    let mut a = vec![fake("a", 2, Trend::Up, &s1)];
-    let mut b = vec![fake("a", 2, Trend::Up, &s2)];
-    let mut c = vec![fake("a", 2, Trend::Up, &s3)];
-    let o1 = scan(&e, &ban, &mut a, &fwd, &m).unwrap();
-    let o2 = scan(&e, &ban, &mut b, &rev, &m).unwrap();
-    let o3 = scan(&e, &ban, &mut c, &fwd, &m).unwrap();
+    let (seen1, seen2, seen3) = (Arc::default(), Arc::default(), Arc::default());
+    let mut strat1 = vec![fake("a", 2, Trend::Up, &seen1)];
+    let mut strat2 = vec![fake("a", 2, Trend::Up, &seen2)];
+    let mut strat3 = vec![fake("a", 2, Trend::Up, &seen3)];
+    let o1 = scan(&cfg_env, &ban, &mut strat1, &fwd, &market).unwrap();
+    let o2 = scan(&cfg_env, &ban, &mut strat2, &rev, &market).unwrap();
+    let o3 = scan(&cfg_env, &ban, &mut strat3, &fwd, &market).unwrap();
     assert_eq!(o1, o2, "input order must not change the output");
     assert_eq!(o1, o3, "a repeat run is identical");
     assert_eq!(syms(&o1), ["AAA", "ZZZ"]);
