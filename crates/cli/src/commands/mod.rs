@@ -10,6 +10,7 @@ use std::path::Path;
 
 use thiserror::Error;
 
+pub(crate) use check_connections::instruments_state;
 pub use check_connections::{CheckReport, check_connections};
 pub use import_instruments::{ImportSummary, import_instruments};
 

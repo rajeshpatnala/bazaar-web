@@ -7,6 +7,7 @@
 pub mod commands;
 pub mod compose;
 pub mod costs;
+pub mod specs;
 
 use std::path::PathBuf;
 
