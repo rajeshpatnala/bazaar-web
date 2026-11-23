@@ -48,6 +48,11 @@ impl Drop for TestApp {
 impl TestApp {
     /// `with_ui`: write a tiny `index.html` and `assets/app.js` into the temp dist.
     pub fn new(with_ui: bool) -> Self {
+        Self::with_state(with_ui, |s| s)
+    }
+
+    /// Like `new`, with the state adjusted first (wire a pipeline, ports).
+    pub fn with_state(with_ui: bool, f: impl FnOnce(AppState) -> AppState) -> Self {
         let dist = std::env::temp_dir().join(format!(
             "bz-server-test-{}-{}",
             std::process::id(),
@@ -68,6 +73,7 @@ impl TestApp {
             ExecutionMode::Paper,
             dist.clone(),
         );
+        let state = f(state);
         let alarms = state.alarms.clone();
         Self {
             router: app::build(state),

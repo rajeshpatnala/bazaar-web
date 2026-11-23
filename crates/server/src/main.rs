@@ -175,7 +175,8 @@ async fn serve(port_flag: Option<u16>) -> anyhow::Result<()> {
         config.risk.mode.execution_mode,
         PathBuf::from(WEB_DIST),
     )
-    .with_pipeline(rt.handle.clone(), rt.kill_switch.clone());
+    .with_pipeline(rt.handle.clone(), rt.kill_switch.clone())
+    .with_pending(rt.pending.clone());
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding {addr}"))?;

@@ -4,7 +4,7 @@ use bazaar_core::{mode::ExecutionMode, ports::ApprovalDecision};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::state::{Alarm, KillSwitchReading};
+use crate::state::{Alarm, KillSwitchReading, PendingApproval};
 
 /// Execution mode on the wire (`snake_case`, same spelling as `risk.toml`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
@@ -106,6 +106,88 @@ impl From<DecisionDto> for ApprovalDecision {
             DecisionDto::Decline => Self::Decline,
         }
     }
+}
+
+/// One order waiting for the user's decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct ApprovalDto {
+    /// Intent id (32 lowercase hex digits).
+    pub id: String,
+    /// Symbol (control characters escaped).
+    pub symbol: String,
+    /// `buy` or `sell`.
+    pub side: String,
+    /// Quantity.
+    pub qty: u32,
+    /// Proposed at, RFC 3339 IST.
+    pub created_at: String,
+    /// Approve is refused after this instant (RFC 3339 IST). It is `created_at` plus the approval
+    /// TTL, which is intended and conservative: the live path counts from queue time (never
+    /// earlier), so the UI must disable approve once this has passed.
+    pub expires_at: String,
+}
+
+impl From<PendingApproval> for ApprovalDto {
+    fn from(p: PendingApproval) -> Self {
+        let PendingApproval {
+            id,
+            symbol,
+            side,
+            qty,
+            created_at,
+            expires_at,
+        } = p;
+        Self {
+            id: format!("{id:032x}"),
+            symbol: escape_control(&symbol),
+            side: side.to_owned(),
+            qty,
+            created_at,
+            expires_at,
+        }
+    }
+}
+
+/// `GET /api/v1/approvals`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct ApprovalListDto {
+    /// Pending orders, oldest first.
+    pub approvals: Vec<ApprovalDto>,
+}
+
+/// How a decision ended. Only `placed` and `placed_unrecorded` mean an order was sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OutcomeKind {
+    /// Still waiting.
+    Queued,
+    /// The user declined.
+    Declined,
+    /// Past the approval TTL; nothing sent.
+    Expired,
+    /// The re-gate (fresh quote) refused it; nothing sent.
+    Blocked,
+    /// The quote moved past the drift limit; nothing sent.
+    QuoteDrifted,
+    /// Kill switch, breaker or rate limit refused the send.
+    GuardBlocked,
+    /// Sent and recorded.
+    Placed,
+    /// Sent, but the fill could not be recorded.
+    PlacedUnrecorded,
+    /// The executor refused or failed.
+    ExecFailed,
+    /// Storage failed; see the audit log.
+    Error,
+}
+
+/// Reply of `POST /api/v1/approvals/{id}/decision`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+pub struct DecisionOutcomeDto {
+    /// How it ended.
+    pub outcome: OutcomeKind,
+    /// Gate reason or error category (control characters escaped); null when there is none.
+    pub detail: Option<String>,
 }
 
 /// `GET /api/v1/kill-switch`.

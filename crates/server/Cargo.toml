@@ -18,6 +18,7 @@ bazaar-paper.workspace = true
 bazaar-risk.workspace = true
 bazaar-store.workspace = true
 rust_decimal.workspace = true
+chrono.workspace = true
 bazaar-broker = { workspace = true, optional = true }
 anyhow.workspace = true
 axum.workspace = true
@@ -43,7 +44,7 @@ default = []
 live-trading = ["dep:bazaar-broker", "bazaar-broker/live-trading", "bazaar-cli/live-trading"]
 
 [dev-dependencies]
-chrono.workspace = true
+bazaar-execution = { workspace = true, features = ["test-support"] }
 chrono-tz.workspace = true
 bazaar-core = { workspace = true, features = ["test-util"] }
 http-body-util.workspace = true

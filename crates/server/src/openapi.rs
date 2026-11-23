@@ -4,7 +4,10 @@ use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 
 use crate::{
-    dto::{AlarmDto, DecisionDto, DecisionRequestDto, KillSwitchDto},
+    dto::{
+        AlarmDto, ApprovalDto, ApprovalListDto, DecisionDto, DecisionOutcomeDto,
+        DecisionRequestDto, KillSwitchDto, OutcomeKind,
+    },
     error::{FieldError, Problem},
     routes,
     state::AppState,
@@ -19,6 +22,10 @@ use crate::{
         AlarmDto,
         DecisionRequestDto,
         DecisionDto,
+        ApprovalDto,
+        ApprovalListDto,
+        DecisionOutcomeDto,
+        OutcomeKind,
         KillSwitchDto
     ))
 )]
@@ -55,6 +62,14 @@ mod tests {
         let doc = document();
         let mut got: Vec<&str> = doc.paths.paths.keys().map(String::as_str).collect();
         got.sort_unstable();
-        assert_eq!(got, ["/api/v1/auth/me", "/api/v1/status"]);
+        assert_eq!(
+            got,
+            [
+                "/api/v1/approvals",
+                "/api/v1/approvals/{id}/decision",
+                "/api/v1/auth/me",
+                "/api/v1/status"
+            ]
+        );
     }
 }
