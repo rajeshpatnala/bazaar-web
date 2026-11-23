@@ -146,7 +146,7 @@ fn full_render_has_d12_order_and_exact_text() {
     );
     assert_eq!(
         lines[1],
-        "Target Rs 110. On the worst fill you would make about Rs 1.33 for every Re 1 you risk. A target is a hope, not a promise."
+        "Target Rs 110. On the worst fill you would make about 1.33 : 1 for every Re 1 you risk (reward to risk). A target is a hope, not a promise."
     );
     assert_eq!(
         lines[2],
@@ -472,4 +472,10 @@ fn confidence_is_a_score_never_a_percent() {
         assert!(!text.contains("80%") && !text.contains("55%"), "{text}");
     }
     assert!(render(&full())[2].contains("Score 80 out of 100"));
+}
+
+#[test]
+fn ratio_is_cut_not_rounded_up() {
+    assert_eq!(ratio(Decimal::new(19999, 4)), "1.99 : 1");
+    assert_eq!(ratio(d(2)), "2.00 : 1");
 }

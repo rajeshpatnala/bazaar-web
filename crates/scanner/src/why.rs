@@ -8,7 +8,7 @@
 
 use bazaar_risk::money_fmt::rupees;
 use bazaar_risk::verdict::RuleId;
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, RoundingStrategy};
 
 use crate::types::{GateSummary, Horizon, Recommendation, WhyFactor};
 
@@ -78,9 +78,9 @@ fn factor_line(rec: &Recommendation, f: &WhyFactor, unit: &str) -> String {
             target,
             reward_risk,
         } => format!(
-            "Target {}. On the worst fill you would make about {} for every Re 1 you risk. A target is a hope, not a promise.",
+            "Target {}. On the worst fill you would make about {} for every Re 1 you risk (reward to risk). A target is a hope, not a promise.",
             rupees(*target),
-            rupees(*reward_risk),
+            ratio(*reward_risk),
         ),
         WhyFactor::Confluence {
             families_agreeing,
@@ -138,6 +138,12 @@ fn factor_line(rec: &Recommendation, f: &WhyFactor, unit: &str) -> String {
         },
         WhyFactor::Events { checked, notes } => events_line(*checked, notes),
     }
+}
+
+/// A reward:risk ratio as "1.33 : 1", cut (not rounded up) to 2 dp so it is never overstated.
+fn ratio(r: Decimal) -> String {
+    let cut = r.round_dp_with_strategy(2, RoundingStrategy::ToZero);
+    format!("{cut:.2} : 1")
 }
 
 fn liquidity_line(median_traded_value: Decimal) -> String {
