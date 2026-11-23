@@ -85,37 +85,37 @@ fn label_of(p: &RegimeParams, b: &[Candle], k: Series, x: Extras<'_>) -> (Trend,
 
 #[test]
 fn downtrend_fixture_is_down_with_hand_computed_values() {
-    let p = shipped();
-    let s = classify(&bars(&down()), &p, Series::Stock, Extras::default()).unwrap();
+    let params = shipped();
+    let st = classify(&bars(&down()), &params, Series::Stock, Extras::default()).unwrap();
     // Last bar i=319 (319 % 7 = 4, no wiggle): close = 681. Steady slope -1 gives
     // EMA(N) = close + (N-1)/2, so EMA50 ~ 705.5 and EMA200 ~ 780.5 (wiggle adds < 0.3).
     let close = 681.0;
-    assert_eq!(s.trend, Trend::Down);
+    assert_eq!(st.trend, Trend::Down);
     assert!(
-        (s.ema_mid.unwrap() - (close + 24.5)).abs() < 0.5,
+        (st.ema_mid.unwrap() - (close + 24.5)).abs() < 0.5,
         "{:?}",
-        s.ema_mid
+        st.ema_mid
     );
     assert!(
-        (s.ema_slow.unwrap() - (close + 99.5)).abs() < 0.5,
+        (st.ema_slow.unwrap() - (close + 99.5)).abs() < 0.5,
         "{:?}",
-        s.ema_slow
+        st.ema_slow
     );
     // Highs and lows fall 1 per bar, so ADX sits well above the shipped trend-stay limit.
-    assert!(s.adx.unwrap() >= p.adx_trend_stay, "{:?}", s.adx);
+    assert!(st.adx.unwrap() >= params.adx_trend_stay, "{:?}", st.adx);
     // A stock series never carries a Breakdown verdict.
-    assert_eq!(s.breakdown, Tri::Unknown);
+    assert_eq!(st.breakdown, Tri::Unknown);
     // The last bar closes 15:30 IST, 319 days after the first.
     let expected = Kolkata.with_ymd_and_hms(2026, 1, 1, 15, 30, 0).unwrap() + Duration::days(319);
-    assert_eq!(s.as_of, expected);
+    assert_eq!(st.as_of, expected);
     // As a market series a slide with flat ATR% is Down and not a Breakdown (vol is not High).
-    let m = classify(&slide_bars(), &p, Series::Market, Extras::default()).unwrap();
-    assert_eq!((m.trend, m.breakdown), (Trend::Down, Tri::False));
-    assert_ne!(m.vol, VolState::High);
+    let mkt = classify(&slide_bars(), &params, Series::Market, Extras::default()).unwrap();
+    assert_eq!((mkt.trend, mkt.breakdown), (Trend::Down, Tri::False));
+    assert_ne!(mkt.vol, VolState::High);
     // The linear decline with a fixed range is a Breakdown as a market series (ATR% rises).
-    let l = classify(&bars(&down()), &p, Series::Market, Extras::default()).unwrap();
+    let lin = classify(&bars(&down()), &params, Series::Market, Extras::default()).unwrap();
     assert_eq!(
-        (l.trend, l.breakdown, l.vol),
+        (lin.trend, lin.breakdown, lin.vol),
         (Trend::Down, Tri::True, VolState::High)
     );
 }
