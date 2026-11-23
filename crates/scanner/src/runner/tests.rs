@@ -775,4 +775,48 @@ fn a_short_shaped_signal_is_rejected_by_the_signal_contract() {
         sig.validate(),
         Err(bazaar_strategies::SignalError::StopNotBelowEntry)
     );
+#[test]
+fn same_inputs_give_identical_output_whatever_the_universe_order() {
+    let cfg_env = env();
+    let market = rising(N, 1);
+    let ban = fresh_ban(&["BAN"]);
+    // Distinct tokens; ZZZ and AAA score the same, so symbol (then token) decides the order.
+    let mk = || {
+        let mut uni = vec![
+            entry("ZZZ", rising(N, 1_000_000)),
+            entry("AAA", rising(N, 1_000_000)),
+            entry("BAN", rising(N, 1_000_000)),
+            entry("THIN", rising(N, 1)),
+        ];
+        for (token, e) in (101_u64..).zip(uni.iter_mut()) {
+            e.instrument.instrument_token = token;
+        }
+        uni
+    };
+    let fwd = mk();
+    let mut rev = mk();
+    rev.reverse();
+    let (seen1, seen2, seen3) = (Arc::default(), Arc::default(), Arc::default());
+    let mut strat1 = vec![fake("a", 2, Trend::Up, &seen1)];
+    let mut strat2 = vec![fake("a", 2, Trend::Up, &seen2)];
+    let mut strat3 = vec![fake("a", 2, Trend::Up, &seen3)];
+    let o1 = scan(&cfg_env, &ban, &mut strat1, &fwd, &market).unwrap();
+    let o2 = scan(&cfg_env, &ban, &mut strat2, &rev, &market).unwrap();
+    let o3 = scan(&cfg_env, &ban, &mut strat3, &fwd, &market).unwrap();
+    assert_eq!(o1, o2, "input order must not change the output");
+    assert_eq!(o1, o3, "a repeat run is identical");
+    assert_eq!(syms(&o1), ["AAA", "ZZZ"]);
+    let tokens: Vec<_> = o1
+        .candidates
+        .iter()
+        .map(|c| c.instrument.instrument_token)
+        .collect();
+    assert_eq!(
+        tokens,
+        [102, 101],
+        "tokens follow their symbols, not input position"
+    );
+    let why: BTreeMap<_, _> = o1.dropped.iter().cloned().collect();
+    assert_eq!(why["BAN"], DropReason::Banned);
+    assert!(matches!(why["THIN"], DropReason::Illiquid { .. }));
 }
