@@ -21,13 +21,20 @@ Size: M | L   Estimate: <tokens>   Status: draft | approved | in progress | done
 1. 
 
 ## Slices (L only)
-| slice | developer type | scope (modules/files owned) | depends on | order | est. lines | live path |
-|---|---|---|---|---|---|---|
-| 0 | dev-core | shared contracts and formulas every later slice uses: domain types, ports, DTOs | - | 1 | | no |
-| 1 | dev-data | | 0 | 2 (parallel) | | no |
+| slice | developer type | scope (modules/files owned) | depends on | order | est. lines | live path | failure modes | checklists |
+|---|---|---|---|---|---|---|---|---|
+| 0 | dev-core | shared contracts and formulas every later slice uses: domain types, ports, DTOs, proof types | - | 1 | | no | | |
+| 1 | dev-data | | 0 | 2 (parallel) | | no | | |
 <!-- est. lines: counted lines (tests at half), between min_slice_lines and max_slice_changed_lines; `just plan` flags misses.
      live path: yes when the slice connects new code to a live or money path (that PR always gets the safety review);
-     until then new code stays unused. Branch names carry the slice: feat/<id>-s<slice>-<slug>. -->
+     until then new code stays unused. Branch names carry the slice: feat/<id>-s<slice>-<slug>.
+     failure modes: what happens when each write/call fails midway, what is audited, what is bounded, what Unknown does (fails closed).
+     checklists: the `just docs` sections the developer reads first and self-reviews against (see .agents/known-pitfalls.md).
+     Carry new major findings from a slice's review into the next slice's brief. -->
+
+## Policy decisions (answered before any slice is dispatched)
+| question | answer | decided by (risk-guardian / market-strategist / owner) |
+|---|---|---|
 
 ## Feature record
 <!-- draft of docs/features/F<n>-<slug>.md (template: .agents/templates/feature-record.md): Status, Summary, Owner area,

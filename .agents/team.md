@@ -147,8 +147,8 @@ Code review runs on every PR. Security review and testing scale with risk so sma
 | envelope_max_diff_chars | 60000 |
 | envelope_command | claude |
 | require_feature_t2 | yes |
-| review_rounds | full |
-| defer_minor_after_round | off |
+| review_rounds | fixes-only |
+| defer_minor_after_round | 1 |
 | security_block_severities | critical, high, medium |
 | require_reviewed_commit | yes |
 `security_review`: `always` or `sensitive-or-large` (auth, config, SQL/migrations, dependency/lock files, CI, Dockerfile, or >= large_pr_lines).
