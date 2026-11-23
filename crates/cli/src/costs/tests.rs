@@ -1,7 +1,8 @@
 //! Reference values are derived by hand from the fixture `tests/fixtures/charges.toml` (a copy
 //! of the NSE equity rows of `config/charges.toml`, with `source` and `verified_on`); no rate
-//! appears in this file. Tolerance: exact per line (the F9 model's own rounding rules, which
-//! match the owner's calculator samples within Rs 0.05 per line).
+//! appears in this file. Each value was derived by hand with the F9 rounding rules (half-up per
+//! line) and is asserted exactly, so the stated tolerance is 0; those rules reproduce the owner's
+//! calculator samples within Rs 0.05 per line.
 #![allow(clippy::unwrap_used, clippy::panic)]
 
 use bazaar_backtest::types::ChargeBreakdown;
@@ -217,8 +218,10 @@ fn no_rate_set_in_force_on_the_trade_date_is_unavailable() {
 
 #[test]
 fn trade_date_is_the_ist_date_of_the_injected_clock() {
+    // 00:30 IST on the rate set's `effective_from` is still the previous day in UTC: a UTC date
+    // would find no rate set in force and fail.
     let late = Arc::new(FakeClock::at(
-        Kolkata.with_ymd_and_hms(2026, 12, 31, 23, 59, 0).unwrap(),
+        Kolkata.with_ymd_and_hms(2026, 11, 20, 0, 30, 0).unwrap(),
     ));
     let f = F9Charges::new(Arc::new(cfg()), late).unwrap();
     assert_eq!(
@@ -344,4 +347,28 @@ fn a_trade_whose_charges_all_round_to_zero_is_refused_not_free() {
         Err(SourceError::Unavailable)
     );
     assert_eq!(gate(cfg(), 0).cost(Side::Buy, 1, d("10")), Tri::Unknown);
+}
+
+#[test]
+fn fixture_rows_match_config_charges_toml() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/charges.toml");
+    let real: ChargesConfig = parse_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let fix = cfg();
+    let nse_eq = |c: &ChargesConfig| {
+        c.rate_set
+            .iter()
+            .filter(|r| {
+                r.exchange == ChargeExchange::Nse
+                    && matches!(
+                        r.segment,
+                        ChargeSegment::EquityDelivery | ChargeSegment::EquityIntraday
+                    )
+            })
+            .map(|r| format!("{r:?}"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(nse_eq(&fix).len(), 4);
+    assert_eq!(nse_eq(&fix), nse_eq(&real), "fixture drifted from config");
+    assert_eq!(format!("{:?}", fix.gst), format!("{:?}", real.gst));
+    assert_eq!(format!("{:?}", fix.dp), format!("{:?}", real.dp));
 }
