@@ -33,7 +33,7 @@ manager 26%, quant/risk reviewers 13%, code/security reviewers 8%, tech lead 6%,
 | # | Change | Where it helps | Est. saving | Status |
 |---|---|---|---|---|
 | E1 | **Shorter developer runs**: `reuse_max_steps` (60) next to the 120k context cap. `just warm` / `just next` hand the next slice to a fresh developer with the slice brief. Plans carry `est. lines` per slice; `just plan` flags slices over 400 or under 150 (`min_slice_lines`). | developers (43%) | 5-9% | Done |
-| E2 | **Fewer, smaller review rounds**: `review_rounds = fixes-only`: round 2+ shows each reviewer only its earlier findings plus the fix diff. `defer_minor_after_round = 1`: a nit first raised after round 1, outside the fix, goes to the next slice. Nit-only rounds are closed by the tech lead with `verify-fixes`. Re-reviews must update the file in place. | reviewers, tester, developer fixes | 5-8% | Done (**off by default, see §6**) |
+| E2 | **Fewer, smaller review rounds**: `review_rounds = fixes-only`: round 2+ shows each reviewer only its earlier findings plus the fix diff. `defer_minor_after_round = 1`: a nit first raised after round 1, outside the fix, goes to the next slice. Nit-only rounds are closed by the tech lead with `verify-fixes`. Re-reviews must update the file in place. | reviewers, tester, developer fixes | 5-8% | Done (**enabled by the owner 2026-11-23**) |
 | E3 | **One wake-up per PR and a script that plans**: `just next` prints the next action for every open PR (CI, missing or stale reviews, triage, fix round, approval, ship). Reviewers are launched together in one message. `just review-wait` wakes the manager once. Agents' final reply is the hand-back, never an extra message. | manager (26%) | 3-6% | Done |
 | E4 | **Triage fixes**: honours "in slice 7" for non-safety minors only; blocking and safety findings are always fixed; column aliases (`sev`, `where`, `check`); approval only once every required review is in. | tech lead, early fix work | 1-2% | Done |
 | E5 | **Fix brief as the prompt**: `just fix-list <pr>` is the developer's whole fix-round prompt (only the fix-now findings + the rules: touch nothing else, label commits, "Other changes", no rebase). | developer fix steps | in E2 | Done |
@@ -84,7 +84,7 @@ slice briefs list earlier blockers (F9 #11) · warm developer reuse · plan revi
 |---|---|
 | Split `kit.py` (now ~4,300 lines) into modules of about 400 lines (D16) | Do it as its own change: a pure move with no behaviour change, so its diff can be reviewed. The tests from B10 make it safe. |
 | Trim skill cores to ~60 lines plus references (F25-26, F9 #9) | Under 1% saving; content work across many skills. |
-| Turn on fixes-only rounds | Both new review behaviours ship **off**. Pilot on the next feature (F10): `just set review_rounds fixes-only` and `just set defer_minor_after_round 1` (Claude Code will ask you). Compare rounds per PR, spend per PR and bugs found later (T2, bug reports). Keep them if later bugs don't rise. |
+| Turn on fixes-only rounds | **Enabled by the owner 2026-11-23** (was: ship off, pilot on F10): `just set review_rounds fixes-only` and `just set defer_minor_after_round 1` (Claude Code will ask you). Compare rounds per PR, spend per PR and bugs found later (T2, bug reports). Keep them if later bugs don't rise. |
 | Old smoke script `.agents/scripts/kit-smoke.sh` | 3 of its checks were already failing before this change (written for an older kit). `just kit-test` replaces it. |
 | Old recommendation files (`.agents/recommendations-2026-11-19.md`) | Superseded by this file; delete when you like (still in git history). |
 
@@ -101,8 +101,8 @@ slice briefs list earlier blockers (F9 #11) · warm developer reuse · plan revi
 Commands: `just next` · `just review-wait <pr>` · `just fix-list <pr>` · `just fix-scope <pr>` · `just verify-fixes <pr> <ids>` (tech lead) ·
 `just deferred [F]` · `just kit-test` · `just milestone --file <path>`.
 
-Settings (team.md; change with `just set`, which asks you): `reuse_max_steps` 60 · `min_slice_lines` 150 · `review_rounds` full ·
-`defer_minor_after_round` off · `security_block_severities` critical, high, medium · `require_reviewed_commit` yes ·
+Settings (team.md; change with `just set`, which asks you): `reuse_max_steps` 60 · `min_slice_lines` 150 · `review_rounds` fixes-only ·
+`defer_minor_after_round` 1 · `security_block_severities` critical, high, medium · `require_reviewed_commit` yes ·
 `budget_measure` tokens · `records_extra_globs` (bazaar-web: `docs/strategy/**, .claude/agent-memory/**`).
 
 stack.json keys (kit-factory packs): a domain reviewer's `"envelope": false` and `"safety": true`; `live_path_review`.
