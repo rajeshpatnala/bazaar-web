@@ -587,13 +587,18 @@ fn same_inputs_give_identical_output_whatever_the_universe_order() {
     let cfg_env = env();
     let market = rising(N, 1);
     let ban = fresh_ban(&["BAN"]);
+    // Distinct tokens; ZZZ and AAA score the same, so symbol (then token) decides the order.
     let mk = || {
-        vec![
+        let mut uni = vec![
             entry("ZZZ", rising(N, 1_000_000)),
             entry("AAA", rising(N, 1_000_000)),
             entry("BAN", rising(N, 1_000_000)),
             entry("THIN", rising(N, 1)),
-        ]
+        ];
+        for (token, e) in (101_u64..).zip(uni.iter_mut()) {
+            e.instrument.instrument_token = token;
+        }
+        uni
     };
     let fwd = mk();
     let mut rev = mk();
@@ -608,6 +613,16 @@ fn same_inputs_give_identical_output_whatever_the_universe_order() {
     assert_eq!(o1, o2, "input order must not change the output");
     assert_eq!(o1, o3, "a repeat run is identical");
     assert_eq!(syms(&o1), ["AAA", "ZZZ"]);
+    let tokens: Vec<_> = o1
+        .candidates
+        .iter()
+        .map(|c| c.instrument.instrument_token)
+        .collect();
+    assert_eq!(
+        tokens,
+        [102, 101],
+        "tokens follow their symbols, not input position"
+    );
     let why: BTreeMap<_, _> = o1.dropped.iter().cloned().collect();
     assert_eq!(why["BAN"], DropReason::Banned);
     assert!(matches!(why["THIN"], DropReason::Illiquid { .. }));
