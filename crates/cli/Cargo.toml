@@ -11,10 +11,12 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+bazaar-backtest.workspace = true
 bazaar-broker = { workspace = true, optional = true }
 bazaar-core.workspace = true
 bazaar-data.workspace = true
 bazaar-execution.workspace = true
+bazaar-paper.workspace = true
 bazaar-risk.workspace = true
 bazaar-store.workspace = true
 chrono.workspace = true
@@ -25,7 +27,6 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-bazaar-paper.workspace = true
 bazaar-core = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 serde_json.workspace = true
