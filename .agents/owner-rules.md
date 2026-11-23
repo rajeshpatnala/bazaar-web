@@ -18,4 +18,4 @@ problem in one go. One line per rule, newest last, at most 20; merge or retire o
 - No slice is dispatched while its failure modes or policy decisions (plan template) are open (owner, 2026-11-23).
 - Past 400 changed lines, stop: open what is done as its own PR and tell the manager (owner, 2026-11-23).
 - At the end-of-feature test run (T2), the tester checks that every refusal test asserts which rule refused and every money test checks all fields that move (known-pitfalls #5) (owner, 2026-11-23).
-- Consecutive slices in the same area go to the same developer while its context is under reuse_max_context; a fresh developer gets a handoff listing the earlier slices' major findings (owner, 2026-11-23).
+- Consecutive slices in the same area go to the same developer while its context is under reuse_max_context (team.md); a fresh developer gets a handoff listing the earlier slices' major findings (owner, 2026-11-23).
