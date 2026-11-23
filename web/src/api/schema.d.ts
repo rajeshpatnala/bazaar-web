@@ -90,7 +90,8 @@ export interface paths {
         put?: never;
         /**
          * Engage the kill switch. Already engaged writes no second row. A failed write is 503, but the
-         *     in-process latch stays set, so orders are still refused.
+         *     in-process latch stays set, so orders are still refused; the 503 body says so (the GET reads
+         *     the store only and shows `engaged: false` until a save succeeds).
          */
         post: operations["engage"];
         delete?: never;
