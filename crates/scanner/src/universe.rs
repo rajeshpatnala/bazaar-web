@@ -18,27 +18,17 @@ pub const MEDIAN_WINDOW_BARS: usize = 20;
 pub enum DropReason {
     BanListUnavailable(String),
     BanListUndated,
-    BanListStale {
-        age_hours: i64,
-    },
+    BanListStale { age_hours: i64 },
     Banned,
-    Illiquid {
-        median_traded_value: Decimal,
-    },
+    Illiquid { median_traded_value: Decimal },
     CircuitLocked,
     CircuitStatusUnknown,
     DecisionBarNotClosed,
     ViewUnavailable,
-    ShortHistory {
-        bars: usize,
-        needed: usize,
-    },
+    ShortHistory { bars: usize, needed: usize },
     NoBarOnDecisionDate,
     RegimeFailed(String),
-    /// A strategy's signal was already past its `valid_until` at the clock.
-    SignalExpired {
-        strategy_id: String,
-    },
+    SignalExpired(String),
 }
 
 /// Upper-case, trimmed form used to compare tradingsymbols.

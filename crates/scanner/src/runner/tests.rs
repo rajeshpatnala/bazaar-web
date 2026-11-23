@@ -642,12 +642,24 @@ fn a_friday_bar_scanned_on_monday_is_current_but_scanned_on_tuesday_is_stale() {
 }
 
 #[test]
-fn a_holiday_gap_is_not_stale() {
+fn a_holiday_gap_is_not_stale_and_the_next_close_makes_it_stale() {
     // 2026-11-10 (Tuesday) is a holiday in config/calendar.toml: on Wednesday morning the
     // latest completed session is Monday the 9th, so a Monday decision date is current.
-    let e = env();
-    let latest = latest_completed_session(&e.cal, ist(11, 9, 0)).unwrap();
-    assert_eq!(latest.to_string(), "2026-11-09");
+    let (e, seen) = (env(), Seen::default());
+    let (uni, m) = ([entry("AAA", rising(N - 4, 1_000_000))], rising(N - 4, 1));
+    let monday = day(N - 5).date_naive();
+    assert_eq!(monday.to_string(), "2026-11-09");
+    let mut s = vec![fake("a", 2, Trend::Up, &seen)];
+    assert_eq!(
+        latest_completed_session(&e.cal, ist(11, 9, 0)).unwrap(),
+        monday
+    );
+    assert!(scan_on(&e, ist(11, 9, 0), monday, &mut s, &uni, &m).is_ok());
+    // Wednesday after the close: Wednesday is the latest completed session, Monday is stale.
+    assert!(matches!(
+        scan_on(&e, ist(11, 15, 30), monday, &mut s, &uni, &m),
+        Err(ScanError::StaleDecisionDate { latest, .. }) if latest.to_string() == "2026-11-11"
+    ));
 }
 
 #[test]
@@ -676,29 +688,23 @@ fn the_bar_still_open_at_1529_is_the_existing_decision_bar_open_error_not_stale(
 }
 
 #[test]
-fn a_signal_past_its_valid_until_is_dropped_with_a_reason() {
+fn a_signal_is_live_exactly_at_valid_until_and_dropped_one_second_later() {
     let (e, seen) = (env(), Seen::default());
     let (uni, m) = ([entry("AAA", rising(N, 1_000_000))], rising(N, 1));
-    let mut s = vec![Box::new(Fake {
-        valid_hours: 0,
-        ..fake_struct("a", &seen)
-    }) as Box<dyn Strategy>];
-    let o = scan_on(
-        &e,
-        ist(13, 15, 30),
-        day(N - 1).date_naive(),
-        &mut s,
-        &uni,
-        &m,
-    )
-    .unwrap();
+    let mk = || {
+        vec![Box::new(Fake {
+            valid_hours: 0,
+            ..fake_struct("a", &seen)
+        }) as Box<dyn Strategy>]
+    };
+    let date = day(N - 1).date_naive();
+    // valid_until == the bar close == now: still live (backtest rule).
+    let o = scan_on(&e, ist(13, 15, 30), date, &mut mk(), &uni, &m).unwrap();
+    assert_eq!(o.candidates.len(), 1);
+    let late = ist(13, 15, 30) + chrono::Duration::seconds(1);
+    let o = scan_on(&e, late, date, &mut mk(), &uni, &m).unwrap();
     assert_eq!(o.candidates.len(), 0);
-    assert_eq!(
-        dropped(&o, "AAA"),
-        DropReason::SignalExpired {
-            strategy_id: "a".into()
-        }
-    );
+    assert_eq!(dropped(&o, "AAA"), DropReason::SignalExpired("a".into()));
 }
 
 #[test]
@@ -775,6 +781,8 @@ fn a_short_shaped_signal_is_rejected_by_the_signal_contract() {
         sig.validate(),
         Err(bazaar_strategies::SignalError::StopNotBelowEntry)
     );
+}
+
 #[test]
 fn same_inputs_give_identical_output_whatever_the_universe_order() {
     let cfg_env = env();
@@ -819,4 +827,42 @@ fn same_inputs_give_identical_output_whatever_the_universe_order() {
     let why: BTreeMap<_, _> = o1.dropped.iter().cloned().collect();
     assert_eq!(why["BAN"], DropReason::Banned);
     assert!(matches!(why["THIN"], DropReason::Illiquid { .. }));
+}
+
+#[test]
+fn a_name_with_a_candidate_is_not_also_listed_as_dropped() {
+    let (e, seen) = (env(), Seen::default());
+    let (uni, m) = ([entry("AAA", rising(N, 1_000_000))], rising(N, 1));
+    // One family expires, the other stays live: a candidate, not a drop.
+    let mut s = vec![
+        Box::new(Fake {
+            valid_hours: -1,
+            ..fake_raw("donchian_breakout", 2, Trend::Up, false, &seen)
+        }) as Box<dyn Strategy>,
+        fake("trend_pullback", 2, Trend::Up, &seen),
+    ];
+    let o = scan_on(
+        &e,
+        ist(13, 15, 30),
+        day(N - 1).date_naive(),
+        &mut s,
+        &uni,
+        &m,
+    )
+    .unwrap();
+    assert_eq!(o.candidates.len(), 1);
+    assert_eq!(o.dropped.len(), 0);
+}
+
+#[test]
+fn a_friday_decision_date_on_wednesday_morning_is_stale() {
+    let (e, seen) = (env(), Seen::default());
+    let (uni, m) = ([entry("AAA", rising(N - 7, 1_000_000))], rising(N - 7, 1));
+    let friday = day(N - 8).date_naive();
+    assert_eq!(friday.to_string(), "2026-11-06");
+    let mut s = vec![fake("a", 2, Trend::Up, &seen)];
+    assert!(matches!(
+        scan_on(&e, ist(11, 9, 0), friday, &mut s, &uni, &m),
+        Err(ScanError::StaleDecisionDate { latest, .. }) if latest.to_string() == "2026-11-09"
+    ));
 }

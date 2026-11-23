@@ -174,7 +174,8 @@ impl GateSummary {
 
 /// Reward:risk on the worst fill, price only: `|first target - worst entry| / |worst entry - stop|`.
 /// `None` when the stop equals the entry or the division overflows. Callers and
-/// [`Recommendation::new`] use this one formula, so a stated value can be checked exactly.
+/// [`Recommendation::new`] use this one formula, so a stated value can be checked exactly. Callers
+/// pass the unrounded value (a 2 dp copy is refused); the UI rounds for display.
 #[must_use]
 pub fn reward_risk(worst_entry: Decimal, stop: Decimal, first_target: Decimal) -> Option<Decimal> {
     let risk = (worst_entry - stop).abs();
@@ -209,7 +210,7 @@ pub enum RecError {
     BadRewardRisk,
     #[error("reward:risk does not match (first target - worst entry) / (worst entry - stop)")]
     RewardRiskMismatch,
-    #[error("paper-only failures are not a subset of the overridable failures")]
+    #[error("paper-only failures are not exactly the Paper-level overridable failures")]
     PaperOnlyNotOverridable,
     #[error("quantity must be above zero")]
     NoQuantity,
@@ -336,10 +337,18 @@ impl Recommendation {
             return Err(RecError::BadEvidence);
         }
         let g = &p.gate;
-        if g.paper_only
+        // Exactly the Paper-level overridable failures: omitting G01 would make it look Soft. The
+        // override endpoint re-derives the level from the `RuleId` and never trusts this list.
+        let expected: Vec<RuleId> = g
+            .overridable_failures
             .iter()
-            .any(|r| !g.overridable_failures.contains(r))
-        {
+            .copied()
+            .filter(|r| r.override_level() == OverrideLevel::Paper)
+            .collect();
+        let (mut have, mut want) = (g.paper_only.clone(), expected);
+        have.sort();
+        want.sort();
+        if have != want {
             return Err(RecError::PaperOnlyNotOverridable);
         }
         if g.passed != (g.hard_failures.is_empty() && g.overridable_failures.is_empty()) {

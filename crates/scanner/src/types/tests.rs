@@ -299,7 +299,7 @@ fn paper_only_outside_the_overridable_list_is_rejected_naming_the_rule() {
         Recommendation::new(p.clone(), 30, 55).unwrap_err(),
         RecError::PaperOnlyNotOverridable
     );
-    p.gate.paper_only = vec![RuleId::G05];
+    p.gate.paper_only = vec![];
     assert!(Recommendation::new(p, 30, 55).is_ok());
 }
 
@@ -324,4 +324,34 @@ fn a_stated_reward_risk_that_does_not_match_the_levels_is_rejected() {
 fn reward_risk_is_none_when_stop_equals_entry() {
     assert_eq!(reward_risk(d(100), d(100), d(110)), None);
     assert_eq!(reward_risk(d(102), d(96), d(110)), Some(d(8) / d(6)));
+}
+
+#[test]
+fn a_sell_reward_risk_on_the_best_fill_is_refused() {
+    let mut p = parts();
+    p.action = Action::Sell;
+    p.stop_loss = d(106);
+    p.targets = vec![d(90)];
+    // Worst sell fill is the zone low (100): 10 / 6. The zone high (102) would give 12 / 4 = 3.
+    p.reward_risk = reward_risk(d(102), d(106), d(90)).unwrap();
+    assert_eq!(
+        Recommendation::new(p.clone(), 30, 55).unwrap_err(),
+        RecError::RewardRiskMismatch
+    );
+    p.reward_risk = reward_risk(d(100), d(106), d(90)).unwrap();
+    assert!(Recommendation::new(p, 30, 55).is_ok());
+}
+
+#[test]
+fn paper_only_must_be_exactly_the_paper_level_failures() {
+    // G01 is Paper level: leaving it out of `paper_only` would make it look like a Soft override.
+    let mut p = parts();
+    p.gate = GateSummary::from_verdict(&verdict(&[RuleId::G01, RuleId::G05]), t(18));
+    assert_eq!(p.gate.paper_only, vec![RuleId::G01]);
+    assert!(Recommendation::new(p.clone(), 30, 55).is_ok());
+    p.gate.paper_only = vec![];
+    assert_eq!(
+        Recommendation::new(p, 30, 55).unwrap_err(),
+        RecError::PaperOnlyNotOverridable
+    );
 }

@@ -225,7 +225,6 @@ pub fn run(
     decision_date: NaiveDate,
 ) -> Result<ScanOutput, ScanError> {
     let now = cx.clock.now_ist();
-    let families_total = count_families(strategies)?;
     let m_bars = market_bars_to(cx, market_bars, decision_date, now)?;
     let market = classify(m_bars, cx.regime, Series::Market, Extras::default())
         .map_err(|e| ScanError::MarketRegime(e.to_string()))?;
@@ -233,7 +232,7 @@ pub fn run(
     let mut sorted: Vec<&UniverseEntry> = universe.iter().collect();
     sorted.sort_by(|a, b| a.instrument.tradingsymbol.cmp(&b.instrument.tradingsymbol));
     let mut out = ScanOutput {
-        families_total,
+        families_total: count_families(strategies)?,
         ..ScanOutput::default()
     };
     for e in sorted {
@@ -311,9 +310,10 @@ pub fn run(
             portfolio: cx.portfolio,
             calendar: cx.calendar,
         };
-        let (hits, expired) = merge_by_family(strategies, &view, &ctx, (now, &sym));
-        out.dropped.extend(expired);
-        if !hits.is_empty() {
+        let (hits, expired) = merge_by_family(strategies, &view, &ctx, &Stamp { now, sym: &sym });
+        if hits.is_empty() {
+            out.dropped.extend(expired);
+        } else {
             out.candidates.push(Candidate {
                 instrument: e.instrument.clone(),
                 hits,
@@ -326,15 +326,23 @@ pub fn run(
     Ok(out)
 }
 
+/// The clock instant and the name a merge runs for. Expired signals are reported as drops only for
+/// a name that ends with no candidate (one list per name).
+struct Stamp<'a> {
+    now: chrono::DateTime<chrono_tz::Tz>,
+    sym: &'a str,
+}
+
 /// Run every strategy once; keep the best signal per family (an `Allowed` fit before a `Penalised`
 /// one, then highest reference reward:risk, then lowest strategy id) and list the others as merged. A cell the regime suppresses is dropped.
 fn merge_by_family(
     strategies: &mut [Box<dyn Strategy>],
     view: &DataView<'_>,
     ctx: &StrategyContext<'_>,
-    (now, sym): (chrono::DateTime<chrono_tz::Tz>, &str),
+    stamp: &Stamp<'_>,
 ) -> (Vec<Hit>, Vec<(String, DropReason)>) {
     let (market, stock) = (ctx.market_regime, ctx.stock_regime);
+    let (now, sym) = (stamp.now, stamp.sym);
     let mut expired = Vec::new();
     let mut fam: BTreeMap<String, Vec<Hit>> = BTreeMap::new();
     for s in strategies.iter_mut() {
@@ -346,12 +354,11 @@ fn merge_by_family(
             continue;
         }
         if let Some(signal) = s.on_bar(view, ctx) {
-            if signal.valid_until <= now {
+            // Same rule as the backtest: live until the clock passes `valid_until`, so exactly at it is live.
+            if signal.valid_until < now {
                 expired.push((
                     sym.to_owned(),
-                    DropReason::SignalExpired {
-                        strategy_id: signal.strategy_id.to_owned(),
-                    },
+                    DropReason::SignalExpired(signal.strategy_id.to_owned()),
                 ));
                 continue;
             }
