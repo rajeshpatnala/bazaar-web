@@ -95,7 +95,7 @@ describe("F13 acceptance (T2)", () => {
     expect(opener).toHaveFocus();
   });
 
-  it("a preview 403 shows the fixed load error "Could not load the order details." (not the rule), offers no Approve and never calls approve", async () => {
+  it("a preview 403 shows the fixed load error (Could not load the order details.) (not the rule), offers no Approve and never calls approve", async () => {
     let approveCalls = 0;
     server.use(
       http.post("/api/v1/ideas/:id/paper-preview", () =>
