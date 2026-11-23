@@ -255,7 +255,7 @@ mod tests {
         let r = rig(0, 1, false, true).await;
         r.ex.guard.kill.engage("user", "t").await.unwrap();
         for _ in 0..3 {
-            assert!(place(&r, false).await.is_err());
+            assert_eq!(place(&r, false).await, Err(ExecError::KillSwitch));
         }
         r.ex.guard
             .kill
