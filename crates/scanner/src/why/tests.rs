@@ -760,3 +760,25 @@ fn a_carried_event_warning_is_not_shown_as_no_events() {
     let e = line(&l, "A date to know is near");
     assert!(!e.contains("No results or policy dates"), "{e}");
 }
+
+#[test]
+fn gate_line_shows_an_id_once_when_lists_overlap() {
+    // In hard, paper_only and overridable: shown once, as not overridable.
+    let mut g = gate(&[]);
+    g.passed = false;
+    g.hard_failures = vec![RuleId::G01];
+    g.paper_only = vec![RuleId::G01];
+    g.overridable_failures = vec![RuleId::G01];
+    assert_eq!(
+        gate_line(&g),
+        "Blocked by the safety checks: failed checks that cannot be overridden (G01)."
+    );
+    // In hard and overridable: hard only, no "written reason".
+    let mut g = gate(&[]);
+    g.passed = false;
+    g.hard_failures = vec![RuleId::G05];
+    g.overridable_failures = vec![RuleId::G05];
+    let s = gate_line(&g);
+    assert!(!s.contains("written reason"), "{s}");
+    assert!(s.contains("cannot be overridden (G05)"), "{s}");
+}

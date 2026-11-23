@@ -334,7 +334,9 @@ fn gate_line(g: &GateSummary) -> String {
     let mut paper = Vec::new();
     for r in &g.paper_only {
         if g.overridable_failures.contains(r) {
-            paper.push(*r);
+            if !hard.contains(r) {
+                paper.push(*r);
+            }
         } else if !hard.contains(r) {
             hard.push(*r);
         }

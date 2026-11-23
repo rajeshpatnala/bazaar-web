@@ -850,10 +850,14 @@ fn fixture_scan_to_gate_to_why_end_to_end() {
     let seen = rt::Seen::default();
     let env = rt::env();
     let mut strategies = vec![rt::fake("a", 2, bazaar_regime::Trend::Up, &seen)];
-    let uni = [
+    // Costs (`Flat`, Rs 20) and evidence (`E2eEvidence`) are stubs: the cost model and the real
+    // evidence stats are covered in the risk and backtest crates, not here.
+    let mut uni = [
         rt::entry("AAA", rt::rising(rt::N, 1_000_000)),
         rt::entry("BBB", rt::rising(rt::N, 1_000_000)),
     ];
+    // A distinct token, so the price map (token 1 only) would expose a token mix-up.
+    uni[1].instrument.instrument_token = 2;
     let out = rt::scan(
         &env,
         &rt::fresh_ban(&["BBB"]),
@@ -865,10 +869,20 @@ fn fixture_scan_to_gate_to_why_end_to_end() {
     // The banned name is dropped with a reason, never scored.
     assert_eq!(out.candidates.len(), 1);
     assert!(
-        out.dropped.iter().any(|(s, _)| s == "BBB"),
+        out.dropped
+            .iter()
+            .any(|(s, r)| s == "BBB" && *r == crate::universe::DropReason::Banned),
         "{:?}",
         out.dropped
     );
+    // No look-ahead: the strategy saw bars up to the decision bar and none later.
+    let decision = rt::day(rt::N - 1).date_naive();
+    {
+        let seen = seen.lock().unwrap();
+        assert!(!seen.is_empty());
+        assert!(seen.iter().all(|(_, day)| *day <= decision), "{seen:?}");
+        assert_eq!(seen.last().map(|(_, day)| *day), Some(decision));
+    }
 
     let sc = scanner_cfg(5);
     let bar = rt::day(rt::N - 1);
@@ -915,10 +929,11 @@ fn fixture_scan_to_gate_to_why_end_to_end() {
 
     let lines = crate::why::render(rec);
     let text = lines.join("\n");
-    assert!(
-        text.contains(&format!("Quantity {}", rec.size().qty)),
-        "{text}"
-    );
+    // Sizing: within the 1% risk budget of Rs 1,00,000 (risk/share 8 at the worst fill, lot 1).
+    let qty = rec.size().qty;
+    assert!(qty > 0 && Decimal::from(qty) * d("8") <= d("1000"), "{qty}");
+    assert_eq!(rec.size().lots, qty);
+    assert!(text.contains(&format!("Quantity {qty}")), "{text}");
     assert!(text.contains("Target Rs 110."), "{text}");
     assert!(text.contains("The risk-rule checks passed"), "{text}");
     assert!(
