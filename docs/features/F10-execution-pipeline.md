@@ -99,6 +99,7 @@ Fix round (PR 133): `reload` is idempotent (ids already queued or finished are s
 - RISK-136-4: store-backed position check on reopen (positions were a fake in BZ-205 S5). Target: BZ-511 S2.
 - RISK-136-5: real GateContext / ModeEvidence from `risk.toml` and the store; test paper default and `auto` locked; force `mode.live=Known(false)` without `live-trading`. Target: BZ-511 S1.
 - RISK-136-6: assert the listed `risk.toml` keys by name (`io_timeout_secs`, `breaker_engages_kill_switch`, `kill_allow_reduce_only`, ...), not a count of "owner confirmed 2026-11-22". Target: BZ-511 S1.
+- RISK-137-5 (merge condition for BZ-511 S1): the decision-route PR includes the real `GateContext`/`ModeEvidence` test (RISK-136-5) and a test that a non-exit intent is refused while the kill switch is engaged (RISK-100-2).
 - SEC-136-1: debug assertion that `SqliteGateContext::inputs` runs inside `spawn_blocking`. Target: BZ-511 S1.
 - `GuardedExecutor` (slice 2) and the pipeline (slice 3) must both call `KillSwitch::admits`.
 - Defer RISK-96-8 to slice 3; RISK-96-5 to slice 2; SEC-96-2 anchor of latest (seq, hash) to slice 8; CR-96-5 to slice 5.

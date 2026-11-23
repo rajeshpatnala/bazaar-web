@@ -16,6 +16,7 @@ export const statusFixture: S["StatusDto"] = {
   version: "0.1.0",
   mode: "paper",
   live_enabled: false,
+  alarms: [],
 };
 export const problemFixture = (status: number, code: string): S["Problem"] => ({
   type: `urn:bazaar:problem:${code}`,

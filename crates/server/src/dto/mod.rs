@@ -73,9 +73,9 @@ impl From<Alarm> for AlarmDto {
             since,
         } = a;
         Self {
-            code,
+            code: escape_control(&code),
             message: escape_control(&message),
-            since,
+            since: escape_control(&since),
         }
     }
 }
@@ -127,21 +127,33 @@ impl From<KillSwitchReading> for KillSwitchDto {
             readable,
         } = r;
         Self {
-            engaged,
+            // Unreadable counts as engaged, whatever the port said (fail closed, RISK-137-2).
+            engaged: engaged || !readable,
             readable,
             reason: reason.as_deref().map(escape_control),
         }
     }
 }
 
-/// Escape control characters (ESC, BEL, newlines, NUL, C1 ...) as `\xNN` / `\u{N}` so stored
-/// text cannot rewrite a terminal or forge a log line. A literal backslash is kept as is.
+/// Unicode format characters (category Cf: soft hyphen, zero-width, bidi marks and overrides,
+/// word joiner, invisible operators, BOM, tags) plus the line and paragraph separators. They can
+/// reorder or hide text, so they are escaped too (SEC-137-1, RISK-137-4).
+fn is_format_or_separator(c: char) -> bool {
+    matches!(u32::from(c),
+        0x00AD | 0x0600..=0x0605 | 0x061C | 0x06DD | 0x070F | 0x180E
+        | 0x200B..=0x200F | 0x2028..=0x202E | 0x2060..=0x206F | 0xFEFF
+        | 0xFFF9..=0xFFFB | 0x1_D173..=0x1_D17A | 0xE_0001 | 0xE_0020..=0xE_007F)
+}
+
+/// Escape control and format characters (ESC, BEL, newlines, NUL, C1, bidi overrides, U+2028/9 ...)
+/// as `\xNN` / `\u{N}` so stored text cannot rewrite a terminal or forge a log line. A literal
+/// backslash is kept as is.
 #[must_use]
 pub fn escape_control(s: &str) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        if c.is_control() {
+        if c.is_control() || is_format_or_separator(c) {
             let n = u32::from(c);
             let _ = if n <= 0xff {
                 write!(out, "\\x{n:02x}")
@@ -172,7 +184,12 @@ mod tests {
     fn escape_control_escapes_ansi_bel_newline_and_keeps_text() {
         assert_eq!(escape_control("\x1b[31mx\x07"), "\\x1b[31mx\\x07");
         assert_eq!(escape_control("a\nb\r\0"), "a\\x0ab\\x0d\\x00");
-        assert_eq!(escape_control("\u{85}\u{2028}x"), "\\x85\u{2028}x");
+        assert_eq!(escape_control("\u{85}\u{2028}x"), "\\x85\\u{2028}x");
+        assert_eq!(
+            escape_control("a\u{202e}b\u{2066}\u{200b}\u{feff}\u{2029}"),
+            "a\\u{202e}b\\u{2066}\\u{200b}\\u{feff}\\u{2029}"
+        );
+        assert_eq!(escape_control("हिन्दी"), "हिन्दी");
         assert_eq!(escape_control("plain ₹ text"), "plain ₹ text");
     }
 
@@ -188,13 +205,26 @@ mod tests {
     }
 
     #[test]
-    fn alarm_dto_escapes_message() {
-        let d = AlarmDto::from(Alarm {
-            code: "c".into(),
-            message: "m\x1b".into(),
-            since: "t".into(),
+    fn unreadable_kill_switch_is_engaged_even_if_port_said_not() {
+        let d = KillSwitchDto::from(KillSwitchReading {
+            engaged: false,
+            reason: None,
+            readable: false,
         });
-        assert_eq!(d.message, "m\\x1b");
+        assert!(d.engaged && !d.readable);
+    }
+
+    #[test]
+    fn alarm_dto_escapes_code_message_and_since() {
+        let d = AlarmDto::from(Alarm {
+            code: "c\x1b".into(),
+            message: "m\x1b".into(),
+            since: "t\x07".into(),
+        });
+        assert_eq!(
+            (d.code.as_str(), d.message.as_str(), d.since.as_str()),
+            ("c\\x1b", "m\\x1b", "t\\x07")
+        );
     }
 
     #[test]

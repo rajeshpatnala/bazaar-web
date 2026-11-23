@@ -46,6 +46,21 @@ pub struct Alarm {
     pub since: String,
 }
 
+/// Byte caps for alarm fields (SEC-137-2).
+pub const MAX_CODE: usize = 64;
+/// Byte cap for an alarm message.
+pub const MAX_MESSAGE: usize = 512;
+/// Byte cap for an alarm `since` stamp.
+pub const MAX_SINCE: usize = 64;
+
+fn cap(s: &str, max: usize) -> String {
+    let mut end = s.len().min(max);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_owned()
+}
+
 /// Alarms raised by background drivers and shown on `GET /status`. Keyed by code: raising an
 /// alarm that is already up keeps its first `since`.
 #[derive(Debug, Clone, Default)]
@@ -62,12 +77,14 @@ impl AlarmBoard {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Raise (or keep) the alarm `code`.
+    /// Raise (or keep) the alarm `code`. Fields are cut to [`MAX_CODE`] / [`MAX_MESSAGE`] /
+    /// [`MAX_SINCE`] bytes (on a char boundary) so a caller cannot grow the board without bound.
     pub fn raise(&self, code: &str, message: &str, now_rfc3339: &str) {
-        self.map().entry(code.to_owned()).or_insert_with(|| Alarm {
-            code: code.to_owned(),
-            message: message.to_owned(),
-            since: now_rfc3339.to_owned(),
+        let code = cap(code, MAX_CODE);
+        self.map().entry(code.clone()).or_insert_with(|| Alarm {
+            code,
+            message: cap(message, MAX_MESSAGE),
+            since: cap(now_rfc3339, MAX_SINCE),
         });
     }
 
@@ -97,9 +114,10 @@ pub struct AppState {
     /// Built web UI directory (`web/dist`); may be missing.
     pub web_dist: PathBuf,
     /// The pipeline front door; `None` until the runtime wires it (routes then answer 503).
-    pub pipeline: Option<PipelineHandle>,
-    /// Read-only kill-switch view; `None` until wired.
-    pub kill_switch: Option<Arc<dyn KillSwitchRead>>,
+    /// Private: only `with_pipeline` sets it, together with `kill_switch` (RISK-137-3).
+    pipeline: Option<PipelineHandle>,
+    /// Read-only kill-switch view; `None` until wired; set only with `pipeline`.
+    kill_switch: Option<Arc<dyn KillSwitchRead>>,
     /// Alarms for `GET /status`.
     pub alarms: AlarmBoard,
 }
@@ -153,7 +171,8 @@ impl AppState {
         self.pipeline.as_ref().ok_or(ApiError::PipelineClosed)
     }
 
-    /// The kill-switch read port, or 503 when it is not wired.
+    /// The kill-switch read port, or 503 `pipeline_closed` when it is not wired. Acceptable for
+    /// S0; the kill-switch routes (S3/S4) document and test the unwired answer.
     pub fn kill_switch(&self) -> Result<&Arc<dyn KillSwitchRead>, ApiError> {
         self.kill_switch.as_ref().ok_or(ApiError::PipelineClosed)
     }
@@ -167,8 +186,39 @@ impl FromRef<AppState> for Security {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
+pub(crate) mod tests_support {
+    use bazaar_core::testutil::FakeClock;
+    use chrono::TimeZone;
+
+    use super::*;
+
+    pub(crate) fn state() -> AppState {
+        let t = chrono_tz::Asia::Kolkata
+            .with_ymd_and_hms(2026, 1, 5, 10, 0, 0)
+            .unwrap();
+        AppState::new(
+            Security::new(8787, false).unwrap(),
+            Arc::new(FakeClock::at(t)),
+            ExecutionMode::Paper,
+            PathBuf::new(),
+        )
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raise_caps_field_lengths_on_char_boundaries() {
+        let b = AlarmBoard::new();
+        b.raise(&"c".repeat(100), &"é".repeat(600), &"s".repeat(100));
+        let a = &b.snapshot()[0];
+        assert_eq!(a.code.len(), MAX_CODE);
+        assert!(a.message.len() <= MAX_MESSAGE && a.message.chars().all(|c| c == 'é'));
+        assert_eq!(a.since.len(), MAX_SINCE);
+    }
 
     #[test]
     fn alarm_board_raises_once_keeps_first_since_and_clears() {
@@ -188,26 +238,5 @@ mod tests {
         let st = crate::state::tests_support::state();
         assert_eq!(st.pipeline().unwrap_err(), ApiError::PipelineClosed);
         assert!(st.kill_switch().is_err());
-    }
-}
-
-#[cfg(test)]
-pub(crate) mod tests_support {
-    use bazaar_core::testutil::FakeClock;
-    use chrono::TimeZone;
-
-    use super::*;
-
-    #[allow(clippy::unwrap_used)]
-    pub(crate) fn state() -> AppState {
-        let t = chrono_tz::Asia::Kolkata
-            .with_ymd_and_hms(2026, 1, 5, 10, 0, 0)
-            .unwrap();
-        AppState::new(
-            Security::new(8787, false).unwrap(),
-            Arc::new(FakeClock::at(t)),
-            ExecutionMode::Paper,
-            PathBuf::new(),
-        )
     }
 }
