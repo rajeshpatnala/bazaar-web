@@ -928,6 +928,63 @@ mod tests {
         assert_eq!(r.ex.position("ABC", Product::Mis), 0);
     }
 
+    /// RISK-142-7: the watch over a real executor with an audit outage: outstanding while the
+    /// square-off is blocked, cleared when the retried fill completes.
+    #[tokio::test]
+    async fn watch_follows_a_real_blocked_square_off_until_it_fills() {
+        let r = rig("100000").await;
+        let mut w = crate::watch::SquareOffWatch::default();
+        open_mis_and_reach_square_off(&r).await;
+        r.audit.fail.store(true, Ordering::SeqCst);
+        w.on_tick(&r.ex.on_tick(&so_tick(&r, 1)).await);
+        assert_eq!(w.outstanding(), 1);
+        w.on_tick(&r.ex.on_tick(&so_tick(&r, 2)).await);
+        assert_eq!(w.outstanding(), 1, "still blocked on the retry");
+        r.audit.fail.store(false, Ordering::SeqCst);
+        w.on_tick(&r.ex.on_tick(&so_tick(&r, 3)).await);
+        assert_eq!(w.outstanding(), 0);
+        assert_eq!(r.ex.position("ABC", Product::Mis), 0);
+    }
+
+    #[test]
+    fn watch_ignores_partial_fills_and_other_orders() {
+        use crate::fill::{FillReason, SimFill};
+        let fill = |id: u128, complete: bool| SimFill {
+            id: IntentId(id),
+            symbol: "ABC".into(),
+            side: Side::Sell,
+            qty: 1,
+            price: d("50"),
+            product: Product::Mis,
+            at: at(13, 30, 1),
+            complete,
+            reason: FillReason::SquareOff,
+        };
+        let mut w = crate::watch::SquareOffWatch::default();
+        w.on_tick(&TickOutcome {
+            blocked_square_offs: vec![(IntentId(5), ExecError::Storage)],
+            ..TickOutcome::default()
+        });
+        for f in [fill(5, false), fill(6, true)] {
+            w.on_tick(&TickOutcome {
+                fills: vec![f],
+                ..TickOutcome::default()
+            });
+            assert_eq!(w.outstanding(), 1);
+        }
+        w.on_tick(&TickOutcome {
+            fills: vec![fill(5, true)],
+            ..TickOutcome::default()
+        });
+        assert_eq!(w.outstanding(), 0);
+        let mut c = ClockOutcome::default();
+        c.square_off.failed.push("ABC".into());
+        w.on_clock(&c);
+        assert_eq!(w.outstanding(), 1);
+        w.on_clock(&ClockOutcome::default());
+        assert_eq!(w.outstanding(), 0);
+    }
+
     #[tokio::test]
     async fn out_of_session_ticks_never_fill_even_when_the_caller_is_wrong() {
         let r = rig("100000").await;

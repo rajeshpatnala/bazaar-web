@@ -1,12 +1,9 @@
 //! `bazaar-server` binary: `serve` (loopback only) and `openapi`.
 
-use std::{io::Write as _, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{future::IntoFuture as _, io::Write as _, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use anyhow::Context as _;
 use bazaar_cli::commands::DB_FILE;
-
-/// How often the tick driver runs its clock pass (expiry, square-off, alarms).
-const DRIVER_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 use bazaar_core::{calendar::MarketCalendar, clock::SystemClock, config::Config};
 use bazaar_server::{
     app, runtime,
@@ -14,6 +11,9 @@ use bazaar_server::{
     state::AppState,
 };
 use clap::{Parser, Subcommand};
+
+/// How often the tick driver runs its clock pass (expiry, square-off, alarms).
+const DRIVER_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Default port (matches `.env.example` and the Kite redirect URL).
 const DEFAULT_PORT: u16 = 8787;
@@ -188,19 +188,24 @@ async fn serve(port_flag: Option<u16>) -> anyhow::Result<()> {
     // The tick driver (clock work, approval expiry, square-off alarm) stops after the server
     // drains, so a final pass runs before exit.
     let cancel = tokio_util::sync::CancellationToken::new();
-    let driver = runtime::Driver::new(
+    // `driver` stays alive here: the quote feed slice calls `driver.on_tick` (F10 HARD CONDITION).
+    let driver = Arc::new(runtime::Driver::new(
         rt.paper.clone(),
         rt.handle.clone(),
         state.alarms.clone(),
         state.clock.clone(),
-    );
-    let driver_task = tokio::spawn(driver.run(DRIVER_EVERY, cancel.clone()));
-    let served = axum::serve(listener, app::build(state))
+    ));
+    let mut driver_task = tokio::spawn(driver.clone().run(DRIVER_EVERY, cancel.clone()));
+    let serve = axum::serve(listener, app::build(state))
         .with_graceful_shutdown(shutdown_signal())
-        .await;
+        .into_future();
+    // RISK-142-1: if the driver ends or panics first, serving stops (fail closed), loudly.
+    let served = runtime::serve_while_driven(serve, &mut driver_task)
+        .await
+        .inspect_err(|e| tracing::error!(error = %e, "stopping the server"))?;
     cancel.cancel();
-    if driver_task.await.is_err() {
-        tracing::error!("tick driver ended abnormally");
+    if !runtime::stop(&mut driver_task, runtime::STOP_WAIT).await {
+        tracing::error!("tick driver did not stop cleanly");
     }
     served?;
     Ok(())

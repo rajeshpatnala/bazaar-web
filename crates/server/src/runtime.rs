@@ -8,7 +8,7 @@
 
 mod driver;
 
-pub use driver::{ALARM_SQUARE_OFF, Driver, LedgerPnl};
+pub use driver::{ALARM_SQUARE_OFF, Driver, LedgerPnl, STOP_WAIT, serve_while_driven, stop};
 
 use std::path::Path;
 use std::sync::Arc;
@@ -307,7 +307,14 @@ async fn build(
     ));
     let ports = Ports {
         executor: SharedPaper(paper.clone()),
-        pnl: LedgerPnl::new(store.clone(), paper.clone(), clock.clone()),
+        pnl: LedgerPnl::new(
+            store.clone(),
+            {
+                let p = paper.clone();
+                Arc::new(move || p.has_open_positions())
+            },
+            clock.clone(),
+        ),
         quotes: UnavailableQuotes,
         base: ProdBase,
         clock,
@@ -572,6 +579,36 @@ mod tests {
         let e = start(&db, RISK, c, calendar()).await;
         match e {
             Err(StartError::Paper(m)) => assert!(m.contains("open paper lots may exist"), "{m}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// RISK-142-7: charge lines alone are fine; an unknown line kind is refused.
+    #[tokio::test]
+    async fn reopen_accepts_charge_lines_and_refuses_an_unknown_kind() {
+        use bazaar_core::ports::LedgerEntry;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("x.db");
+        let c = clock();
+        drop(start(&db, RISK, c.clone(), calendar()).await.unwrap());
+        let store = bazaar_cli::compose::open_store(&db).await.unwrap();
+        let epoch = PaperLedgerRepo::current_epoch(&store).await.unwrap()[0].epoch;
+        let add = |kind: &str| LedgerEntry {
+            epoch,
+            kind: kind.into(),
+            amount: Decimal::from(-1),
+            ref_id: Some(3),
+            ts_ist_rfc3339: c.now_ist().to_rfc3339(),
+        };
+        PaperLedgerRepo::append(&store, add("charge"))
+            .await
+            .unwrap();
+        assert!(ensure_no_open_lots(&store).await.is_ok());
+        PaperLedgerRepo::append(&store, add("mystery"))
+            .await
+            .unwrap();
+        match ensure_no_open_lots(&store).await {
+            Err(StartError::Paper(m)) => assert_eq!(m, "ledger has an unknown line kind"),
             other => panic!("expected a refusal, got {other:?}"),
         }
     }
