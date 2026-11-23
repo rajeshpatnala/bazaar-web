@@ -14,11 +14,11 @@ use crate::{dto::AlarmDto, error::Problem, state::AppState};
         (status = 401, body = Problem, content_type = "application/problem+json"),
     ))]
 #[allow(clippy::unused_async)] // axum handlers must be async fns
-async fn list(State(s): State<AppState>) -> Json<Vec<AlarmDto>> {
+async fn list_alarms(State(s): State<AppState>) -> Json<Vec<AlarmDto>> {
     Json(s.alarms.snapshot().into_iter().map(Into::into).collect())
 }
 
 /// Routes of this module, relative to `/api/v1`.
 pub fn router() -> OpenApiRouter<AppState> {
-    OpenApiRouter::new().routes(routes!(list))
+    OpenApiRouter::new().routes(routes!(list_alarms))
 }

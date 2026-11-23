@@ -12,7 +12,7 @@ export interface paths {
             cookie?: never;
         };
         /** Alarms currently raised (empty when all is well). Text is escaped by `AlarmDto`. */
-        get: operations["list"];
+        get: operations["list_alarms"];
         put?: never;
         post?: never;
         delete?: never;
@@ -29,7 +29,7 @@ export interface paths {
             cookie?: never;
         };
         /** Orders waiting for a decision, with their expiry. */
-        get: operations["list"];
+        get: operations["list_approvals"];
         put?: never;
         post?: never;
         delete?: never;
@@ -299,7 +299,7 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    list: {
+    list_alarms: {
         parameters: {
             query?: never;
             header?: never;
@@ -326,7 +326,7 @@ export interface operations {
             };
         };
     };
-    list: {
+    list_approvals: {
         parameters: {
             query?: never;
             header?: never;
