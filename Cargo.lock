@@ -504,7 +504,6 @@ dependencies = [
  "chrono-tz",
  "csv",
  "rust_decimal",
- "sha2",
  "tempfile",
  "thiserror",
 ]
