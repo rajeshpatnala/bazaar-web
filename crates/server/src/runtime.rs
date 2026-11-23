@@ -1413,6 +1413,18 @@ mod tests {
             v
         }
 
+        async fn post_engage(&self) -> (u16, serde_json::Value) {
+            let req = Request::post("/api/v1/killswitch/engage")
+                .header(header::HOST, HOST)
+                .header(header::ORIGIN, ORIGIN)
+                .header(header::COOKIE, &self.cookie)
+                .header("x-csrf-token", &self.csrf)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"reason":"stop"}"#))
+                .unwrap();
+            call(&self.router, req).await
+        }
+
         async fn approve(&self, id: u128) -> serde_json::Value {
             self.approve_with(id, "key-0000001").await
         }
@@ -1464,6 +1476,59 @@ mod tests {
         )
     }
 
+    /// Run one SQL statement on the test database behind the runtime's back.
+    async fn sql(e: &Env, stmt: &str) {
+        let mut c = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&e.db)
+            .connect()
+            .await
+            .unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(stmt.to_owned()))
+            .execute(&mut c)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_engage_whose_save_fails_is_503_then_shows_latched_and_refuses_the_approve() {
+        let e = env(&["TESTEQ"]).await;
+        let rt = e.open().await;
+        let h = queued(&e, &rt).await;
+        // The store stays readable (off) but refuses the engage write.
+        sql(
+            &e,
+            "CREATE TRIGGER no_engage BEFORE UPDATE ON kill_switch \
+             BEGIN SELECT RAISE(ABORT, 'write refused'); END",
+        )
+        .await;
+        let (status, v) = h.post_engage().await;
+        assert_eq!(status, 503, "{v}");
+        assert_eq!(v["code"], "kill_switch_not_saved", "{v}");
+        assert!(rt.handle.kill_switch_latched());
+        assert_eq!(flags(&h.get_kill().await), (true, true, true));
+        let v = h.approve(1).await;
+        assert_eq!(v["outcome"], "guard_blocked", "{v}");
+        assert_eq!(v["detail"], "kill switch engaged", "{v}");
+        assert_eq!(rt.paper.working_count(), 0);
+        assert_eq!(
+            OrderRepo::get(&rt.store, 1).await.unwrap().unwrap().state,
+            "blocked"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_latched_engage_with_the_store_unreadable_shows_engaged_unreadable_latched() {
+        let e = env(&["TESTEQ"]).await;
+        let rt = e.open().await;
+        let h = http(&rt, &e.clock).await;
+        rt.handle
+            .set_kill_switch(true, "owner", "stop")
+            .await
+            .unwrap();
+        sql(&e, "DROP TABLE kill_switch").await;
+        assert_eq!(flags(&h.get_kill().await), (true, false, true));
+    }
+
     #[tokio::test]
     async fn an_engaged_latch_with_the_store_off_shows_engaged_and_refuses_the_approve() {
         let e = env(&["TESTEQ"]).await;
@@ -1496,11 +1561,36 @@ mod tests {
         let row = OrderRepo::get(&rt.store, 1).await.unwrap().unwrap();
         assert_eq!(row.state, "blocked");
         let rows = AuditRepo::read_all(&rt.store).await.unwrap();
-        let g: Vec<_> = rows
+        let blocked: Vec<_> = rows
             .iter()
             .filter(|r| r.draft.kind == "guard_blocked")
             .collect();
-        assert_eq!(g.len(), 1, "{rows:?}");
+        assert_eq!(blocked.len(), 1, "{rows:?}");
+        // Pin every audit row that moved: nothing placed, one guard_blocked, nothing else new.
+        let ks: Vec<&str> = rows.iter().map(|r| r.draft.kind.as_str()).collect();
+        assert_eq!(
+            ks,
+            [
+                "proposed",
+                "gate_passed",
+                "kill_switch_engaged",
+                "kill_switch_released",
+                "approve",
+                "guard_blocked"
+            ],
+            "no placed/fill row"
+        );
+        // The approvals table holds exactly the one decision, for order 1.
+        let mut conn = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&e.db)
+            .connect()
+            .await
+            .unwrap();
+        let ids: Vec<String> = sqlx::query_scalar("SELECT order_id FROM approvals")
+            .fetch_all(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(ids, ["1"]);
     }
 
     #[tokio::test]
