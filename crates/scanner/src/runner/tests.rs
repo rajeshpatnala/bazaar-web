@@ -29,6 +29,8 @@ impl BanList for FakeBan {
 struct Fake {
     meta: StrategyMeta,
     rr: i64,
+    /// Hours after the bar close that the signal stays valid.
+    valid_hours: i64,
     seen: Arc<Mutex<Vec<(usize, NaiveDate)>>>,
 }
 
@@ -60,7 +62,7 @@ impl Strategy for Fake {
                 rule_text: "t".into(),
             },
             facts: vec![],
-            valid_until: last,
+            valid_until: last + chrono::Duration::hours(self.valid_hours),
         })
     }
     fn manage(
@@ -87,11 +89,19 @@ fn fake_with(
     weak: bool,
     seen: &Seen,
 ) -> Box<dyn Strategy> {
+    Box::new(fake_raw(id, rr, stock_trend, weak, seen))
+}
+
+fn fake_struct(id: &'static str, seen: &Seen) -> Fake {
+    fake_raw(id, 2, Trend::Up, false, seen)
+}
+
+fn fake_raw(id: &'static str, rr: i64, stock_trend: Trend, weak: bool, seen: &Seen) -> Fake {
     let cells: Vec<_> = [VolState::Low, VolState::Normal, VolState::High]
         .into_iter()
         .map(|v| (stock_trend, v))
         .collect();
-    Box::new(Fake {
+    Fake {
         meta: StrategyMeta {
             id,
             name: id,
@@ -105,12 +115,13 @@ fn fake_with(
             penalty_weight: 0.5,
         },
         rr,
+        valid_hours: 96,
         seen: Arc::clone(seen),
-    })
+    }
 }
 
 fn day(i: usize) -> DateTime<Tz> {
-    let base = Kolkata.with_ymd_and_hms(2025, 1, 1, 15, 30, 0).unwrap();
+    let base = Kolkata.with_ymd_and_hms(2025, 12, 29, 15, 30, 0).unwrap();
     base + chrono::Duration::days(i64::try_from(i).unwrap())
 }
 
@@ -580,4 +591,188 @@ fn every_registered_strategy_has_an_explicit_family() {
     for f in bazaar_strategies::registry::factories() {
         assert_ne!(family_of(f.id()), f.id(), "{} needs a family arm", f.id());
     }
+}
+
+fn scan_on(
+    e: &Env,
+    now: DateTime<Tz>,
+    decision: NaiveDate,
+    strategies: &mut [Box<dyn Strategy>],
+    uni: &[UniverseEntry],
+    market: &[Candle],
+) -> Result<ScanOutput, ScanError> {
+    let (pf, clock) = (PortfolioView::default(), FixedClock(now));
+    let ban = FakeBan(BanListStatus::Available {
+        symbols: vec![],
+        as_of: Some(now),
+    });
+    let cx = ScanContext {
+        cfg: e.cfg.scanner.as_ref().unwrap(),
+        regime: &e.regime,
+        calendar: &e.cal,
+        portfolio: &pf,
+        ban_list: &ban,
+        ban_list_max_age_hours: 24,
+        clock: &clock,
+    };
+    run(&cx, strategies, uni, market, decision)
+}
+
+fn ist(d: u32, h: u32, m: u32) -> DateTime<Tz> {
+    Kolkata.with_ymd_and_hms(2026, 11, d, h, m, 0).unwrap()
+}
+
+#[test]
+fn a_friday_bar_scanned_on_monday_is_current_but_scanned_on_tuesday_is_stale() {
+    let (e, seen) = (env(), Seen::default());
+    let (uni, m) = ([entry("AAA", rising(N, 1_000_000))], rising(N, 1));
+    let friday = day(N - 1).date_naive();
+    assert_eq!(friday.to_string(), "2026-11-13");
+    let mut s = vec![fake("a", 2, Trend::Up, &seen)];
+    // Weekend and Monday before the close: the latest completed session is still Friday.
+    for now in [ist(14, 12, 0), ist(15, 12, 0), ist(16, 9, 0)] {
+        assert!(scan_on(&e, now, friday, &mut s, &uni, &m).is_ok(), "{now}");
+    }
+    // Monday after the close: Monday is the latest completed session, so Friday is stale.
+    assert!(matches!(
+        scan_on(&e, ist(16, 15, 30), friday, &mut s, &uni, &m),
+        Err(ScanError::StaleDecisionDate { decision, latest })
+            if decision == friday && latest.to_string() == "2026-11-16"
+    ));
+}
+
+#[test]
+fn a_holiday_gap_is_not_stale() {
+    // 2026-11-10 (Tuesday) is a holiday in config/calendar.toml: on Wednesday morning the
+    // latest completed session is Monday the 9th, so a Monday decision date is current.
+    let e = env();
+    let latest = latest_completed_session(&e.cal, ist(11, 9, 0)).unwrap();
+    assert_eq!(latest.to_string(), "2026-11-09");
+}
+
+#[test]
+fn the_bar_still_open_at_1529_is_the_existing_decision_bar_open_error_not_stale() {
+    let (e, seen) = (env(), Seen::default());
+    let (uni, m) = ([entry("AAA", rising(N, 1_000_000))], rising(N, 1));
+    let mut s = vec![fake("a", 2, Trend::Up, &seen)];
+    let r = scan_on(
+        &e,
+        ist(13, 15, 29),
+        day(N - 1).date_naive(),
+        &mut s,
+        &uni,
+        &m,
+    );
+    assert!(matches!(r, Err(ScanError::DecisionBarOpen)));
+    let r = scan_on(
+        &e,
+        ist(13, 15, 30),
+        day(N - 1).date_naive(),
+        &mut s,
+        &uni,
+        &m,
+    );
+    assert!(r.is_ok());
+}
+
+#[test]
+fn a_signal_past_its_valid_until_is_dropped_with_a_reason() {
+    let (e, seen) = (env(), Seen::default());
+    let (uni, m) = ([entry("AAA", rising(N, 1_000_000))], rising(N, 1));
+    let mut s = vec![Box::new(Fake {
+        valid_hours: 0,
+        ..fake_struct("a", &seen)
+    }) as Box<dyn Strategy>];
+    let o = scan_on(
+        &e,
+        ist(13, 15, 30),
+        day(N - 1).date_naive(),
+        &mut s,
+        &uni,
+        &m,
+    )
+    .unwrap();
+    assert_eq!(o.candidates.len(), 0);
+    assert_eq!(
+        dropped(&o, "AAA"),
+        DropReason::SignalExpired {
+            strategy_id: "a".into()
+        }
+    );
+}
+
+#[test]
+fn families_total_counts_enabled_families_not_hits() {
+    let (e, seen) = (env(), Seen::default());
+    let (uni, m) = ([entry("AAA", rising(N, 1_000_000))], rising(N, 1));
+    // Two strategies of one family plus one of another; only the first of them fires.
+    let mut s = vec![
+        fake("donchian_breakout", 2, Trend::Up, &seen),
+        fake("trend_pullback", 2, Trend::Down, &seen),
+        fake("bollinger_reversion", 2, Trend::Down, &seen),
+    ];
+    let o = scan_on(
+        &e,
+        ist(13, 15, 30),
+        day(N - 1).date_naive(),
+        &mut s,
+        &uni,
+        &m,
+    )
+    .unwrap();
+    assert_eq!(o.candidates[0].hits.len(), 1);
+    assert_eq!(o.families_total, 3);
+    let mut one = vec![fake("donchian_breakout", 2, Trend::Up, &seen)];
+    let o = scan_on(
+        &e,
+        ist(13, 15, 30),
+        day(N - 1).date_naive(),
+        &mut one,
+        &uni,
+        &m,
+    )
+    .unwrap();
+    assert_eq!(o.families_total, 1);
+    let mut none: Vec<Box<dyn Strategy>> = vec![];
+    assert!(matches!(
+        scan_on(
+            &e,
+            ist(13, 15, 30),
+            day(N - 1).date_naive(),
+            &mut none,
+            &uni,
+            &m
+        ),
+        Err(ScanError::NoStrategiesEnabled)
+    ));
+}
+
+#[test]
+fn a_short_shaped_signal_is_rejected_by_the_signal_contract() {
+    // CR-114-3 / D8: long-only by type, so no Buy-versus-Sell conflict can reach the runner.
+    let seen = Seen::default();
+    let mut f = fake_struct("a", &seen);
+    let view_bars = rising(40, 1);
+    let view = DataView::ending_at(&view_bars, 39).unwrap();
+    let e = env();
+    let inst = entry("AAA", vec![]).instrument;
+    let (pf, mreg) = (
+        PortfolioView::default(),
+        RegimeState::unknown(day(39), bazaar_regime::Fact::new("a", "b", "c")),
+    );
+    let ctx = StrategyContext {
+        instrument: &inst,
+        market_regime: &mreg,
+        stock_regime: &mreg,
+        portfolio: &pf,
+        calendar: &e.cal,
+    };
+    let mut sig = f.on_bar(&view, &ctx).unwrap();
+    // Short shape: stop above the entry zone.
+    sig.stop = Decimal::from(110);
+    sig.risk_per_share = sig.entry_high - sig.stop;
+    assert_eq!(
+        sig.validate(),
+        Err(bazaar_strategies::SignalError::StopNotBelowEntry)
+    );
 }

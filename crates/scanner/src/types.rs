@@ -3,7 +3,7 @@
 //! field is an error from [`Recommendation::new`].
 
 use bazaar_regime::RegimeState;
-use bazaar_risk::verdict::{GateVerdict, RuleId};
+use bazaar_risk::verdict::{GateVerdict, OverrideLevel, RuleId};
 use chrono::DateTime;
 use chrono_tz::Tz;
 use rust_decimal::Decimal;
@@ -137,6 +137,8 @@ pub struct GateSummary {
     pub passed: bool,
     pub hard_failures: Vec<RuleId>,
     pub overridable_failures: Vec<RuleId>,
+    /// The subset of `overridable_failures` that can be overridden in paper mode only.
+    pub paper_only: Vec<RuleId>,
     pub evaluated_at: DateTime<Tz>,
     pub config_hash: String,
 }
@@ -148,9 +150,13 @@ impl GateSummary {
     pub fn from_verdict(v: &GateVerdict, evaluated_at: DateTime<Tz>) -> Self {
         let mut hard = Vec::new();
         let mut soft = Vec::new();
+        let mut paper = Vec::new();
         for r in v.failures() {
             if !r.is_input_missing() && r.level().is_overridable() {
                 soft.push(r.rule());
+                if r.level() == OverrideLevel::Paper {
+                    paper.push(r.rule());
+                }
             } else {
                 hard.push(r.rule());
             }
@@ -159,10 +165,23 @@ impl GateSummary {
             passed: v.passed(),
             hard_failures: hard,
             overridable_failures: soft,
+            paper_only: paper,
             evaluated_at,
             config_hash: v.config_hash().as_str().to_owned(),
         }
     }
+}
+
+/// Reward:risk on the worst fill, price only: `|first target - worst entry| / |worst entry - stop|`.
+/// `None` when the stop equals the entry or the division overflows. Callers and
+/// [`Recommendation::new`] use this one formula, so a stated value can be checked exactly.
+#[must_use]
+pub fn reward_risk(worst_entry: Decimal, stop: Decimal, first_target: Decimal) -> Option<Decimal> {
+    let risk = (worst_entry - stop).abs();
+    if risk.is_zero() {
+        return None;
+    }
+    (first_target - worst_entry).abs().checked_div(risk)
 }
 
 /// Why a `Recommendation` could not be built.
@@ -188,6 +207,10 @@ pub enum RecError {
     NoRisk,
     #[error("reward:risk must be above zero")]
     BadRewardRisk,
+    #[error("reward:risk does not match (first target - worst entry) / (worst entry - stop)")]
+    RewardRiskMismatch,
+    #[error("paper-only failures are not a subset of the overridable failures")]
+    PaperOnlyNotOverridable,
     #[error("quantity must be above zero")]
     NoQuantity,
     #[error("at least one agreeing strategy is required")]
@@ -291,6 +314,12 @@ impl Recommendation {
         if p.reward_risk <= Decimal::ZERO {
             return Err(RecError::BadRewardRisk);
         }
+        // Recomputed from the levels on the worst fill; a stated value is never trusted.
+        let first = p.targets.first().copied().unwrap_or(hi);
+        let far = if buy { hi } else { lo };
+        if reward_risk(far, p.stop_loss, first) != Some(p.reward_risk) {
+            return Err(RecError::RewardRiskMismatch);
+        }
         if p.size.qty == 0 {
             return Err(RecError::NoQuantity);
         }
@@ -307,6 +336,12 @@ impl Recommendation {
             return Err(RecError::BadEvidence);
         }
         let g = &p.gate;
+        if g.paper_only
+            .iter()
+            .any(|r| !g.overridable_failures.contains(r))
+        {
+            return Err(RecError::PaperOnlyNotOverridable);
+        }
         if g.passed != (g.hard_failures.is_empty() && g.overridable_failures.is_empty()) {
             return Err(RecError::GateInconsistent);
         }

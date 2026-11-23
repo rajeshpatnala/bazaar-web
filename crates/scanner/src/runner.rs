@@ -10,6 +10,7 @@ use bazaar_core::clock::Clock;
 use bazaar_core::config::{ScannerConfig, StrategiesConfig};
 use bazaar_core::dataview::DataView;
 use bazaar_core::instrument::Instrument;
+use bazaar_core::segment::{InstrumentKind, Segment};
 use bazaar_regime::{Extras, Fit, RegimeParams, RegimeState, Series, classify};
 use bazaar_strategies::{ParamError, PortfolioView, Signal, Strategy, StrategyContext};
 use chrono::NaiveDate;
@@ -50,6 +51,15 @@ pub enum ScanError {
     DecisionBarOpen,
     #[error("market regime: {0}")]
     MarketRegime(String),
+    #[error("decision date {decision} is not the latest completed session ({latest})")]
+    StaleDecisionDate {
+        decision: NaiveDate,
+        latest: NaiveDate,
+    },
+    #[error("no strategy is enabled, so no family count exists")]
+    NoStrategiesEnabled,
+    #[error("calendar: {0}")]
+    Calendar(String),
 }
 
 /// Everything the runner reads besides the universe.
@@ -98,6 +108,8 @@ pub struct Candidate {
 pub struct ScanOutput {
     pub candidates: Vec<Candidate>,
     pub dropped: Vec<(String, DropReason)>,
+    /// Distinct families among the ENABLED strategies (>= 1), never counted from hits.
+    pub families_total: u32,
 }
 
 /// The strictest of the three ban-list age limits: `[scanner]`, risk.toml `events` and
@@ -131,20 +143,80 @@ pub fn build(cfg: &StrategiesConfig) -> Result<Built<'_>, ScanError> {
     Ok((bazaar_strategies::registry::build_all(cfg)?, scanner))
 }
 
+/// Distinct families of the enabled strategies (the list `build` made from the config).
+fn count_families(strategies: &[Box<dyn Strategy>]) -> Result<u32, ScanError> {
+    let fams: std::collections::BTreeSet<&str> =
+        strategies.iter().map(|s| family_of(s.meta().id)).collect();
+    match u32::try_from(fams.len()) {
+        Ok(n) if n >= 1 => Ok(n),
+        _ => Err(ScanError::NoStrategiesEnabled),
+    }
+}
+
+/// The latest equity session that has closed at `now`: today when it is a trading day past the
+/// close, else the previous trading day.
+fn latest_completed_session(
+    cal: &MarketCalendar,
+    now: chrono::DateTime<chrono_tz::Tz>,
+) -> Result<NaiveDate, ScanError> {
+    let cal_err = |e: bazaar_core::calendar::CalendarError| ScanError::Calendar(e.to_string());
+    let today = now.date_naive();
+    if cal
+        .is_trading_day(today, Segment::Equity)
+        .map_err(cal_err)?
+    {
+        let close = cal
+            .close_time(today, Segment::Equity, InstrumentKind::CashNonFno)
+            .map_err(cal_err)?;
+        if now.with_timezone(&chrono::Utc) >= close {
+            return Ok(today);
+        }
+    }
+    cal.prev_trading_day(today, Segment::Equity)
+        .map_err(cal_err)
+}
+
 fn upto_date(bars: &[Candle], date: NaiveDate) -> Option<usize> {
     bars.iter()
         .rposition(|b| b.close_time().date_naive() == date)
 }
 
+/// Market bars up to and including the decision bar: the decision date is the latest completed session or
+/// today's still-open one (reported as `DecisionBarOpen`), and its bar has closed by `now`.
+fn market_bars_to<'a>(
+    cx: &ScanContext<'_>,
+    market_bars: &'a [Candle],
+    decision_date: NaiveDate,
+    now: chrono::DateTime<chrono_tz::Tz>,
+) -> Result<&'a [Candle], ScanError> {
+    let latest = latest_completed_session(cx.calendar, now)?;
+    // A date after `latest` is today's open bar (or the future): `DecisionBarOpen` below says so.
+    if decision_date < latest {
+        return Err(ScanError::StaleDecisionDate {
+            decision: decision_date,
+            latest,
+        });
+    }
+    let m_end =
+        upto_date(market_bars, decision_date).ok_or(ScanError::NoMarketBar(decision_date))?;
+    if market_bars.get(m_end).is_none_or(|b| b.close_time() > now) {
+        return Err(ScanError::DecisionBarOpen);
+    }
+    Ok(market_bars.get(..=m_end).unwrap_or(market_bars))
+}
+
 /// Run `strategies` over `universe` at the closed bar of `decision_date`.
 ///
 /// Strategies are reused across names, so `on_bar` must keep no per-instrument state. Only Buy
-/// signals exist today (long-only); a Sell would need step 4's handling. The market regime uses no
+/// signals exist today: `Signal` is long-only by type (no side, stop below entry; a short-shaped one
+/// fails `Signal::validate`), so no conflicting Buy/Sell pair can arise. The first slice that adds a
+/// sell side must add `Warning::ConflictingSignals` reporting here (CR-114-3). The market regime uses no
 /// India VIX or breadth (`Extras::default()`): vol comes from realised vol only.
 ///
 /// # Errors
-/// No market bar on that date, the market bar closes after the clock, or the market regime
-/// cannot be built.
+/// `decision_date` older than the latest completed session at the clock, no market bar on that
+/// date, the market bar closes after the clock (a bar still open), no enabled strategy, or the
+/// market regime cannot be built.
 pub fn run(
     cx: &ScanContext<'_>,
     strategies: &mut [Box<dyn Strategy>],
@@ -152,19 +224,18 @@ pub fn run(
     market_bars: &[Candle],
     decision_date: NaiveDate,
 ) -> Result<ScanOutput, ScanError> {
-    let m_end =
-        upto_date(market_bars, decision_date).ok_or(ScanError::NoMarketBar(decision_date))?;
     let now = cx.clock.now_ist();
-    if market_bars.get(m_end).is_none_or(|b| b.close_time() > now) {
-        return Err(ScanError::DecisionBarOpen);
-    }
-    let m_bars = market_bars.get(..=m_end).unwrap_or(market_bars);
+    let families_total = count_families(strategies)?;
+    let m_bars = market_bars_to(cx, market_bars, decision_date, now)?;
     let market = classify(m_bars, cx.regime, Series::Market, Extras::default())
         .map_err(|e| ScanError::MarketRegime(e.to_string()))?;
     let banned = banned_set(&cx.ban_list.status(), now, cx.ban_list_max_age_hours);
     let mut sorted: Vec<&UniverseEntry> = universe.iter().collect();
     sorted.sort_by(|a, b| a.instrument.tradingsymbol.cmp(&b.instrument.tradingsymbol));
-    let mut out = ScanOutput::default();
+    let mut out = ScanOutput {
+        families_total,
+        ..ScanOutput::default()
+    };
     for e in sorted {
         let sym = e.instrument.tradingsymbol.clone();
         let drop = |out: &mut ScanOutput, r| out.dropped.push((sym.clone(), r));
@@ -240,7 +311,8 @@ pub fn run(
             portfolio: cx.portfolio,
             calendar: cx.calendar,
         };
-        let hits = merge_by_family(strategies, &view, &ctx, &market, &stock);
+        let (hits, expired) = merge_by_family(strategies, &view, &ctx, (now, &sym));
+        out.dropped.extend(expired);
         if !hits.is_empty() {
             out.candidates.push(Candidate {
                 instrument: e.instrument.clone(),
@@ -260,9 +332,10 @@ fn merge_by_family(
     strategies: &mut [Box<dyn Strategy>],
     view: &DataView<'_>,
     ctx: &StrategyContext<'_>,
-    market: &RegimeState,
-    stock: &RegimeState,
-) -> Vec<Hit> {
+    (now, sym): (chrono::DateTime<chrono_tz::Tz>, &str),
+) -> (Vec<Hit>, Vec<(String, DropReason)>) {
+    let (market, stock) = (ctx.market_regime, ctx.stock_regime);
+    let mut expired = Vec::new();
     let mut fam: BTreeMap<String, Vec<Hit>> = BTreeMap::new();
     for s in strategies.iter_mut() {
         let (fit_cells, penalty_weight) = {
@@ -273,6 +346,15 @@ fn merge_by_family(
             continue;
         }
         if let Some(signal) = s.on_bar(view, ctx) {
+            if signal.valid_until <= now {
+                expired.push((
+                    sym.to_owned(),
+                    DropReason::SignalExpired {
+                        strategy_id: signal.strategy_id.to_owned(),
+                    },
+                ));
+                continue;
+            }
             fam.entry(family_of(signal.strategy_id).to_owned())
                 .or_default()
                 .push(Hit {
@@ -284,7 +366,8 @@ fn merge_by_family(
                 });
         }
     }
-    fam.into_values()
+    let hits = fam
+        .into_values()
         .filter_map(|mut v| {
             v.sort_by(|a, b| {
                 matches!(a.fit, Fit::Penalised(_))
@@ -297,7 +380,8 @@ fn merge_by_family(
             best.merged_ids = it.map(|h| h.signal.strategy_id).collect();
             Some(best)
         })
-        .collect()
+        .collect();
+    (hits, expired)
 }
 
 #[cfg(test)]

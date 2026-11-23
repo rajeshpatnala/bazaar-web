@@ -21,7 +21,10 @@ Plan: `.agents/plans/F11-scanner.md`. Spec: `docs/strategy/F11-scanner-defaults.
 Evidence is empty until F9 runs (all recs `low_evidence`), no options structures, events calendar is a placeholder, equity long-only.
 
 ## Deferred
-- Step 2 review (PR 114): CR-114-3 defer: step 4 - Buy-versus-conflicting-signal report (AC3); strategies emit long Buy only until then. RISK-114-7 defer: step 4 gate - owner confirms `min_adv_inr` (G12) is not looser than `min_median_traded_value`; no code check before the owner confirms the figures.
+- Step 2 review (PR 114): ~~CR-114-3~~ closed in slice 4 (D8): `Signal` is long-only by type, so no Buy/Sell conflict can arise (test `a_short_shaped_signal_is_rejected_by_the_signal_contract`); re-deferred: the first slice that adds a sell side must add `Warning::ConflictingSignals` reporting in the runner (named in that slice's plan). RISK-114-7 (D9): the risk crate has no G12 rule and no `min_adv_inr`; the Rs 10 crore scanner floor is the only liquidity check until G12 exists (target: risk-guardian plan after F11); owner ack only.
+- ~~RISK-114-4 `StaleDecisionDate`~~ done in slice 4 (`run` errors when `decision_date` is older than the latest completed equity session; a signal past `valid_until` is dropped as `SignalExpired`).
+- ~~QUAN-118-4 / RISK-118-3 `families_total`~~ done in slice 4 (`ScanOutput.families_total`, distinct families of the enabled strategies, >= 1 else `NoStrategiesEnabled`).
+- ~~RISK-102-5 remainder~~ type done in slice 4 (`GateSummary.paper_only`, subset-checked in `Recommendation::new`); filled from the real verdict in slice 6 (already by `from_verdict`). ~~QUAN-102-6 remainder, reward_risk part~~ `Recommendation::new` re-derives `reward_risk` from the levels (`types::reward_risk`); the charges-inclusive `risk_rupees` formula stays with slice 5.
 - Rank by capped confidence, absolute log liquidity scale, golden fixtures (strategist): steps 2-3.
 - QUAN-102-7: round or reject entry, stop and targets to the instrument-master tick (test the stop 96.0333 case): step 4 (the tick comes from the instrument master the sizing step reads).
 - QUAN-102-6 remainder: charges-inclusive `risk_rupees` formula and the `reward_risk`-to-first-target check: step 4 (`risk::size` caller, tested there).
@@ -31,6 +34,9 @@ Evidence is empty until F9 runs (all recs `low_evidence`), no options structures
 - SEC-102-3: size caps on ban-list symbols and event lists belong to the F13 adapters (documented on the ports).
 - RISK-102-5 remainder: `GateSummary` fields stay public (checked for consistency in `new`); a per-failure rule level so the UI does not offer an override the mode forbids (G01 is Paper level) comes with the UI/step 4.
 - Steps 2-4 will be re-cut so each fits `max_slice_changed_lines` (step 1 carried the shared types).
+
+## Slice 4 note (guards + shared contracts)
+`result.rs`: `ScanResult` (private fields, verdict derived in `new`, no `Default`), `BlockedIdea`, `BlockReason`; runner guards above; calendar.toml covers 2026 only, so runner tests use dates in Nov 2026.
 
 ## Slice 2 note
 Universe filters (ban list fail closed, liquidity, circuit lock, history) and the runner (regimes to the closed bar, `DataView::ending_at`, per-family merge, `lookahead_` test) landed in `crates/scanner/src/{universe,runner}.rs`; accepted as one PR over the line budget.
