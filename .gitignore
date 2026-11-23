@@ -96,3 +96,6 @@ storybook-static/
 
 # --- agent-kit ---
 .agents/.usage-limits.json
+
+# macOS
+.DS_Store
