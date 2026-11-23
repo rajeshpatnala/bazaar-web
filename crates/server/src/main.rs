@@ -3,9 +3,10 @@
 use std::{io::Write as _, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use anyhow::Context as _;
-use bazaar_core::{clock::SystemClock, config::Config};
+use bazaar_cli::commands::DB_FILE;
+use bazaar_core::{calendar::MarketCalendar, clock::SystemClock, config::Config};
 use bazaar_server::{
-    app,
+    app, runtime,
     security::{Security, ensure_loopback, loopback_addr},
     state::AppState,
 };
@@ -115,12 +116,63 @@ async fn serve(port_flag: Option<u16>) -> anyhow::Result<()> {
     let dev = cfg!(debug_assertions);
     let addr = bind_addr(port)?;
     let security = Security::new(port, dev)?;
+    let clock: Arc<SystemClock> = Arc::new(SystemClock);
+    let data_dir = std::env::var_os("BAZAAR_DATA_DIR")
+        .filter(|v| !v.is_empty())
+        .map_or_else(|| PathBuf::from("data"), PathBuf::from);
+    // SEC-138-1: a directory we create is owner-only (0700); a pre-existing one is never
+    // chmod-ed, only warned about. The store restricts the database files to 0600.
+    let existed = data_dir.exists();
+    std::fs::create_dir_all(&data_dir).context("creating the data directory")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if existed {
+            let mode = std::fs::metadata(&data_dir)
+                .context("reading the data directory permissions")?
+                .permissions()
+                .mode();
+            if mode & 0o077 != 0 {
+                tracing::warn!(
+                    mode = format!("{:o}", mode & 0o777),
+                    "data directory is group/world accessible"
+                );
+            }
+        } else {
+            std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700))
+                .context("restricting the data directory")?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = existed;
+    let data_dir = std::fs::canonicalize(&data_dir).context("resolving the data directory")?;
+    tracing::info!(data_dir = %data_dir.display(), "using data directory");
+    let risk_toml =
+        std::fs::read_to_string(config_dir.join("risk.toml")).context("reading risk.toml")?;
+    // RISK-138-4: the pipeline and the app state must agree on the execution mode.
+    let pipeline_mode =
+        bazaar_core::config::parse_str::<bazaar_core::config::RiskConfig>(&risk_toml)
+            .context("parsing risk.toml")?
+            .mode
+            .execution_mode;
+    anyhow::ensure!(
+        pipeline_mode == config.risk.mode.execution_mode,
+        "execution mode differs between the pipeline and the loaded config"
+    );
+    let calendar = MarketCalendar::from_config(&config.calendar);
+    // Store open, build, reload once, spawn. Any error exits non-zero BEFORE the port is bound
+    // (RISK-133-3): nothing is served on a failed start.
+    let rt = runtime::start(&data_dir.join(DB_FILE), &risk_toml, clock.clone(), calendar)
+        .await
+        .context("starting the order pipeline")?;
+    tracing::info!(report = ?rt.report, "pipeline reloaded");
     let state = AppState::new(
         security.clone(),
-        Arc::new(SystemClock),
+        clock,
         config.risk.mode.execution_mode,
         PathBuf::from(WEB_DIST),
-    );
+    )
+    .with_pipeline(rt.handle.clone(), rt.kill_switch.clone());
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding {addr}"))?;

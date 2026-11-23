@@ -28,7 +28,7 @@ use bazaar_execution::ratelimit::RateLimiter;
 use bazaar_execution::types::{IntentId, OrderIntent};
 use bazaar_risk::baseline::LimitsBaseline;
 use bazaar_risk::config::GateConfig;
-use bazaar_risk::gate::CostModel;
+use bazaar_risk::gate::{CostModel, ModeEvidence};
 use bazaar_risk::types::{Side, Tri};
 use bazaar_store::SqliteStore;
 use rust_decimal::Decimal;
@@ -43,6 +43,24 @@ use tokio::runtime::Handle;
 /// The store's `RepoError`; `Corrupt` when any audit row was altered, removed or reordered.
 pub async fn open_store(path: &Path) -> Result<SqliteStore, RepoError> {
     SqliteStore::open_verified(path, chain_hash).await
+}
+
+/// Mode evidence for a production run (RISK-136-5): no approval digest (the pipeline binds the
+/// user's approval itself), every `auto` unlock flag `Known(false)` so `auto` stays locked, and
+/// `live` `Known(false)` without `live-trading` (`Unknown`, so blocked, with it).
+#[must_use]
+pub fn prod_mode_evidence() -> ModeEvidence {
+    ModeEvidence {
+        approval: None,
+        compliance_fresh: Tri::Known(false),
+        readiness_report: Tri::Known(false),
+        owner_opt_in: Tri::Known(false),
+        live: if cfg!(feature = "live-trading") {
+            Tri::Unknown
+        } else {
+            Tri::Known(false)
+        },
+    }
 }
 
 /// Cost model with no source: every cost is `Unknown`, so the gate blocks. The F9 cost model
@@ -138,6 +156,9 @@ impl<B: GateContext> SqliteGateContext<B> {
 
 impl<B: GateContext> GateContext for SqliteGateContext<B> {
     fn inputs(&self, intent: &OrderIntent) -> Option<GateInputsOwned> {
+        // SEC-136-1: `Handle::block_on` below panics when called on an async worker (tokio checks
+        // it in every build), so a call outside `spawn_blocking` fails loudly, never deadlocks;
+        // the server's `runtime` tests pin that.
         let mut inp = self.base.inputs(intent)?;
         let now = self.clock.now_ist();
         let (killed, pending) = self.handle.block_on(async {

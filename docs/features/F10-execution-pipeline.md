@@ -74,6 +74,7 @@ Fix round (PR 133): `reload` is idempotent (ids already queued or finished are s
 - The resume TTL is measured from the intent's `created_at`, stricter than the live path (queue time); this is intended.
 
 ## Deferred
+- BZ-511 S1 fix round (PR 138): RISK-138-7 - `CostModel` and `SpecSource` are fail-closed today (`UnknownCost`, `UnavailableCharges`, `UnknownSpecs`); the slice that wires the real charges and instrument specs into the runtime (the quote/charges wiring slice after S1) must replace them before any approve can pass. CR-138-3 - the paper square-off time is validated on the latest trading day for Equity/CashNonFno only (the segments the paper executor accepts); other segments need their own validation when the executor accepts them. The kill-switch reason text is pinned in `cli/tests/pipeline.rs` (a known quote is needed to reach the precheck); the server runtime tests cover the store state.
 - Config provenance (CR-130-1, RISK-130-2): the loader refuses unknown keys (`deny_unknown_fields`), so the 2026-11-22 owner confirmation of `[execution]` is recorded as comments plus a test (`confirmation_strings_are_recorded` in `execution/src/pipeline.rs`) that the exact string "owner confirmed 2026-11-22" is present in `config/risk.toml`, `config/data.toml` and `config/strategies.toml`. The `[hard_limits]` F10 ceilings stay unconfirmed.
 - Kill-switch reason (CR-130-4, CR-130-5, SEC-130-1): engage trims the reason and stores the same text in the audit payload and the repo; the pipeline and the store both cap actor and reason at 500 BYTES. Release stores the constant "released" (or "engage_never_persisted" for a latch that was never persisted); the operator context is the audit row's actor.
 - SEC-130-2: the stored reason is raw text (control characters and ANSI escapes are not stripped). Whoever prints `kill_switch.reason` (BZ-511 route/UI, logs) must escape it on output.
@@ -97,10 +98,12 @@ Fix round (PR 133): `reload` is idempotent (ids already queued or finished are s
 - RISK-96-11 closed 2026-11-22: owner confirmed 300 s approval TTL, 50 bps drift and the other [execution] defaults.
 - RISK-105-9 closed 2026-11-22: owner confirmed `breaker_engages_kill_switch = true`. Not blocking: the latch is restored from the audit log regardless.
 - RISK-136-4: store-backed position check on reopen (positions were a fake in BZ-205 S5). Target: BZ-511 S2.
-- RISK-136-5: real GateContext / ModeEvidence from `risk.toml` and the store; test paper default and `auto` locked; force `mode.live=Known(false)` without `live-trading`. Target: BZ-511 S1.
-- RISK-136-6: assert the listed `risk.toml` keys by name (`io_timeout_secs`, `breaker_engages_kill_switch`, `kill_allow_reduce_only`, ...), not a count of "owner confirmed 2026-11-22". Target: BZ-511 S1.
-- RISK-137-5 (merge condition for BZ-511 S1): the decision-route PR includes the real `GateContext`/`ModeEvidence` test (RISK-136-5) and a test that a non-exit intent is refused while the kill switch is engaged (RISK-100-2).
-- SEC-136-1: debug assertion that `SqliteGateContext::inputs` runs inside `spawn_blocking`. Target: BZ-511 S1.
+- ~~RISK-136-5: real GateContext / ModeEvidence from `risk.toml` and the store; test paper default and `auto` locked; force `mode.live=Known(false)` without `live-trading`. Target: BZ-511 S1.~~ Closed in BZ-511 S1.
+- ~~RISK-136-6: assert the listed `risk.toml` keys by name (`io_timeout_secs`, `breaker_engages_kill_switch`, `kill_allow_reduce_only`, ...), not a count of "owner confirmed 2026-11-22". Target: BZ-511 S1.~~ Closed in BZ-511 S1.
+- ~~RISK-137-5 (merge condition for BZ-511 S1): the decision-route PR includes the real `GateContext`/`ModeEvidence` test (RISK-136-5) and a test that a non-exit intent is refused while the kill switch is engaged (RISK-100-2).~~ Closed in BZ-511 S1 (RISK-136-5 and RISK-100-2 tests in `server/src/runtime.rs`).
+- ~~SEC-136-1: debug assertion that `SqliteGateContext::inputs` runs inside `spawn_blocking`. Target: BZ-511 S1.~~ Closed in BZ-511 S1.
+- SEC-136-1 closed in BZ-511 S1 as a test, not a debug assertion: `Handle::block_on` already panics on an async worker (tokio task ids exist in `spawn_blocking`, so they cannot tell the two apart).
+- BZ-511 S1 deviation: F9 `CostModel` as `ChargeSource` and `SpecSource` from the instrument store are NOT wired (the F9 model needs a `Leg` + DP ledger mapping; `SpecSource` is sync, the instrument repo async). Both fail closed (`UnavailableCharges`, `UnknownSpecs`). Target: a later F10 slice with the quote source.
 - `GuardedExecutor` (slice 2) and the pipeline (slice 3) must both call `KillSwitch::admits`.
 - Defer RISK-96-8 to slice 3; RISK-96-5 to slice 2; SEC-96-2 anchor of latest (seq, hash) to slice 8; CR-96-5 to slice 5.
 - Bound `paper_mis_square_off_ist` against the session calendar (CR-96-5); slice sizes for later F10 slices <= 400 lines (CR-96-6).

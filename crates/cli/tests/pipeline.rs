@@ -14,7 +14,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 
-use bazaar_cli::compose::{BuiltPipeline, Ports, UnknownCost, build_pipeline, open_store};
+use bazaar_cli::compose::{
+    BuiltPipeline, Ports, UnknownCost, build_pipeline, open_store, prod_mode_evidence,
+};
 use bazaar_core::calendar::MarketCalendar;
 use bazaar_core::clock::Clock;
 use bazaar_core::config::{CalendarConfig, RiskConfig, parse_str};
@@ -60,7 +62,7 @@ fn t0() -> DateTime<Tz> {
 // ---- fakes ---------------------------------------------------------------------------------
 
 #[derive(Default)]
-struct Held(Mutex<Vec<Position>>);
+struct Held(Mutex<Vec<Position>>, AtomicBool);
 
 fn long(qty: u32) -> Position {
     Position {
@@ -140,11 +142,8 @@ impl GateContext for Base {
                 },
             },
             mode: ModeEvidence {
-                approval: None,
-                compliance_fresh: Tri::Known(false),
-                readiness_report: Tri::Known(false),
-                owner_opt_in: Tri::Known(false),
-                live: Tri::Known(false),
+                live: Tri::Known(self.0.1.load(SeqCst)),
+                ..prod_mode_evidence()
             },
             entry_zone: Tri::Known(EntryZone {
                 low: d("49.5"),
@@ -220,12 +219,16 @@ impl ChargeSource for Fee {
 struct QuoteState {
     last: Mutex<Decimal>,
     lag_secs: Mutex<i64>,
+    down: AtomicBool,
     clock: Arc<FakeClock>,
 }
 struct Quotes(Arc<QuoteState>);
 impl QuoteSource for Quotes {
     async fn quote(&self, _: &str) -> Result<QuoteSnapshot, SourceError> {
         tokio::task::yield_now().await;
+        if self.0.down.load(SeqCst) {
+            return Err(SourceError::Unavailable);
+        }
         Ok(QuoteSnapshot {
             last: *self.0.last.lock().unwrap(),
             lower_circuit: None,
@@ -304,6 +307,7 @@ impl Env {
             quotes: Arc::new(QuoteState {
                 last: Mutex::new(d("50")),
                 lag_secs: Mutex::new(0),
+                down: AtomicBool::new(false),
                 clock: clock.clone(),
             }),
             clock,
@@ -406,8 +410,21 @@ fn owner_confirmed_values_reach_the_pipeline_config() {
     let cfg = PipelineConfig::from_section(&r.execution);
     assert_eq!(cfg.io_timeout(), std::time::Duration::from_secs(5));
     assert_eq!(cfg.approval_ttl_secs(), 300);
-    // The owner's confirmation is recorded in the file (the loader refuses extra keys).
-    assert!(OWNER_RISK.matches("owner confirmed 2026-11-22").count() >= 5);
+    // RISK-136-6: the owner-confirmed keys are asserted by name and value, not by a comment count.
+    let e = &r.execution;
+    assert_eq!(e.approval_ttl_secs, 300);
+    assert_eq!(e.max_quote_drift_bps, 50);
+    assert_eq!(e.max_orders_per_second, 1);
+    assert!(e.kill_allow_reduce_only);
+    assert_eq!(e.kill_switch_release_phrase, "RELEASE KILL SWITCH");
+    assert_eq!(e.paper_starting_cash_inr, d("100000"));
+    assert_eq!(e.paper_max_participation, d("0.1"));
+    assert_eq!(e.paper_stale_after_secs, 5);
+    assert_eq!(e.paper_mis_square_off_ist.to_string(), "15:15:00");
+    assert_eq!(e.paper_slippage_bps.equity, 5);
+    assert_eq!(e.paper_slippage_bps.equity_derivatives, 5);
+    assert_eq!(e.paper_slippage_bps.currency, 2);
+    assert_eq!(e.paper_slippage_bps.commodity, 5);
 }
 
 // ---- AC8 -----------------------------------------------------------------------------------
@@ -614,7 +631,7 @@ async fn kill_switch_reason_is_stored_and_the_gate_reads_it_from_the_store() {
 
     // Entries blocked at the gate (the context's kill state is the store's); a genuine exit
     // passes while `kill_allow_reduce_only` is true.
-    let entry = h.submit(env.intent(1, Side::Buy, 1, false)).await.unwrap();
+    let entry = h.submit(env.intent(1, Side::Buy, 10, false)).await.unwrap();
     assert!(blocked(&entry), "{entry:?}");
     assert_eq!(
         h.submit(env.intent(2, Side::Sell, 4, true)).await.unwrap(),
@@ -958,4 +975,119 @@ async fn a_second_decision_on_a_filled_order_is_a_conflict_and_writes_nothing() 
     assert_eq!(r.err(), Some(RepoError::Conflict));
     assert_eq!(AuditRepo::read_all(&store).await.unwrap().len(), before);
     assert_eq!(state(&store, 1).await, "filled");
+}
+
+// ---- RISK-138-2/3: mode comes from the real risk.toml; the gate refuses auto and live ----------
+
+fn reason(o: &Outcome) -> String {
+    match o {
+        Outcome::GateBlocked(r) => r.clone(),
+        other => panic!("expected a gate block, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn paper_mode_is_read_from_the_real_risk_toml_and_passes_a_fully_known_entry() {
+    let r: RiskConfig = parse_str(OWNER_RISK).unwrap();
+    assert_eq!(
+        r.mode.execution_mode,
+        bazaar_core::mode::ExecutionMode::Paper
+    );
+    let env = Env::new();
+    let (_s, h, _) = boot(&env).await;
+    let out = h.submit(env.intent(1, Side::Buy, 10, false)).await.unwrap();
+    assert_eq!(out, Outcome::Queued, "{out:?}");
+}
+
+#[tokio::test]
+async fn the_gate_refuses_auto_mode_with_the_production_evidence() {
+    let env = Env::new();
+    let auto = RISK.replace("execution_mode = \"paper\"", "execution_mode = \"auto\"");
+    assert_ne!(auto, RISK);
+    let (_s, mut pipe) = build_with(&env, Arc::new(KnownCost), &auto).await;
+    pipe.reload().await.unwrap();
+    let h = pipe.spawn();
+    let out = h.submit(env.intent(1, Side::Buy, 10, false)).await.unwrap();
+    assert!(reason(&out).contains("Auto mode is locked"), "{out:?}");
+    assert_eq!(env.placed(), Vec::<u128>::new());
+}
+
+#[tokio::test]
+async fn the_gate_refuses_live_routing_in_paper_mode() {
+    let env = Env::new();
+    env.held.1.store(true, SeqCst);
+    let (_s, h, _) = boot(&env).await;
+    let out = h.submit(env.intent(1, Side::Buy, 10, false)).await.unwrap();
+    assert!(
+        reason(&out).contains("Mode is paper, so orders cannot go to the live broker"),
+        "{out:?}"
+    );
+    assert_eq!(env.placed(), Vec::<u128>::new());
+}
+
+#[test]
+fn production_evidence_live_flag_follows_the_build() {
+    let m = prod_mode_evidence();
+    if cfg!(feature = "live-trading") {
+        assert_eq!(m.live, Tri::Unknown);
+    } else {
+        assert_eq!(m.live, Tri::Known(false));
+    }
+}
+
+#[tokio::test]
+async fn approve_is_blocked_with_no_quote_when_the_quote_feed_is_down() {
+    let env = Env::new();
+    let (_s, h, _) = boot(&env).await;
+    assert_eq!(
+        h.submit(env.intent(1, Side::Buy, 10, false)).await.unwrap(),
+        Outcome::Queued
+    );
+    env.quotes.down.store(true, SeqCst);
+    env.advance(2);
+    let out = h
+        .decide(IntentId(1), ApprovalDecision::Approve, OWNER)
+        .await
+        .unwrap();
+    assert!(reason(&out).contains("no fresh quote"), "{out:?}");
+    assert_eq!(env.placed(), Vec::<u128>::new());
+}
+
+// ---- CR-138-1 / RISK-138-1: the kill-switch reason is pinned, with a control and a bad state ----
+
+#[tokio::test]
+async fn a_non_exit_is_refused_for_the_kill_switch_reason_and_a_released_switch_passes() {
+    let env = Env::new();
+    let (_s, h, _) = boot(&env).await;
+    // Control: switch released, same entry is accepted.
+    assert_eq!(
+        h.submit(env.intent(1, Side::Buy, 10, false)).await.unwrap(),
+        Outcome::Queued
+    );
+    h.set_kill_switch(true, OWNER, "stop").await.unwrap();
+    let out = h.submit(env.intent(2, Side::Buy, 10, false)).await.unwrap();
+    assert!(
+        reason(&out).contains("kill switch engaged: only reduce_only exits are allowed"),
+        "{out:?}"
+    );
+    assert_eq!(env.placed(), Vec::<u128>::new());
+}
+
+#[tokio::test]
+async fn an_unreadable_kill_switch_state_blocks_with_the_kill_switch_reason() {
+    let env = Env::new();
+    let (_s, h, _) = boot(&env).await;
+    let mut c = SqliteConnectOptions::new()
+        .filename(&env.path)
+        .connect()
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE kill_switch")
+        .execute(&mut c)
+        .await
+        .unwrap();
+    c.close().await.unwrap();
+    let out = h.submit(env.intent(1, Side::Buy, 10, false)).await.unwrap();
+    assert!(reason(&out).contains("kill switch engaged"), "{out:?}");
+    assert_eq!(env.placed(), Vec::<u128>::new());
 }
