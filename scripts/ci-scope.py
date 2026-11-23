@@ -3,24 +3,29 @@
 
 usage: ci-scope.py <base-ref> [--full]
 Prints key=value lines (GITHUB_OUTPUT format): full, rust, web, packages.
-  full      yes = run the whole workspace (push, promotion, workflow_dispatch, shared files changed)
+  full      yes = run the whole workspace (push, promotion, workflow_dispatch, shared or unknown paths changed)
   rust      yes = run Rust lint/test jobs
   web       yes = run the web job
   packages  space-separated `-p <crate>` list for scoped runs (empty when full)
-Fails safe: any doubt (cannot diff, cannot read metadata) means full.
+Fails safe: any doubt or crash means full (reason on stderr).
+Test hooks: CI_SCOPE_FILES="a b" replaces the git diff; CI_SCOPE_CRASH=1 forces a crash.
 """
 import json
 import os
 import subprocess
 import sys
 
-RUST_PREFIX = ("crates/", "config/", "fixtures/", "scripts/")
-RUST_FILES = {"Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml", "clippy.toml", "deny.toml"}
-# changes here can affect every crate: run everything
-FULL_FILES = {"Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml", "clippy.toml", "deny.toml"}
-FULL_PREFIX = (".github/workflows/", "scripts/", "config/", "fixtures/")
+# Allowlist: only these paths may be skipped or scoped. Any other path (root files, .cargo/, justfile, scripts/,
+# config/, fixtures/, workflows, manifests, anything unknown) means a FULL run.
 WEB_PREFIX = ("web/",)
+DOCS_PREFIX = ("docs/", ".agents/", ".claude/")
+DOCS_FILES = {"CHANGELOG.md", "README.md", "AGENT-GUIDE.md", "AGENT-KIT.md", "AGENT-SETTINGS.md", "CLAUDE.md",
+              "version.txt", ".release-please-manifest.json"}
 TEST_DIRS = ("tests/", "benches/", "examples/")
+
+
+def why(msg):
+    print(f"ci-scope: {msg}", file=sys.stderr)
 
 
 def run(*cmd):
@@ -39,22 +44,32 @@ def main():
     if "--full" in sys.argv:
         return emit(True, True, True, [])
     try:
-        files = os.environ["CI_SCOPE_FILES"].split() if "CI_SCOPE_FILES" in os.environ else run("git", "diff", "--name-only", f"{base}...HEAD").split()  # env: test hook
-    except Exception:
+        if "CI_SCOPE_FILES" in os.environ:
+            files = os.environ["CI_SCOPE_FILES"].split()
+        else:
+            files = run("git", "diff", "--name-only", f"{base}...HEAD").split()
+    except Exception as e:
+        why(f"full run: cannot diff against {base} ({type(e).__name__})")
         return emit(True, True, True, [])
     if not files:
         return emit(False, False, False, [])
+    if os.environ.get("CI_SCOPE_CRASH"):
+        raise RuntimeError("forced crash (test)")
 
-    web = any(f.startswith(WEB_PREFIX) for f in files) or any(f.startswith(".github/workflows/ci") for f in files)
-    full = any(f in FULL_FILES or f.startswith(FULL_PREFIX) for f in files)
+    web = any(f.startswith(WEB_PREFIX) for f in files)
     crate_files = [f for f in files if f.startswith("crates/")]
-    rust = full or bool(crate_files)
+    other = [f for f in files if not (f.startswith(WEB_PREFIX + DOCS_PREFIX + ("crates/",)) or f in DOCS_FILES)]
+    if other:
+        why(f"full run: shared or unknown paths changed: {' '.join(other[:5])}")
+        return emit(True, True, True, [])
+
     pkgs = set()
-    if rust and not full:
+    if crate_files:
         try:
             meta = json.loads(run("cargo", "metadata", "--format-version", "1", "--no-deps", "--locked"))
-        except Exception:
-            return emit(True, True, web, [])
+        except Exception as e:
+            why(f"full run: cargo metadata failed ({type(e).__name__}; stale Cargo.lock with --locked?)")
+            return emit(True, True, True, [])
         ws = {p["name"]: p for p in meta["packages"]}
         by_dir = {p["manifest_path"].rsplit("/", 1)[0].split("/crates/")[-1]: p["name"] for p in meta["packages"]
                   if "/crates/" in p["manifest_path"]}
@@ -63,11 +78,11 @@ def main():
             d, _, rest = f[len("crates/"):].partition("/")
             name = by_dir.get(d)
             if name is None:
-                return emit(True, True, web, [])  # unknown layout
+                why(f"full run: unknown crate dir {d}")
+                return emit(True, True, True, [])
             direct.add(name)
             if not rest.startswith(TEST_DIRS):
                 src_changed.add(name)  # dependents only care about non-test changes
-        # reverse dependencies of crates whose non-test code changed
         rev = {n: set() for n in ws}
         for n, p in ws.items():
             for dep in p["dependencies"]:
@@ -80,7 +95,11 @@ def main():
                 if r not in pkgs:
                     pkgs.add(r)
                     todo.append(r)
-    emit(full, rust, web, pkgs)
+    emit(False, bool(crate_files), web, pkgs)
 
 
-main()
+try:
+    main()
+except BaseException as e:  # fail safe: a crash means a full run, never empty outputs
+    why(f"full run: scope script crashed ({type(e).__name__}: {e})")
+    emit(True, True, True, [])

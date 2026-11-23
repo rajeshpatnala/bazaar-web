@@ -47,10 +47,14 @@ jobs:
           EVENT: ${{ github.event_name }}
           BASE: ${{ github.base_ref }}
         run: |
+          set -eo pipefail   # a crash fails this job (and so the PR); it never leaves outputs empty
+          # Run the scope script from the base ref so a PR cannot edit its own gate (a PR that edits scripts/ or
+          # workflows is a full run anyway). Falls back to the head copy only while the base has none.
+          git show origin/develop:scripts/ci-scope.py > "$RUNNER_TEMP/ci-scope.py" 2>/dev/null || cp scripts/ci-scope.py "$RUNNER_TEMP/ci-scope.py"
           if [ "$EVENT" = pull_request ] && [ "$BASE" = develop ]; then
-            python3 scripts/ci-scope.py "origin/$BASE" | tee -a "$GITHUB_OUTPUT"
+            python3 "$RUNNER_TEMP/ci-scope.py" "origin/$BASE" | tee -a "$GITHUB_OUTPUT"
           else
-            python3 scripts/ci-scope.py origin/develop --full | tee -a "$GITHUB_OUTPUT"
+            python3 "$RUNNER_TEMP/ci-scope.py" origin/develop --full | tee -a "$GITHUB_OUTPUT"
           fi
 
   lint:
