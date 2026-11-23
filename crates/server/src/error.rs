@@ -13,6 +13,9 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use bazaar_execution::{
+    approval::Outcome, executor::ExecError, killswitch::ReleaseError, pipeline::PipelineError,
+};
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -77,6 +80,12 @@ pub enum ApiError {
     Validation(Vec<FieldError>),
     /// 429.
     RateLimited,
+    /// 409 a second decision on an already decided approval.
+    AlreadyDecided,
+    /// 503 the trading pipeline is stopped or not wired; nothing was done.
+    PipelineClosed,
+    /// 503 a store or audit write failed; nothing changed, safe to retry.
+    StorageUnavailable,
     /// 500; the cause is logged once by the caller, never sent.
     Internal,
 }
@@ -100,6 +109,8 @@ impl ApiError {
             Self::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Self::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::AlreadyDecided => StatusCode::CONFLICT,
+            Self::PipelineClosed | Self::StorageUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -122,6 +133,9 @@ impl ApiError {
             Self::UnsupportedMediaType => "unsupported_media_type",
             Self::Validation(_) => "validation_error",
             Self::RateLimited => "rate_limited",
+            Self::AlreadyDecided => "already_decided",
+            Self::PipelineClosed => "pipeline_closed",
+            Self::StorageUnavailable => "storage_unavailable",
             Self::Internal => "internal",
         }
     }
@@ -142,6 +156,9 @@ impl ApiError {
             Self::UnsupportedMediaType => "Unsupported media type",
             Self::Validation(_) => "Validation failed",
             Self::RateLimited => "Too many requests",
+            Self::AlreadyDecided => "Already decided",
+            Self::PipelineClosed => "Trading pipeline unavailable",
+            Self::StorageUnavailable => "Storage unavailable",
             Self::Internal => "Internal error",
         }
     }
@@ -162,6 +179,9 @@ impl ApiError {
             Self::UnsupportedMediaType => "Content-Type must be application/json.",
             Self::Validation(_) => "One or more fields are invalid.",
             Self::RateLimited => "Slow down and retry shortly.",
+            Self::AlreadyDecided => "This approval was already decided; nothing was sent again.",
+            Self::PipelineClosed => "The trading pipeline is not running. Nothing was done.",
+            Self::StorageUnavailable => "A storage write failed. Nothing changed; retry shortly.",
             Self::Internal => "Something went wrong on the server.",
         }
     }
@@ -209,6 +229,44 @@ impl IntoResponse for ApiError {
         res.headers_mut()
             .insert(header::CONTENT_TYPE, HeaderValue::from_static(PROBLEM_JSON));
         res
+    }
+}
+
+impl From<PipelineError> for ApiError {
+    /// Explicit match, no catch-all: a new pipeline error breaks the build until it is mapped.
+    fn from(e: PipelineError) -> Self {
+        match e {
+            PipelineError::TooLong => Self::Validation(vec![FieldError {
+                field: "text".to_owned(),
+                message: "Too long (500 bytes at most).".to_owned(),
+            }]),
+            PipelineError::Closed => Self::PipelineClosed,
+            PipelineError::Exec(ExecError::Storage)
+            | PipelineError::Release(ReleaseError::Storage) => Self::StorageUnavailable,
+            PipelineError::Release(ReleaseError::WrongPhrase) => {
+                Self::Validation(vec![FieldError {
+                    field: "phrase".to_owned(),
+                    message: "The release phrase does not match.".to_owned(),
+                }])
+            }
+            PipelineError::Exec(
+                ExecError::InvalidInput(_)
+                | ExecError::KillSwitch
+                | ExecError::BreakerTripped
+                | ExecError::RateLimited
+                | ExecError::InsufficientFunds
+                | ExecError::MarginUnavailable
+                | ExecError::Unknown,
+            ) => Self::Internal,
+        }
+    }
+}
+
+/// A decision on a finished intent is a 409; any other outcome passes through unchanged.
+pub fn reject_repeat(o: Outcome) -> Result<Outcome, ApiError> {
+    match o {
+        Outcome::AlreadyDecided(_) => Err(ApiError::AlreadyDecided),
+        other => Ok(other),
     }
 }
 
@@ -484,5 +542,42 @@ mod tests {
     fn internal_detail_is_generic() {
         let p = ApiError::Internal.problem();
         assert!(!p.detail.contains('/') && !p.detail.to_lowercase().contains("sql"));
+    }
+
+    #[test]
+    fn pipeline_errors_map_to_problems() {
+        let p = ApiError::from(PipelineError::TooLong);
+        assert_eq!(p.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(p.problem().errors.len(), 1);
+        let c = ApiError::from(PipelineError::Closed);
+        assert_eq!(
+            (c.status(), c.code()),
+            (StatusCode::SERVICE_UNAVAILABLE, "pipeline_closed")
+        );
+        for e in [
+            PipelineError::Exec(ExecError::Storage),
+            PipelineError::Release(ReleaseError::Storage),
+        ] {
+            let a = ApiError::from(e);
+            assert_eq!(
+                (a.status(), a.code()),
+                (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable")
+            );
+        }
+        let w = ApiError::from(PipelineError::Release(ReleaseError::WrongPhrase));
+        assert_eq!(w.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let i = ApiError::from(PipelineError::Exec(ExecError::Unknown));
+        assert_eq!(i, ApiError::Internal);
+    }
+
+    #[test]
+    fn repeat_decision_is_409_and_others_pass() {
+        let first = Outcome::AlreadyDecided(Box::new(Outcome::Declined));
+        let e = reject_repeat(first).unwrap_err();
+        assert_eq!(
+            (e.status(), e.code()),
+            (StatusCode::CONFLICT, "already_decided")
+        );
+        assert_eq!(reject_repeat(Outcome::Declined).unwrap(), Outcome::Declined);
     }
 }

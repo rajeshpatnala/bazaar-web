@@ -42,6 +42,15 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description One raised alarm. */
+        AlarmDto: {
+            /** @description Stable machine key, for example `square_off_blocked`. */
+            code: string;
+            /** @description User-safe text (control characters escaped). */
+            message: string;
+            /** @description When it was first raised, RFC 3339 IST. */
+            since: string;
+        };
         /** @description `GET /api/v1/auth/me`: proof of a live session plus what the UI needs for non-GET calls. */
         AuthMeDto: {
             /** @description Echo this in `X-CSRF-Token` on every non-GET request. */
@@ -51,12 +60,34 @@ export interface components {
             /** @description Execution mode from `risk.toml`. */
             mode: components["schemas"]["ModeDto"];
         };
+        /**
+         * @description Verdict wire values.
+         * @enum {string}
+         */
+        DecisionDto: "approve" | "decline";
+        /**
+         * @description The user's verdict on a pending approval. The actor is never in the body: the server takes it
+         *     from the session (SEC-132-1), so an `actor` field is rejected as unknown.
+         */
+        DecisionRequestDto: {
+            /** @description Approve or decline. */
+            decision: components["schemas"]["DecisionDto"];
+        };
         /** @description One field-level validation message (422). */
         FieldError: {
             /** @description Offending field. */
             field: string;
             /** @description User-safe message. */
             message: string;
+        };
+        /** @description `GET /api/v1/kill-switch`. */
+        KillSwitchDto: {
+            /** @description True when engaged, or when the state could not be read (fail closed). */
+            engaged: boolean;
+            /** @description False when the stored state could not be read. */
+            readable: boolean;
+            /** @description Last engage reason with control characters escaped (SEC-130-2); `null` if none. */
+            reason?: string | null;
         };
         /**
          * @description Execution mode on the wire (`snake_case`, same spelling as `risk.toml`).
@@ -83,6 +114,8 @@ export interface components {
         };
         /** @description `GET /api/v1/status` (F1 subset: no feed, broker or calendar fields yet). */
         StatusDto: {
+            /** @description Alarms currently raised by background drivers (empty when all is well). */
+            alarms: components["schemas"]["AlarmDto"][];
             /** @description True only in a build with the `live-trading` feature. */
             live_enabled: boolean;
             /** @description Execution mode from `risk.toml`. */

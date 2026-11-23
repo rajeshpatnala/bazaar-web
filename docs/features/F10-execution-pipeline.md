@@ -96,6 +96,10 @@ Fix round (PR 133): `reload` is idempotent (ids already queued or finished are s
 - RISK-100-2: slices 2/3 derive `reduce_only` from the `ApprovedOrder`, not request data, with a test that a non-exit intent is refused when engaged. SEC-100-4: cap `actor`/`reason` length at the route (later slice). SEC-100-5: slice 3 runs the gate in `spawn_blocking` and tests it.
 - RISK-96-11 closed 2026-11-22: owner confirmed 300 s approval TTL, 50 bps drift and the other [execution] defaults.
 - RISK-105-9 closed 2026-11-22: owner confirmed `breaker_engages_kill_switch = true`. Not blocking: the latch is restored from the audit log regardless.
+- RISK-136-4: store-backed position check on reopen (positions were a fake in BZ-205 S5). Target: BZ-511 S2.
+- RISK-136-5: real GateContext / ModeEvidence from `risk.toml` and the store; test paper default and `auto` locked; force `mode.live=Known(false)` without `live-trading`. Target: BZ-511 S1.
+- RISK-136-6: assert the listed `risk.toml` keys by name (`io_timeout_secs`, `breaker_engages_kill_switch`, `kill_allow_reduce_only`, ...), not a count of "owner confirmed 2026-11-22". Target: BZ-511 S1.
+- SEC-136-1: debug assertion that `SqliteGateContext::inputs` runs inside `spawn_blocking`. Target: BZ-511 S1.
 - `GuardedExecutor` (slice 2) and the pipeline (slice 3) must both call `KillSwitch::admits`.
 - Defer RISK-96-8 to slice 3; RISK-96-5 to slice 2; SEC-96-2 anchor of latest (seq, hash) to slice 8; CR-96-5 to slice 5.
 - Bound `paper_mis_square_off_ist` against the session calendar (CR-96-5); slice sizes for later F10 slices <= 400 lines (CR-96-6).

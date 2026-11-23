@@ -16,7 +16,11 @@ use axum::{
     http::{Request, Response, header},
 };
 use bazaar_core::{mode::ExecutionMode, testutil::FakeClock};
-use bazaar_server::{app, security::Security, state::AppState};
+use bazaar_server::{
+    app,
+    security::Security,
+    state::{AlarmBoard, AppState},
+};
 use chrono::TimeZone;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
@@ -31,6 +35,8 @@ pub struct TestApp {
     pub router: Router,
     pub security: Security,
     pub dist: PathBuf,
+    /// Same board the router's `AppState` holds; raise alarms here.
+    pub alarms: AlarmBoard,
 }
 
 impl Drop for TestApp {
@@ -62,10 +68,12 @@ impl TestApp {
             ExecutionMode::Paper,
             dist.clone(),
         );
+        let alarms = state.alarms.clone();
         Self {
             router: app::build(state),
             security,
             dist,
+            alarms,
         }
     }
 
