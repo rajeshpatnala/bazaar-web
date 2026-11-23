@@ -1,5 +1,3 @@
-use std::cell::Cell;
-
 use bazaar_core::instrument::{Exchange, InstrumentType};
 use bazaar_risk::config::{Baseline, GateConfig};
 use bazaar_risk::sizing::SizingError;
@@ -251,13 +249,82 @@ fn tick_collapse_blocks_before_sizing() {
 }
 
 #[test]
-fn total_above_budget_is_risk_above_budget() {
-    // A cost model that changes its answer after sizing: the final re-check refuses.
-    let calls = Cell::new(0_u32);
-    let cost = |_: u32| {
-        calls.set(calls.get() + 1);
-        Tri::Known(if calls.get() >= 3 { d(5000) } else { d(10) })
-    };
-    let r = size_idea(&inst("0.05", 1), &levels(), &snap(), &limits(), &cost);
-    assert_eq!(r, Err(BlockReason::RiskAboveBudget));
+fn charged_risk_refuses_above_budget_and_allows_equal() {
+    let f = d(60);
+    assert_eq!(
+        charged_risk(d(900), d(101), f, d(1000)),
+        Err(BlockReason::RiskAboveBudget)
+    );
+    assert_eq!(
+        charged_risk(d(900), d(100), f, d(1000)),
+        Ok((d(100), d(1000)))
+    );
+    // floor beats a small cost
+    assert_eq!(charged_risk(d(900), d(10), f, d(1000)), Ok((d(60), d(960))));
+}
+
+#[test]
+fn charged_risk_overflow_is_a_sizing_block() {
+    let r = charged_risk(Decimal::MAX, d(60), d(60), Decimal::MAX);
+    assert!(matches!(r, Err(BlockReason::Sizing(m)) if m.contains("overflowed")));
+}
+
+#[test]
+fn a_pure_cost_never_reaches_the_final_guard() {
+    for c in [0, 10, 60, 200, 400] {
+        let s = size_idea(&inst("0.05", 1), &levels(), &snap(), &limits(), &flat(c)).unwrap();
+        assert!(s.risk_rupees <= s.budget);
+    }
+}
+
+#[test]
+fn cost_priced_on_the_rounded_stop_sets_the_allowance() {
+    let r = round_levels(&levels(), px("0.05")).unwrap();
+    let rate = px("0.01");
+    let on = |stop: Decimal| move |q: u32| Tri::Known(Decimal::from(q) * stop * rate);
+    let s = size_idea(&inst("0.05", 1), &levels(), &snap(), &limits(), &on(r.stop)).unwrap();
+    assert_eq!(s.size.qty, 49);
+    assert_eq!(s.allowance, px("240.0755")); // 49 x 489.95 x 0.01
+    assert_eq!(s.risk_rupees, px("734.9755"));
+    assert_ne!(s.allowance, Decimal::from(49) * levels().stop * rate);
+}
+
+#[test]
+fn a_single_price_zone_stays_valid() {
+    let mut l = levels();
+    l.entry_low = d(500);
+    l.entry_high = d(500);
+    let r = round_levels(&l, px("0.05")).unwrap();
+    assert_eq!((r.entry_low, r.entry_high), (d(500), d(500)));
+}
+
+#[test]
+fn rounding_holds_at_other_ticks_and_leaves_grid_levels_alone() {
+    for t in ["0.01", "0.05", "0.10", "0.50", "5"] {
+        let tick = px(t);
+        let l = Levels {
+            entry_low: px("1000.03"),
+            entry_high: px("1013.07"),
+            stop: px("951.93"),
+            targets: vec![px("1100.01"), px("1200.09")],
+        };
+        let r = round_levels(&l, tick).unwrap();
+        let on_grid = |x: Decimal| x % tick == Decimal::ZERO;
+        assert!(
+            on_grid(r.entry_low) && on_grid(r.entry_high) && on_grid(r.stop),
+            "{t}"
+        );
+        assert!(r.targets.iter().all(|x| on_grid(*x)), "{t}");
+        assert!(
+            r.entry_low >= l.entry_low && r.entry_high >= l.entry_high,
+            "{t}"
+        );
+        assert!(r.stop <= l.stop, "{t}");
+        assert!(r.targets.iter().zip(&l.targets).all(|(a, b)| a <= b), "{t}");
+        assert!(
+            r.entry_high - l.entry_high < tick && l.stop - r.stop < tick,
+            "{t}"
+        );
+        assert_eq!(round_levels(&r, tick).unwrap(), r, "idempotent at {t}");
+    }
 }

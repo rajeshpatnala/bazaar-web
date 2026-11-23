@@ -100,8 +100,30 @@ pub fn round_levels(levels: &Levels, tick: Decimal) -> Result<Levels, BlockReaso
     Ok(r)
 }
 
+/// Last line of defence on the money figure: `risk_rupees = risk_at_stop + max(spent, floor)`,
+/// refused when above `budget` (equal passes). Returns `(allowance, risk_rupees)`. Pure.
+fn charged_risk(
+    risk_at_stop: Decimal,
+    spent: Decimal,
+    floor: Decimal,
+    budget: Decimal,
+) -> Result<(Decimal, Decimal), BlockReason> {
+    let allowance = spent.max(floor);
+    let risk = risk_at_stop
+        .checked_add(allowance)
+        .ok_or_else(|| BlockReason::Sizing("the risk calculation overflowed".to_owned()))?;
+    if risk > budget {
+        return Err(BlockReason::RiskAboveBudget);
+    }
+    Ok((allowance, risk))
+}
+
 /// Round, size through `risk::size_with_cost` and compute the charges-inclusive risk.
-/// `cost(qty)` is total charges + slippage for that quantity (the context `CostModel`).
+/// `cost(qty)` must be pure and deterministic (it is called more than once for the same qty): the
+/// round-trip charges plus slippage for `qty`, with the entry at the rounded `entry_high` and the
+/// stop-out exit at the rounded stop (all `charges.toml` terms, sell-side STT/DP included), so the
+/// caller prices it on the levels from [`round_levels`]. `size_with_cost` already enforces the
+/// same allowance; the final check is a second guard that fails closed.
 pub fn size_idea(
     instrument: &Instrument,
     levels: &Levels,
@@ -126,14 +148,12 @@ pub fn size_idea(
     let spent = *cost(s.qty)
         .known()
         .ok_or_else(|| BlockReason::Sizing("the charges estimate is unknown".to_owned()))?;
-    let allowance = spent.max(limits.min_charges_slippage_buffer);
-    let risk_rupees = s
-        .risk_at_stop
-        .checked_add(allowance)
-        .ok_or_else(|| BlockReason::Sizing("the risk calculation overflowed".to_owned()))?;
-    if risk_rupees > s.budget {
-        return Err(BlockReason::RiskAboveBudget);
-    }
+    let (allowance, risk_rupees) = charged_risk(
+        s.risk_at_stop,
+        spent,
+        limits.min_charges_slippage_buffer,
+        s.budget,
+    )?;
     let first = r.targets.first().copied().unwrap_or(r.entry_high);
     let rr = reward_risk(r.entry_high, r.stop, first)
         .filter(|v| *v > Decimal::ZERO)
