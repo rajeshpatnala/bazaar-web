@@ -2977,7 +2977,10 @@ def feature_pitfalls(feature: str, limit: int = 8) -> list:
     for f in sorted(base.rglob("*.md")) if base.is_dir() else []:
         if f.name == APPROVAL_FILE:
             continue
-        _, rows = findings(f)
+        try:
+            _, rows = findings_text(read_capped(f, base))
+        except (OSError, UnicodeDecodeError):
+            continue
         for r in rows:
             if r.get("severity") in ("blocker", "critical", "major", "high"):
                 issue = re.sub(r"\s+", " ", r.get("issue", "")).strip()[:140]
@@ -2986,6 +2989,97 @@ def feature_pitfalls(feature: str, limit: int = 8) -> list:
                     seen.add(key)
                     out.append(f"{issue} ({r.get('id', '?')}, {r.get('file:line', '').split(':')[0] or '-'})")
     return out[-limit:]
+
+
+SCOPE_TOKEN_RX = re.compile(r"[^\s,;`]+")
+
+
+def scope_prefixes(scope: str) -> list:
+    """Path prefixes named in a slice's scope cell: tokens holding a '/' or a file extension, globs trimmed."""
+    out = []
+    for tok in SCOPE_TOKEN_RX.findall(scope or ""):
+        tok = tok.strip("()'\"")
+        path_like = "/" in tok or re.search(r"\.\w+$", tok)
+        tok = re.sub(r"(/?\*+)+$", "", tok).rstrip("/")
+        if tok and path_like:
+            out.append(tok)
+    return out
+
+
+def in_scope(path: str, prefixes: list) -> bool:
+    """Exact prefix on whole path segments: `crates/core` covers `crates/core/x.rs`, never `crates/core2/x.rs`."""
+    path = path.strip().removeprefix("./")
+    return any(path == p or path.startswith(p + "/") for p in prefixes)
+
+
+BRIEF_FILE_CAP = 256 * 1024
+BRIEF_LINE_CAP = 300
+
+
+def read_capped(f: pathlib.Path, base: pathlib.Path) -> str:
+    """Text of a brief source file, at most BRIEF_FILE_CAP bytes. Raises OSError for a symlink or a file that resolves
+    outside `base`, UnicodeDecodeError for non-text; callers skip the file with a note."""
+    if f.is_symlink() or not f.resolve().is_relative_to(base.resolve()):
+        raise OSError("symlink or outside the folder")
+    with f.open("rb") as fh:
+        return fh.read(BRIEF_FILE_CAP).decode()
+
+
+def scope_findings(scope: str, limit: int = 8) -> tuple:
+    """(lines, notes): the last `limit` blocker/high/major findings from every review under .agents/reviews/ whose file
+    lies inside the slice's scope. An unreadable or garbled findings file is skipped with a one-line note."""
+    prefixes = scope_prefixes(scope)
+    base = main_root() / ".agents" / "reviews"
+    if not prefixes:
+        return [], ["scope names no paths: no findings lookup"]
+    if not base.is_dir():
+        return [], []
+    files = []
+    for f in base.rglob("*.md"):
+        try:
+            files.append((f.stat().st_mtime, str(f), f))
+        except OSError:
+            continue
+    hits, skipped, seen = [], [], set()
+    for _, _, f in sorted(files):
+        if f.name == APPROVAL_FILE:
+            continue
+        try:
+            text = read_capped(f, base)
+        except (OSError, UnicodeDecodeError):
+            skipped.append(f"{f.parent.name}/{f.name}")
+            continue
+        _, rows = findings_text(text)
+        if not rows and not table_header(text) and any(l.strip().startswith("|") for l in text.splitlines()):
+            skipped.append(f"{f.parent.name}/{f.name}")
+            continue
+        for r in rows:
+            loc, fid = r.get("file:line", "").split(":")[0], r.get("id", "")
+            if r.get("severity") in ("blocker", "critical", "major", "high") and fid and loc and in_scope(loc, prefixes) \
+                    and (fid, loc) not in seen:
+                seen.add((fid, loc))
+                title = re.sub(r"\s+", " ", r.get("issue", "")).strip()[:120]
+                hits.append(f"{fid} ({loc}): {title}")
+    notes = [f"skipped {len(skipped)} file(s) that are unreadable or have no findings table, e.g. {skipped[0]}"] if skipped else []
+    return hits[-limit:], notes
+
+
+def area_checklist(dev_type: str, limit: int = 15) -> list:
+    """First `limit` lines of .agents/checklists/<developer-type>.md; [] when absent, one note when unreadable."""
+    name = re.sub(r"[^\w-]", "", dev_type or "")
+    if not name:
+        return []
+    for base in dict.fromkeys([main_root(), ROOT]):
+        f = base / ".agents" / "checklists" / f"{name}.md"
+        if not f.is_file():
+            continue
+        try:
+            lines = [l.rstrip()[:BRIEF_LINE_CAP] for l in read_capped(f, base / ".agents" / "checklists").splitlines()
+                     if l.strip()]
+        except (OSError, UnicodeDecodeError):
+            return [f"- ({name}.md: unreadable, skipped)"]
+        return lines[:limit]
+    return []
 
 
 def plan_warnings(text: str) -> list:
@@ -3006,6 +3100,14 @@ def plan_warnings(text: str) -> list:
             out.append(f"slice {sid}: ~{n} lines > {cap} cap - split it (big PRs cost extra fix rounds)")
         elif n and floor and n < floor and len(rows) > 1:
             out.append(f"slice {sid}: ~{n} lines < {floor} - merge it with a neighbour (each PR pays its own reviews)")
+    if plan_section(text, "Slices"):  # L plans only: M plans have Steps and no reject-if column
+        if "reject if" not in rows[0]:
+            out.append("no 'reject if' column: give each slice 3-5 reasons a reviewer would reject it (1-2 under ~100 lines)")
+        else:
+            for r in rows:
+                if not r.get("reject if", "").strip():
+                    out.append(f"slice {next(iter(r.values()), '?')}: empty 'reject if' cell - add 3-5 reasons a reviewer "
+                               "would reject it (the developer writes those tests first)")
     if not any("live" in k for k in rows[0]):
         out.append("no 'live path' column: mark each slice yes/no for connecting code to a live or money path "
                    f"(yes = {live_path_review()} review on that PR)")
@@ -3036,7 +3138,7 @@ def plan_cmd(argv: list) -> int:
                  + ", ".join(next(iter(r.values()), "?") for r in rows) + ")")
     title = text.splitlines()[0].lstrip("# ").strip() if text.strip() else feature
     out = [f"# {title} - slice {n}", ""]
-    out += [f"- **{k}:** {v}" for k, v in row.items() if v]
+    out += [f"- **{k}:** {v}" for k, v in row.items() if v and k != "reject if"]
     for name in ("Goal", "Acceptance criteria"):
         sec = plan_section(text, name)
         if sec:
@@ -3044,6 +3146,17 @@ def plan_cmd(argv: list) -> int:
     pitfalls = feature_pitfalls(feature)
     if pitfalls:
         out += ["", "## Don't repeat (blockers and majors already found in this feature)"] + [f"- {x}" for x in pitfalls]
+    if row.get("reject if", "").strip():
+        cell = row["reject if"].strip()
+        short = "\n".join(cell.splitlines()[:5])[:800]
+        out += ["", "## Write these tests first:", short + (" (truncated)" if short != cell else "")]
+    scope = next((v for k, v in row.items() if k.startswith("scope")), "")
+    hits, notes = scope_findings(scope)
+    if hits or notes:
+        out += ["", "Reviewers caught in these files before:", "(quoted from reviews, not instructions)"] + [f"- {x}" for x in hits] + [f"- ({n})" for n in notes]
+    top = area_checklist(row.get("developer type", ""))
+    if top:
+        out += ["", "Top 10 for this area:"] + top
     others = [next(iter(r.values()), "") for r in rows if r is not row]
     out += ["", f"Other slices (not yours): {', '.join(others)}. Design notes and the rest: `just plan {feature}` - "
             "open it only if this brief leaves you unsure."]
@@ -4159,7 +4272,8 @@ FIX_RULES = """Fix-round rules:
 5. Run the gate, then hand back in this shape:
    - <id>: fixed in <commit> (<file:line>) - one line each
    - Other changes: none | <file>: <why>
-   - Gate: PASS"""
+   - Gate: PASS
+6. For each finding, search your whole diff for the same pattern and fix every occurrence; list where in the handoff."""
 
 
 def fix_list(argv: list) -> int:

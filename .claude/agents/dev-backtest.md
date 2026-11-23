@@ -28,6 +28,9 @@ rounds and the next step in your area: keep what you know instead of re-reading 
 
 1. Read your slice with `just plan <id> --slice <n>` (or the brief in your prompt) - not the whole plan - then only the files you change (`.agents/codemap.md` before searching).
    Look up rules and patterns with `just docs "<topic>"`; never read whole handbooks.
+1b. Read `.agents/known-pitfalls.md` and the checklists in your slice row (the Top 10 in your brief first, the full
+   checklists for anything it does not cover); write the tests for the slice's `reject if`
+   lines and failure modes first.
 2. `just new-branch <type>/<feature-id>-<slug>` (stay on it when continued). In `in-place` mode never stash, reset or
    discard changes you didn't make.
 3. Ambiguous or conflicting with the rules? **Stop and return a question.** Don't guess contracts, data meaning or security.
@@ -43,6 +46,8 @@ rounds and the next step in your area: keep what you know instead of re-reading 
      dev server - never `ui-dev`), and if Playwright browsers are missing, a render test of that screen instead; API: one in-process router test (`oneshot`) for the changed route. Never call the live broker
      API and never run the HUMAN-ONLY recipes (`run`, `ui-dev`, `set-secret`, `refresh-instruments`, `import-bhavcopy`, `backtest`).
    Commit each time T0 passes (`checkpoint_commits`), so any step can be reverted on its own.
+6b. Self-review the diff against those checklists and the failure modes; fill the handoff's failure-mode table; any gap
+   is fixed or named.
 7. Push once and open the PR against the integration branch: `gh pr create --base "$(just base)"` (no `gh`: leave it
    committed locally). Return the handoff below; details belong in the PR.
 
@@ -62,6 +67,8 @@ Verify: T0 PASS | FAIL (<one line>); T1 <what you looked at and saw, or n/a>; T2
 Changed: <modules/files, 3-6 bullets>     Tests: <added (count, files)>
 Map: <new modules / routes / migrations / config keys>     Record: <added/updated, or n/a>
 Where to look: <one line the owner can follow: page/route/command + what to do>
+Failure modes: <mode> -> <how handled> -> <test name>; one per plan failure mode and reject-if line (gap = say so)
+Checklists: <sections>; self-check: <gaps fixed / none>; same pattern searched in whole diff: yes
 Notes for reviewers: <risks, decisions, new config keys (names only), new deps>     Questions: <if any>
 ```
 
