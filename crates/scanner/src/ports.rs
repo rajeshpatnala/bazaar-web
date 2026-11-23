@@ -5,7 +5,16 @@ use bazaar_core::config::Event;
 use chrono::{DateTime, NaiveDate};
 use chrono_tz::Tz;
 
+use crate::gate_ctx::{ContextUnavailable, ScanGateContext};
 use crate::types::Evidence;
+
+/// Source of the gate inputs (portfolio snapshot, limits, costs, data and mode evidence). Sync, no
+/// network: the composition (BZ-519) fills it from stores already read. Called once per scan.
+pub trait GateContextSource: Send + Sync {
+    /// # Errors
+    /// `ContextUnavailable` when any part cannot be read: every idea is then blocked.
+    fn context(&self) -> Result<ScanGateContext, ContextUnavailable>;
+}
 
 /// Backtest statistics for a strategy. `None` means no evidence: the caller must label it so.
 pub trait EvidenceSource: Send + Sync {
