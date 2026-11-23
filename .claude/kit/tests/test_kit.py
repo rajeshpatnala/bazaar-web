@@ -832,7 +832,7 @@ class DevBriefTests(Base):
 
     def test_garbled_findings_file_is_skipped_with_a_note(self):
         self.plan()
-        self.r.write(".agents/reviews/F1/pr-1/bad.md", "Verdict: APPROVE\n\n| nonsense | here |\n| a | b |\n")
+        self.r.write(".agents/reviews/F1/pr-1/bad.md", "Verdict: APPROVE\n\n| severity | here |\n| a | b |\n")
         self.findings_file("code-review.md", [row("CR-1-1", "major", "crates/core/a.rs:1", "real")])
         (self.r.dir / ".agents/reviews/F1/pr-1/binary.md").write_bytes(b"\xff\xfe\x00| id |\n")
         rc, out = self.r.kit("plan", "F1", "--slice", "1")

@@ -3032,7 +3032,7 @@ def scope_findings(scope: str, limit: int = 8, max_notes: int = 3) -> tuple:
             notes.append(f"skipped {f.parent.name}/{f.name}: unreadable")
             continue
         _, rows = findings_text(text)
-        if not rows and not table_header(text) and any(l.strip().startswith("|") for l in text.splitlines()):
+        if not rows and not table_header(text) and "severity" in text.lower() and any(l.strip().startswith("|") for l in text.splitlines()):
             notes.append(f"skipped {f.parent.name}/{f.name}: no findings table (garbled)")
             continue
         for r in rows:
