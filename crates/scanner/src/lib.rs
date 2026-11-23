@@ -9,6 +9,7 @@ pub mod ports;
 pub mod result;
 pub mod runner;
 pub mod score;
+pub mod sizing;
 pub mod types;
 pub mod universe;
 
@@ -19,6 +20,7 @@ pub use runner::{
     effective_ban_age_hours, family_of, run,
 };
 pub use score::{Components, EVENT_WINDOW_DAYS, ScoreContext, Scored, rank, score, score_and_rank};
+pub use sizing::{Levels, SizedIdea, round_levels, size_idea};
 pub use types::{
     Action, Evidence, GateSummary, Horizon, InstrumentRef, PositionSize, RecError, Recommendation,
     RecommendationParts, Warning, WhyFactor, reward_risk,
