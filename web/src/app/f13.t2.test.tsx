@@ -1,16 +1,25 @@
-import { render, screen, within } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { createMemoryRouter, type RouteObject } from "react-router";
-import { RouterProvider } from "react-router/dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setCsrfToken } from "../api/client";
 import { makePreview } from "../mocks/orders";
 import { server } from "../mocks/server";
 import { DISCLAIMER } from "../shared/disclaimer";
 import { renderApp } from "../test/render";
-import { Providers, makeQueryClient } from "./providers";
-import { AppShell } from "./AppShell";
+
+// Real routes; only the /ideas page component is made to throw on demand.
+const boom = vi.hoisted(() => ({ on: false }));
+vi.mock("../features/ideas/IdeasPage", async (orig) => {
+  const mod = await orig<typeof import("../features/ideas/IdeasPage")>();
+  return {
+    ...mod,
+    IdeasPage: () => {
+      if (boom.on) throw new Error("boom");
+      return mod.IdeasPage();
+    },
+  };
+});
 
 // F13 T2 gap-filling: error route, no-dismiss, browser-zone independence, banned wording.
 const BANNED =
@@ -36,23 +45,15 @@ describe("F13 T2 gaps", () => {
     expect(await screen.findByText(DISCLAIMER)).toBeVisible();
   });
 
-  it("a route that throws while rendering still shows the disclaimer (error route)", async () => {
-    const Boom = () => {
-      throw new Error("boom");
-    };
+  it("the real /ideas route throwing while rendering still shows the disclaimer (real routes)", async () => {
+    boom.on = true;
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const bad: RouteObject[] = [
-      { path: "/", element: <AppShell />, children: [{ index: true, element: <Boom /> }] },
-    ];
-    const router = createMemoryRouter(bad, { initialEntries: ["/"] });
-    render(
-      <Providers client={makeQueryClient()}>
-        <RouterProvider router={router} />
-      </Providers>,
-    );
     try {
+      renderApp({ route: "/ideas" });
       expect(await screen.findByText(DISCLAIMER)).toBeVisible();
+      expect(screen.queryByRole("region", { name: /RELIANCE/ })).toBeNull();
     } finally {
+      boom.on = false;
       spy.mockRestore();
     }
   });
@@ -62,6 +63,13 @@ describe("F13 T2 gaps", () => {
     async (tz) => {
       const prev = process.env.TZ;
       process.env.TZ = tz;
+      const offsets: Record<string, number> = {
+        "America/Los_Angeles": 480,
+        "Pacific/Kiritimati": -840,
+        UTC: 0,
+      };
+      // Prove the zone really changed before relying on it (Jan 2025: no DST in the other zones).
+      expect(new Date("2025-01-01T00:00:00Z").getTimezoneOffset()).toBe(offsets[tz]);
       try {
         const home = renderApp({ route: "/" });
         expect(await screen.findByText("19 Nov, 10:00 IST")).toBeVisible();
@@ -123,10 +131,12 @@ describe("F13 T2 gaps", () => {
     await userEvent.click(
       await within(dialog).findByRole("button", { name: "Approve paper order" }),
     );
-    await within(dialog).findByRole("status");
+    expect(await within(dialog).findByRole("status")).toHaveTextContent("Paper order recorded. ok");
     expect(seen).toEqual({
       body: { version: 7 },
-      key: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      key: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      ),
       csrf: "test-csrf",
     });
   });
