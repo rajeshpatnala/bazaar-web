@@ -1672,8 +1672,61 @@ mod tests {
         let v = h.approve(1).await;
         assert_eq!(v["outcome"], "quote_drifted", "{v}");
         assert_eq!(v["detail"], "new_risk=238.5325", "{v}");
+        let row = OrderRepo::get(&rt.store, 1).await.unwrap().unwrap();
+        let rows = AuditRepo::read_all(&rt.store).await.unwrap();
+        let ks: Vec<&str> = rows.iter().map(|r| r.draft.kind.as_str()).collect();
+        assert_eq!(row.state, "blocked");
+        assert_eq!(
+            ks,
+            ["proposed", "gate_passed", "gate_blocked"],
+            "refused by the drift re-gate"
+        );
+        let mut conn = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&e.db)
+            .connect()
+            .await
+            .unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM approvals")
+            .fetch_one(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "a refused approve writes no approval row");
         assert_eq!(rt.paper.working_count(), 0);
         let lines = PaperLedgerRepo::current_epoch(&rt.store).await.unwrap();
         assert!(lines.iter().all(|l| l.kind == "opening"), "{lines:?}");
+    }
+
+    /// T2 (F10): the good-quote approve moves exactly these rows, and the drift refusal moves
+    /// exactly the refusal rows (known-pitfalls #5: every field that moves is checked).
+    #[tokio::test]
+    async fn t2_good_approve_moves_order_approval_and_audit_rows_and_nothing_else() {
+        let e = env(&["TESTEQ"]).await;
+        let rt = e.open().await;
+        let h = queued(&e, &rt).await;
+        let v = h.approve(1).await;
+        assert_eq!(v["outcome"], "placed", "{v}");
+        let row = OrderRepo::get(&rt.store, 1).await.unwrap().unwrap();
+        let rows = AuditRepo::read_all(&rt.store).await.unwrap();
+        let ks: Vec<&str> = rows.iter().map(|r| r.draft.kind.as_str()).collect();
+        let lines = PaperLedgerRepo::current_epoch(&rt.store).await.unwrap();
+        let kinds: Vec<&str> = lines.iter().map(|l| l.kind.as_str()).collect();
+        assert_eq!(row.state, "sent");
+        assert_eq!(
+            ks,
+            ["proposed", "gate_passed", "approve", "send"],
+            "one send row"
+        );
+        assert_eq!(kinds, ["opening"], "a working order moves no cash");
+        assert_eq!(rt.paper.working_count(), 1);
+        let mut conn = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&e.db)
+            .connect()
+            .await
+            .unwrap();
+        let ap: Vec<(String, String)> = sqlx::query_as("SELECT decision, actor FROM approvals")
+            .fetch_all(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(ap, [("approved".to_owned(), "owner".to_owned())]);
     }
 }
