@@ -1,4 +1,4 @@
-//! `open_store` verifies the audit chain; cli code never opens the execution store plainly.
+//! `open_store` verifies the audit chain and the anchor; cli code never opens the execution store plainly.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::{Path, PathBuf};
@@ -23,6 +23,7 @@ async fn seeded(path: &Path) {
     for k in ["a", "b", "c"] {
         AuditRepo::append(&s, draft(k), chain_hash).await.unwrap();
     }
+    s.anchor_flush().await.unwrap(); // the anchor write is detached from the commit
 }
 
 #[tokio::test]
@@ -59,6 +60,42 @@ async fn one_altered_audit_row_fails_open_with_corrupt() {
     assert_eq!(r.err(), Some(RepoError::Corrupt));
 }
 
+#[tokio::test]
+async fn open_store_refuses_a_cut_tail_and_a_missing_anchor_then_adopt_recovers() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.db");
+    seeded(&path).await;
+    let anchor = dir.path().join("t.db.anchor");
+    assert!(anchor.exists(), "open_store must anchor beside the db");
+    // Cut the tail as an out-of-band editor would (drop the append-only trigger first).
+    let mut c = SqliteConnectOptions::new()
+        .filename(&path)
+        .connect()
+        .await
+        .unwrap();
+    sqlx::query("DROP TRIGGER audit_log_no_delete")
+        .execute(&mut c)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM audit_log WHERE seq = 3")
+        .execute(&mut c)
+        .await
+        .unwrap();
+    c.close().await.unwrap();
+    // The chain is still valid; only the anchor (seq 3) is ahead of the log.
+    assert_eq!(open_store(&path).await.err(), Some(RepoError::Corrupt));
+    // A missing anchor on a non-empty log is refused too.
+    std::fs::remove_file(&anchor).unwrap();
+    assert_eq!(open_store(&path).await.err(), Some(RepoError::Corrupt));
+    // Human recovery writes the anchor for the verified tail; then open works.
+    let r = bazaar_store::SqliteStore::anchor_adopt(&path, chain_hash, false)
+        .await
+        .unwrap();
+    assert_eq!((r.old_seq, r.new_seq), (None, 2));
+    let s = open_store(&path).await.unwrap();
+    assert_eq!(AuditRepo::read_all(&s).await.unwrap().len(), 2);
+}
+
 fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for e in std::fs::read_dir(dir).unwrap() {
         let p = e.unwrap().path();
@@ -82,7 +119,7 @@ fn compose_opens_verified_with_the_execution_chain_hash() {
     let src =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/compose.rs")).unwrap();
     let code = code_only(&src);
-    assert!(code.contains("open_verified(path, chain_hash)"));
+    assert!(code.contains("open_anchored(path, chain_hash)"));
     assert!(code.contains("bazaar_execution::audit::chain_hash"));
     assert!(!plain_open_violation(&code));
 }
@@ -98,7 +135,7 @@ fn plain_open_violation(code: &str) -> bool {
     let mut rest = c.as_str();
     while let Some(i) = rest.find("SqliteStore::open_") {
         rest = &rest[i + "SqliteStore::open_".len()..];
-        if !rest.starts_with("verified") {
+        if !rest.starts_with("anchored") {
             return true;
         }
     }
@@ -115,7 +152,8 @@ fn plain_open_guard_catches_spacing_aliases_and_variants() {
     assert!(plain_open_violation("S::open(p)"));
     assert!(plain_open_violation("SqliteStore::open_in_memory()"));
     assert!(plain_open_violation("SqliteStore::open_with(p)"));
-    assert!(!plain_open_violation("SqliteStore::open_verified(p, h)"));
+    assert!(plain_open_violation("SqliteStore::open_verified(p, h)"));
+    assert!(!plain_open_violation("SqliteStore::open_anchored(p, h)"));
     assert!(!plain_open_violation("fn open_store() {}"));
 }
 

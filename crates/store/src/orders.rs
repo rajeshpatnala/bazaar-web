@@ -194,6 +194,9 @@ impl SqliteStore {
             append_in_tx(&mut tx, draft, chain).await?;
         }
         tx.commit().await.map_err(|e| map_err(&e))?;
+        if audit.is_some() {
+            self.anchor_after_commit().await;
+        }
         Ok(OrderRow {
             order_id: order_id.to_owned(),
             state: state.to_owned(),
@@ -250,6 +253,7 @@ impl SqliteStore {
         let v = advance_in_tx(&mut tx, t).await?;
         append_in_tx(&mut tx, audit, chain).await?;
         tx.commit().await.map_err(|e| map_err(&e))?;
+        self.anchor_after_commit().await;
         Ok(v)
     }
 
