@@ -354,6 +354,7 @@ fn sized() -> Sized {
         budget: d("1000"),
         notional: d("10100"),
         capped_by_position_cap: false,
+        capped_by_order_cap: false,
         reduced_by_override: false,
     }
 }

@@ -11,9 +11,10 @@
 //! out of F6 scope: a short option leg has unbounded loss and a bought option risks its premium,
 //! so rule G13 must keep those entries away from `size`.
 //!
-//! Not applied here: the cash/margin cap and the G16 per-order notional cap. The gate rejects an
-//! order above either (X03 margin, G16), and G14 counts an existing same-symbol position; the
-//! sizer does not shrink the size for them.
+//! The G16 per-order notional cap (`max_notional_per_order_inr`) also limits the size, at
+//! `max(entry, reference)` where `reference` is the gate's reference price (`size_with_reference`).
+//! G16 in the gate stays the authority. Not applied here: the cash/margin cap (X03 rejects an
+//! order above it); G14 counts an existing same-symbol position, the sizer does not.
 
 use crate::config::EffectiveLimits;
 use crate::snapshot::PortfolioSnapshot;
@@ -48,6 +49,8 @@ pub enum SizingError {
     BudgetBelowOneLot,
     /// One lot is worth more than the position-value cap: no trade.
     CapBelowOneLot,
+    /// One lot is worth more than the per-order cap (G16), or that cap is 0: no trade.
+    OrderCapBelowOneLot,
     /// Overridden size (`size_factor`) floors to zero lots.
     OverrideBelowOneLot,
     /// `size_factor` outside (0, 1].
@@ -73,6 +76,9 @@ impl fmt::Display for SizingError {
             }
             Self::CapBelowOneLot => {
                 "one lot is bigger than your single-position cap, so there is no trade here"
+            }
+            Self::OrderCapBelowOneLot => {
+                "one lot is bigger than your per-order cap, so there is no trade here"
             }
             Self::OverrideBelowOneLot => {
                 "the reduced override size is below one lot, so there is no trade"
@@ -116,6 +122,8 @@ pub struct Sized {
     pub notional: Decimal,
     /// True when the position-value cap (G14) reduced the size.
     pub capped_by_position_cap: bool,
+    /// True when the per-order notional cap (G16) reduced the size further.
+    pub capped_by_order_cap: bool,
     /// True when `size_factor` reduced the size.
     pub reduced_by_override: bool,
 }
@@ -211,6 +219,19 @@ pub fn size_with_cost(
     input: &SizingInput,
     cost: &dyn Fn(u32) -> Tri<Decimal>,
 ) -> Result<Sized, SizingError> {
+    size_with_reference(limits, input, cost, input.entry)
+}
+
+/// As [`size_with_cost`], and the quantity is also limited so `max(entry, reference) x qty` stays
+/// within `max_notional_per_order_inr` (the G16 per-order cap, using the gate's reference price:
+/// `max(intent.price, live price)`). `reference` 0 or negative is `BadPrice`; one lot above the
+/// cap (or a cap of 0) is `OrderCapBelowOneLot`. Never a larger size than `size_with_cost` gave.
+pub fn size_with_reference(
+    limits: &EffectiveLimits,
+    input: &SizingInput,
+    cost: &dyn Fn(u32) -> Tri<Decimal>,
+    reference: Decimal,
+) -> Result<Sized, SizingError> {
     validate(input)?;
     // A hand-built limits struct with a floor <= 0 must not weaken "never below the floor".
     if limits.min_charges_slippage_buffer <= Decimal::ZERO {
@@ -264,6 +285,11 @@ pub fn size_with_cost(
     let capped_by_position_cap = cap_lots < lots;
     lots = lots.min(cap_lots);
 
+    // G16 cap on notional per order, at the gate's reference price (never below the entry).
+    let order_cap_lots = order_cap_in_lots(limits, input, reference)?;
+    let capped_by_order_cap = order_cap_lots < lots;
+    lots = lots.min(order_cap_lots);
+
     // Overridden trade: size_factor x capped size, floored to lots.
     let factor = limits.override_size_factor;
     let mut reduced_by_override = false;
@@ -315,6 +341,29 @@ pub fn size_with_cost(
         budget,
         notional,
         capped_by_position_cap,
+        capped_by_order_cap,
         reduced_by_override,
     })
+}
+
+/// Whole lots allowed by the per-order notional cap at `max(entry, reference)`.
+fn order_cap_in_lots(
+    limits: &EffectiveLimits,
+    input: &SizingInput,
+    reference: Decimal,
+) -> Result<u32, SizingError> {
+    if reference <= Decimal::ZERO {
+        return Err(SizingError::BadPrice);
+    }
+    let order_ref = reference.max(input.entry);
+    let qty = limits
+        .max_notional_per_order_inr
+        .checked_div(order_ref)
+        .ok_or(SizingError::Arithmetic)?
+        .floor();
+    let lots = lots_in(qty, input.lot_size)?;
+    if lots == 0 {
+        return Err(SizingError::OrderCapBelowOneLot);
+    }
+    Ok(lots)
 }
