@@ -234,8 +234,8 @@ fn mode_check(ctx: &RuleCtx, m: ModeInputs) -> Result<(), ModeGap> {
     match (approval_missing, live_gap) {
         (false, None) => Ok(()),
         (true, None) => Err(ModeGap::ApprovalMissing(APPROVAL_TEXT.into())),
-        // Both gaps: the approval text as before, but not "only the approval".
-        (true, Some(_)) => Err(ModeGap::Other(APPROVAL_TEXT.into())),
+        // Both gaps: name both reasons, and it is not "only the approval".
+        (true, Some(t)) => Err(ModeGap::Other(format!("{APPROVAL_TEXT} {t}"))),
         (false, Some(t)) => Err(ModeGap::Other(t.into())),
     }
 }
@@ -335,6 +335,7 @@ pub fn g16(
     );
     if why.is_empty() {
         RuleResult::pass(rule, observed, limit)
+    // `why.len() == 1`: the approval text must be the only reason (kill switch, limits, live gap add more).
     } else if approval_only && why.len() == 1 {
         RuleResult::g16_approval_pending(observed, limit, &why.join(" "))
     } else {
@@ -617,6 +618,22 @@ mod tests {
                 assert_eq!(r.rule(), RuleId::G16, "{label}");
             }
         }
+    }
+
+    #[test]
+    fn missing_approval_and_live_gap_name_both_reasons() {
+        let c = ctx(ExecutionMode::SemiAuto);
+        let mut m = inputs();
+        m.mode.live = Tri::Unknown;
+        let r = run16(&c, &intent(Side::Buy, 10, "500"), &snap(), &m);
+        assert!(!r.is_approval_pending());
+        assert!(
+            r.message()
+                .contains("approval of this order is not on record"),
+            "{}",
+            r.message()
+        );
+        assert!(r.message().contains("live broker"), "{}", r.message());
     }
 
     #[test]

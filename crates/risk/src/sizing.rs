@@ -327,7 +327,7 @@ pub fn size_with_reference(
         let total = risk
             .checked_add(cost_at(qty_dec)?)
             .ok_or(SizingError::Arithmetic)?;
-        if total <= budget {
+        if total <= budget && within_order_cap(limits, input, reference, qty_dec) {
             break (qty_dec, risk);
         }
         lots = lots.saturating_sub(1);
@@ -348,7 +348,8 @@ pub fn size_with_reference(
     })
 }
 
-/// Whole lots allowed by the per-order notional cap at `max(entry, reference)`.
+/// Whole lots allowed by the per-order notional cap at `max(entry, reference)`. A cap so large
+/// that the division overflows (positive cap, positive price) is not binding: saturate at `u32::MAX`.
 fn order_cap_in_lots(
     limits: &EffectiveLimits,
     input: &SizingInput,
@@ -357,15 +358,76 @@ fn order_cap_in_lots(
     if reference <= Decimal::ZERO {
         return Err(SizingError::BadPrice);
     }
-    let order_ref = reference.max(input.entry);
-    let qty = limits
-        .max_notional_per_order_inr
-        .checked_div(order_ref)
-        .ok_or(SizingError::Arithmetic)?
-        .floor();
-    let lots = lots_in(qty, input.lot_size)?;
+    let cap = limits.max_notional_per_order_inr;
+    let lots = match cap.checked_div(reference.max(input.entry)) {
+        Some(q) => match q.floor().checked_div(Decimal::from(input.lot_size)) {
+            Some(v) if cap >= Decimal::ZERO => v.floor().to_u32().unwrap_or(u32::MAX),
+            _ => return Err(SizingError::Arithmetic),
+        },
+        None if cap > Decimal::ZERO => u32::MAX,
+        None => return Err(SizingError::Arithmetic),
+    };
     if lots == 0 {
         return Err(SizingError::OrderCapBelowOneLot);
     }
     Ok(lots)
+}
+
+/// True when `qty x max(entry, reference)` is within the per-order cap (checked maths).
+fn within_order_cap(
+    limits: &EffectiveLimits,
+    input: &SizingInput,
+    reference: Decimal,
+    qty: Decimal,
+) -> bool {
+    match qty.checked_mul(reference.max(input.entry)) {
+        Some(v) => v <= limits.max_notional_per_order_inr,
+        // Overflow means far above any cap that could be set.
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod order_cap_tests {
+    use super::*;
+
+    fn lim(cap: i64) -> EffectiveLimits {
+        let mut l = crate::config::GateConfig::from_toml_str(include_str!(
+            "../../../fixtures/config/risk.toml"
+        ))
+        .unwrap()
+        .effective(&crate::config::Baseline::none());
+        l.max_notional_per_order_inr = Decimal::from(cap);
+        l
+    }
+
+    fn inp() -> SizingInput {
+        SizingInput {
+            equity: Decimal::from(100_000),
+            side: crate::types::Side::Buy,
+            entry: Decimal::from(500),
+            stop: Decimal::from(490),
+            lot_size: 1,
+            tick_size: Decimal::new(5, 2),
+            buffer: Tri::Known(Decimal::from(60)),
+            overridden: false,
+        }
+    }
+
+    #[test]
+    fn final_check_uses_reference_and_steps_the_boundary() {
+        let (l, i) = (lim(30_000), inp());
+        let r = Decimal::from(600);
+        assert!(within_order_cap(&l, &i, r, Decimal::from(50))); // 30,000 = cap
+        assert!(!within_order_cap(&l, &i, r, Decimal::from(51))); // 30,600 > cap
+        // A reference below entry never lowers the price used.
+        assert!(!within_order_cap(
+            &l,
+            &i,
+            Decimal::from(100),
+            Decimal::from(61)
+        ));
+        // Overflow of the product is "does not fit", never a panic.
+        assert!(!within_order_cap(&l, &i, Decimal::MAX, Decimal::from(2)));
+    }
 }

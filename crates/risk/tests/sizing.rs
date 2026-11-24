@@ -651,15 +651,22 @@ fn bad_reference_cap_or_overflow_is_a_typed_error() {
         size_with_reference(&l, &input(), &cost60, Decimal::MAX),
         Err(SizingError::OrderCapBelowOneLot)
     );
-    // Cap at Decimal::MAX, entry 0.05: MAX / 0.05 overflows, a typed Arithmetic error.
-    let mut huge = l;
+    // Cap at Decimal::MAX, entry 0.05: MAX / 0.05 overflows, which means "not binding" (saturates),
+    // so the size is the one without the cap.
+    let mut huge = l.clone();
     huge.max_notional_per_order_inr = Decimal::MAX;
     let mut tiny = input();
     tiny.entry = Decimal::new(5, 2);
     tiny.stop = Decimal::new(4, 2);
     tiny.tick_size = Decimal::new(1, 2);
+    let capped = size_with_reference(&huge, &tiny, &cost60, Decimal::new(5, 2)).unwrap();
+    assert!(!capped.capped_by_order_cap);
+    assert_eq!(Ok(capped), size_with_cost(&l_wide(), &tiny, &cost60));
+    // A negative cap that overflows the division is still a typed error (never saturates).
+    let mut neg_huge = l;
+    neg_huge.max_notional_per_order_inr = Decimal::MIN;
     assert_eq!(
-        size_with_reference(&huge, &tiny, &cost60, Decimal::new(5, 2)),
+        size_with_reference(&neg_huge, &tiny, &cost60, Decimal::new(5, 2)),
         Err(SizingError::Arithmetic)
     );
     // A tiny reference never loosens: the entry is the floor, so the result equals size_with_cost.
@@ -667,4 +674,11 @@ fn bad_reference_cap_or_overflow_is_a_typed_error() {
         size_with_reference(&huge, &input(), &cost60, Decimal::new(1, 28)),
         size_with_cost(&huge, &input(), &cost60)
     );
+}
+
+/// Limits whose caps cannot bind (G16 not under test).
+fn l_wide() -> EffectiveLimits {
+    let mut l = order_cap_limits(1_000_000);
+    l.max_notional_per_order_inr = Decimal::MAX;
+    l
 }
