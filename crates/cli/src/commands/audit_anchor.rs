@@ -248,7 +248,7 @@ mod tests {
         assert_eq!(audit_anchor_status(dir.path()).await.unwrap().seq, 2);
     }
 
-    /// An anchor naming a different hash at a real seq: needs the flag, fault is HashMismatch.
+    /// An anchor naming a different hash at a real seq: needs the flag, fault is `HashMismatch`.
     #[tokio::test]
     async fn adopt_over_a_different_hash_needs_the_flag_and_names_the_fault() {
         let dir = seeded(2).await;
