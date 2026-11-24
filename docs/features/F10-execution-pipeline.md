@@ -80,8 +80,14 @@ Fix round (PR 133): `reload` is idempotent (ids already queued or finished are s
 
 ## Slice 9a (audit anchor, PR 174)
 - `<db>.anchor` beside the database (ADR 0003), checked by `open_anchored` (used by `compose::open_store`); written detached after each audit-appending commit; `anchor_adopt` recovery (command is 9b).
-- OPEN CONDITION (9b or later, before any paper day counts): wire `anchor_status().lag` into the server status alarm and call `anchor_flush` on shutdown. Until then a lagging anchor is visible only in the log (`audit anchor write failed`, category only), and the undetected-truncation window can grow.
+- CLOSED in 9b (kept for history): wire `anchor_status().lag` into the server status alarm and call `anchor_flush` on shutdown. Until then a lagging anchor is visible only in the log (`audit anchor write failed`, category only), and the undetected-truncation window can grow.
 - Known limits: detective and unkeyed; single writer per database; rows after the last good anchor write can be truncated undetected.
+
+## Slice 9b (anchor command, alarm, startup abort)
+- `bazaar-cli audit-anchor adopt [--accept-rollback]` is HUMAN-ONLY (owner decision 2026-11-25; agents never run it; it needs a line in the rule files' human-only list, owner's edit). It refuses a missing database (creates nothing), a broken chain, and any existing anchor file without the flag; the report prints old seq, the fault found and new seq. `audit-anchor status` opens like the app does (chain and anchor verified; a crash-window catch-up may write) and prints seq and lag.
+- Anchor lag is wired: the tick driver checks `anchor_status()` each timer pass, retries a lagging write once (`anchor_flush`), raises the `audit_anchor_lag` alarm on `GET /status` while it persists and clears it on repair; `main` calls `anchor_flush` after the server and driver stop (failure is logged loudly, not fatal). Closes the 9a OPEN CONDITION.
+- Startup abort proven: a real reload failure (more than 1000 `approved` rows) makes `start` return `StartError::Reload(Storage)` with every row untouched, and a source-order test pins `runtime::start` before `TcpListener::bind` in `main`. Closes the RISK-133-3 wiring test.
+- TS-F10-1 closed: the AC1 property test now has `Drift` and `ExpireStale` ops and asserts which rule refused (expiry, gate block, quote drift) and the exact expiry count.
 
 ## Deferred
 - RISK-152-1 / CR-152-1: the Rs 60 sizing floor rejected every equity order once real costs are wired (`BufferBelowFloor`). Fixed in BZ-522: allowance is `max(cost, floor)` in sizing, no `risk.toml` change (floor now means "assume at least Rs 60 cost"; owner confirmed 2026-11-23). BZ-519 depends on BZ-522.
