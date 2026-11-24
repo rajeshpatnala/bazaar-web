@@ -48,9 +48,8 @@ describe("F13 T2 gaps", () => {
     expect(await screen.findByText(DISCLAIMER)).toBeVisible();
   });
 
-  // KNOWN BUG TS-F13-3 (CR-173-4): routes.tsx has no errorElement, so a render throw replaces the
-  // whole shell (no disclaimer). it.fails keeps the gate green; remove ".fails" when production is fixed.
-  it.fails(
+  // TS-F13-3 (CR-173-4): routes.tsx has an errorElement inside AppShell, so the disclaimer stays.
+  it(
     "the real /ideas route throwing while rendering still shows the disclaimer (real routes)",
     async () => {
       boom.on = true;
