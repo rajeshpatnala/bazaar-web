@@ -11,7 +11,7 @@ use std::path::Path;
 
 use thiserror::Error;
 
-pub use audit_anchor::{AnchorReport, audit_anchor_adopt, audit_anchor_status};
+pub use audit_anchor::{AdoptOutcome, AnchorReport, audit_anchor_adopt, audit_anchor_status};
 pub(crate) use check_connections::instruments_state;
 pub use check_connections::{CheckReport, check_connections};
 pub use import_instruments::{ImportSummary, import_instruments};

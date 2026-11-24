@@ -3,13 +3,28 @@
 //! `adopt` is HUMAN-ONLY (owner decision 2026-11-25): agents never run it. It verifies the audit
 //! chain, then writes the anchor for the current tail. An existing anchor file of any kind is
 //! replaced only with `accept_rollback`. Neither command creates a database that is missing.
+//!
+//! Stop the server first: `adopt` takes no lock, and a running server's anchor writer could
+//! race it (single writer per database, ADR 0003). `adopt` leaves no audit row; the printed
+//! report (old seq, fault, new seq, tail time) is the owner's only trail (ADR 0003).
 
 use std::path::{Path, PathBuf};
 
+use bazaar_core::ports::AuditRepo;
 use bazaar_execution::audit::chain_hash;
 use bazaar_store::{AdoptReport, SqliteStore};
 
 use super::{CommandError, DB_FILE, repo_label};
+
+/// What `adopt` changed, plus the tail it anchored so the owner can check it against their own
+/// records (a missing anchor adopts the current tail on trust, ADR 0003).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdoptOutcome {
+    /// Old seq, fault found and new seq.
+    pub report: AdoptReport,
+    /// IST timestamp (RFC 3339) of the last audit row now anchored; `None` for an empty log.
+    pub tail_ts: Option<String>,
+}
 
 /// What `audit-anchor status` found (the store opened, so the chain and the anchor both passed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,7 +36,9 @@ pub struct AnchorReport {
 }
 
 fn db_path(data_dir: &Path) -> Result<PathBuf, CommandError> {
-    let db = data_dir.join(DB_FILE);
+    // Canonicalised like the server does, so a relative or symlinked directory is resolved once.
+    let dir = std::fs::canonicalize(data_dir).map_err(|_| CommandError::NoDatabase)?;
+    let db = dir.join(DB_FILE);
     if db.is_file() {
         Ok(db)
     } else {
@@ -30,7 +47,9 @@ fn db_path(data_dir: &Path) -> Result<PathBuf, CommandError> {
 }
 
 /// Verify the chain and write the anchor for the tail. `accept_rollback` allows replacing an
-/// existing anchor (ahead of the log, different hash, unparsable, or consistent).
+/// existing anchor (ahead of the log, different hash, unparsable, or consistent). A MISSING
+/// anchor adopts without it and trusts the current tail: check the printed tail seq and time
+/// against your own records. Stop the server first (no lock is taken).
 ///
 /// # Errors
 /// `NoDatabase`; `Store("corrupt")` on a broken chain (nothing written); `Store("conflict")` when
@@ -38,14 +57,22 @@ fn db_path(data_dir: &Path) -> Result<PathBuf, CommandError> {
 pub async fn audit_anchor_adopt(
     data_dir: &Path,
     accept_rollback: bool,
-) -> Result<AdoptReport, CommandError> {
+) -> Result<AdoptOutcome, CommandError> {
     let db = db_path(data_dir)?;
-    SqliteStore::anchor_adopt(&db, chain_hash, accept_rollback)
+    let report = SqliteStore::anchor_adopt(&db, chain_hash, accept_rollback)
         .await
-        .map_err(repo_label)
+        .map_err(repo_label)?;
+    // The adopt verified the chain and wrote the anchor, so this open passes; it only reads the
+    // tail time for the report.
+    let store = crate::compose::open_store(&db).await.map_err(repo_label)?;
+    let rows = AuditRepo::read_all(&store).await.map_err(repo_label)?;
+    let tail_ts = rows.last().map(|r| r.draft.ts_ist_rfc3339.clone());
+    Ok(AdoptOutcome { report, tail_ts })
 }
 
-/// Open the store the way the app does (chain AND anchor verified) and report the anchor.
+/// Open the store the way the app does (chain AND anchor verified) and report the anchor. This
+/// opens the store, so it may run a migration or write the crash-window catch-up: it is not
+/// strictly read-only.
 ///
 /// # Errors
 /// `NoDatabase`; `Store("corrupt")` when the chain or the anchor check refuses.
@@ -135,7 +162,11 @@ mod tests {
         let dir = seeded(3).await;
         std::fs::remove_file(anchor_file(dir.path())).unwrap();
         let r = audit_anchor_adopt(dir.path(), false).await.unwrap();
-        assert_eq!((r.old_seq, r.old_fault, r.new_seq), (None, None, 3));
+        assert_eq!(
+            (r.report.old_seq, r.report.old_fault, r.report.new_seq),
+            (None, None, 3)
+        );
+        assert_eq!(r.tail_ts.as_deref(), Some("2026-11-25T09:15:00+05:30"));
         assert_eq!(audit_anchor_status(dir.path()).await.unwrap().seq, 3);
     }
 
@@ -167,7 +198,7 @@ mod tests {
         );
         let r = audit_anchor_adopt(dir.path(), true).await.unwrap();
         assert_eq!(
-            (r.old_seq, r.old_fault, r.new_seq),
+            (r.report.old_seq, r.report.old_fault, r.report.new_seq),
             (Some(9), Some(AnchorFault::Ahead), 2)
         );
         assert_eq!(audit_anchor_status(dir.path()).await.unwrap().seq, 2);
@@ -197,5 +228,43 @@ mod tests {
         let e = audit_anchor_adopt(dir.path(), true).await.unwrap_err();
         assert_eq!(e, CommandError::Store("corrupt"));
         assert_eq!(std::fs::read(anchor_file(dir.path())).unwrap(), before);
+    }
+
+    /// An unparsable anchor is evidence: refused without the flag, replaced with it.
+    #[tokio::test]
+    async fn adopt_over_an_unparsable_anchor_needs_the_flag_and_names_the_fault() {
+        let dir = seeded(2).await;
+        std::fs::write(anchor_file(dir.path()), "garbage").unwrap();
+        assert_eq!(
+            audit_anchor_adopt(dir.path(), false).await.unwrap_err(),
+            CommandError::Store("conflict")
+        );
+        assert_eq!(std::fs::read(anchor_file(dir.path())).unwrap(), b"garbage");
+        let r = audit_anchor_adopt(dir.path(), true).await.unwrap();
+        assert_eq!(
+            (r.report.old_seq, r.report.old_fault, r.report.new_seq),
+            (None, Some(AnchorFault::Unparsable), 2)
+        );
+        assert_eq!(audit_anchor_status(dir.path()).await.unwrap().seq, 2);
+    }
+
+    /// An anchor naming a different hash at a real seq: needs the flag, fault is HashMismatch.
+    #[tokio::test]
+    async fn adopt_over_a_different_hash_needs_the_flag_and_names_the_fault() {
+        let dir = seeded(2).await;
+        let text = std::fs::read_to_string(anchor_file(dir.path())).unwrap();
+        let hash_line = text.lines().find(|l| l.starts_with("hash=")).unwrap();
+        let other = format!("hash={}", "0".repeat(64));
+        let forged = text.replace(hash_line, &other);
+        std::fs::write(anchor_file(dir.path()), &forged).unwrap();
+        assert_eq!(
+            audit_anchor_adopt(dir.path(), false).await.unwrap_err(),
+            CommandError::Store("conflict")
+        );
+        let r = audit_anchor_adopt(dir.path(), true).await.unwrap();
+        assert_eq!(
+            (r.report.old_seq, r.report.old_fault, r.report.new_seq),
+            (Some(2), Some(AnchorFault::HashMismatch), 2)
+        );
     }
 }

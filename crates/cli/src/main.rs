@@ -46,21 +46,35 @@ async fn main() -> ExitCode {
         }
         Some(Command::AuditAnchor(AuditAnchorCommand::Adopt { accept_rollback })) => {
             match audit_anchor_adopt(&cli.data_dir, accept_rollback).await {
-                Ok(r) => {
+                Ok(o) => {
+                    let r = o.report;
                     let old = r.old_seq.map_or("none".to_owned(), |s| s.to_string());
                     let fault = r.old_fault.map_or("none".to_owned(), |f| format!("{f:?}"));
+                    let at = o.tail_ts.as_deref().unwrap_or("empty log");
                     println!(
-                        "anchor adopted: old seq {old} (fault: {fault}), new seq {}",
+                        "anchor adopted: old seq {old} (fault: {fault}), new seq {} (last row at {at})",
                         r.new_seq
                     );
+                    println!("check the new seq and time against your own records");
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
-                    eprintln!("adopt refused: {e}");
-                    if e == CommandError::Store("conflict") {
-                        eprintln!(
-                            "an anchor file exists; replacing it can hide cut rows. Check it, then pass --accept-rollback"
-                        );
+                    match e {
+                        CommandError::Store("conflict") => {
+                            eprintln!("adopt refused: an anchor file exists");
+                            eprintln!(
+                                "replacing it can hide cut rows. Check it, then pass --accept-rollback"
+                            );
+                        }
+                        CommandError::Store("corrupt") => {
+                            eprintln!(
+                                "adopt refused: the audit chain does not verify; nothing written"
+                            );
+                        }
+                        CommandError::NoDatabase => {
+                            eprintln!("adopt failed: no database in the data directory");
+                        }
+                        _ => eprintln!("adopt failed: {e}"),
                     }
                     ExitCode::FAILURE
                 }
