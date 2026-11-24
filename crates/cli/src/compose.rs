@@ -36,12 +36,13 @@ use thiserror::Error;
 use tokio::runtime::Handle;
 
 /// Open the SQLite store for execution work with the audit chain and the anchor file beside the
-/// database verified (ADR 0002): a tampered, cut or swapped log is `Err(RepoError::Corrupt)` and
-/// is never appended to; a non-empty log with no anchor needs the human `audit-anchor adopt`. Never use `SqliteStore::open` for the
-/// execution store (CR-128-2, SEC-128-2); `tests/compose.rs` fails if that happens.
+/// database verified (ADR 0003): a tampered, cut or swapped log is `Err(RepoError::Corrupt)` and
+/// is never appended to; a non-empty log with no anchor needs the human `audit-anchor adopt`. Never use
+/// `SqliteStore::open` for the execution store (CR-128-2, SEC-128-2); `tests/compose.rs` fails if that happens.
 ///
 /// # Errors
-/// The store's `RepoError`; `Corrupt` when any audit row was altered, removed or reordered, or the anchor check fails.
+/// The store's `RepoError`; `Corrupt` when any audit row was altered, removed or reordered, or
+/// the anchor check fails.
 pub async fn open_store(path: &Path) -> Result<SqliteStore, RepoError> {
     SqliteStore::open_anchored(path, chain_hash).await
 }

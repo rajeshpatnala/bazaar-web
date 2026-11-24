@@ -75,7 +75,7 @@ pub(crate) async fn append_in_tx(
 ///
 /// Limit (ADR 0001): hashes link each row to its predecessor only, so removing rows from the
 /// tail leaves a valid shorter chain. Tail truncation is undetectable by hash alone; the anchor
-/// file (`anchor.rs`, ADR 0002) covers it at open.
+/// file (`anchor.rs`, ADR 0003) covers it at open.
 pub(crate) fn verify_rows(rows: &[AuditRow], chain: ChainFn) -> Result<(), RepoError> {
     let mut prev = GENESIS;
     for (i, r) in rows.iter().enumerate() {

@@ -23,6 +23,7 @@ async fn seeded(path: &Path) {
     for k in ["a", "b", "c"] {
         AuditRepo::append(&s, draft(k), chain_hash).await.unwrap();
     }
+    s.anchor_flush().await.unwrap(); // the anchor write is detached from the commit
 }
 
 #[tokio::test]

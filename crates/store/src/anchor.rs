@@ -1,10 +1,11 @@
-//! Audit anchor (ADR 0002): the latest audit `(seq, hash)` in a small file beside the database,
+//! Audit anchor (ADR 0003): the latest audit `(seq, hash)` in a small file beside the database,
 //! so a cut tail or an older copy of the database is detected at open. Detective only and
 //! unkeyed: someone who can write both files defeats it.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::Duration;
 
 use bazaar_core::ports::{AuditRow, ChainFn, RepoError};
@@ -65,8 +66,10 @@ pub struct AnchorStatus {
 /// What `anchor_adopt` changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdoptReport {
-    /// Seq of the anchor that was replaced (`None`: missing or unreadable).
+    /// Seq of the anchor that was replaced (`None`: missing or unparsable).
     pub old_seq: Option<u64>,
+    /// Which check the replaced anchor failed against the log (`None`: it was missing or fine).
+    pub old_fault: Option<AnchorFault>,
     /// Seq now anchored (the log's tail; 0 = empty log, nothing written).
     pub new_seq: u64,
 }
@@ -77,7 +80,14 @@ pub(crate) struct AnchorState {
     inner: Mutex<Inner>,
     /// Highest seq on disk, checked inside the blocking write so a timed-out write that lands
     /// late can never move the anchor backwards.
-    high_water: Arc<StdMutex<u64>>,
+    pub(crate) high_water: Arc<StdMutex<u64>>,
+    /// A detached sync task is queued or running (commit paths never wait for the file write).
+    running: AtomicBool,
+    /// An anchor file exists (written or found at open). Until then the write is inline, so a
+    /// crash right after the very first row cannot leave a non-empty log with no file.
+    anchored: AtomicBool,
+    /// A commit arrived while a task was running: it must loop once more.
+    dirty: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -160,8 +170,14 @@ pub(crate) fn write_atomic(path: &Path, rec: &AnchorRecord) -> std::io::Result<(
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
+    // Never write through a leftover or planted temp path (symlink): remove it, then create_new.
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
     let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
     let mut f = opts.open(&tmp)?;
@@ -212,6 +228,42 @@ impl AnchorState {
                 lag: false,
             }),
             high_water: Arc::new(StdMutex::new(last_seq)),
+            running: AtomicBool::new(false),
+            anchored: AtomicBool::new(last_seq > 0),
+            dirty: AtomicBool::new(false),
+        }
+    }
+
+    /// Queue a detached sync so the commit path (engage, exit) never waits for file I/O
+    /// (RISK-119-6). Coalescing: one task at a time; commits that arrive meanwhile make it loop.
+    fn kick(self: &Arc<Self>, pool: SqlitePool) {
+        if self.running.swap(true, Ordering::AcqRel) {
+            self.dirty.store(true, Ordering::Release);
+            return;
+        }
+        let me = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                me.dirty.store(false, Ordering::Release);
+                // The outcome is recorded in `lag` and logged inside `sync`.
+                me.sync(&pool).await.ok();
+                if me.dirty.load(Ordering::Acquire) {
+                    continue;
+                }
+                me.running.store(false, Ordering::Release);
+                if me.dirty.load(Ordering::Acquire) && !me.running.swap(true, Ordering::AcqRel) {
+                    continue;
+                }
+                break;
+            }
+        });
+    }
+
+    /// Wait (bounded) until no detached sync is queued or running.
+    pub(crate) async fn idle(&self) {
+        let deadline = tokio::time::Instant::now() + WRITE_TIMEOUT * 2;
+        while self.running.load(Ordering::Acquire) && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(2)).await;
         }
     }
 
@@ -220,6 +272,16 @@ impl AnchorState {
     pub(crate) async fn sync(&self, pool: &SqlitePool) -> Result<(), RepoError> {
         let mut g = self.inner.lock().await;
         let res = self.write_tail(&mut g, pool).await;
+        match res {
+            Err(e) => {
+                tracing::warn!(
+                    category = e.safe_reason(),
+                    "audit anchor write failed; lagging"
+                );
+            }
+            Ok(()) if g.lag => tracing::info!("audit anchor caught up"),
+            Ok(()) => {}
+        }
         g.lag = res.is_err();
         res
     }
@@ -240,7 +302,7 @@ impl AnchorState {
         let (path, hw) = (self.path.clone(), Arc::clone(&self.high_water));
         let rec = AnchorRecord { seq, hash };
         blocking(move || {
-            let mut hw = hw.lock().map_err(|_| RepoError::Other)?;
+            let mut hw = hw.lock().unwrap_or_else(PoisonError::into_inner);
             if seq > *hw {
                 write_atomic(&path, &rec).map_err(|_| RepoError::Other)?;
                 *hw = seq;
@@ -249,12 +311,13 @@ impl AnchorState {
         })
         .await??;
         g.last_seq = seq;
+        self.anchored.store(true, Ordering::Release);
         Ok(())
     }
 }
 
 impl SqliteStore {
-    /// Open like `open`, verify the audit chain AND the anchor beside the database (ADR 0002).
+    /// Open like `open`, verify the audit chain AND the anchor beside the database (ADR 0003).
     /// Refuses with `Corrupt` on a cut tail, an older copy, a different hash, a missing file on
     /// a non-empty log, or an unparsable or oversized file; nothing is appended then. The
     /// execution store is opened only through this (via `compose::open_store`).
@@ -267,8 +330,10 @@ impl SqliteStore {
         let seq = check_anchor(&rows, read)?;
         let state = Arc::new(AnchorState::new(ap, seq));
         store.anchor = Some(Arc::clone(&state));
-        // Anchor behind the log is the normal crash window: catch up now.
-        state.sync(&store.pool).await?;
+        // Anchor behind the log is the normal crash window: catch up now, best effort. The read
+        // check already passed, so a write failure here only sets `lag` (logged in `sync`);
+        // refusing to start would block exits at a restart with open positions (ADR 0003).
+        state.sync(&store.pool).await.ok();
         Ok(store)
     }
 
@@ -288,7 +353,10 @@ impl SqliteStore {
     /// The write error, when the anchor still cannot be written.
     pub async fn anchor_flush(&self) -> Result<(), RepoError> {
         match &self.anchor {
-            Some(a) => a.sync(&self.pool).await,
+            Some(a) => {
+                a.idle().await;
+                a.sync(&self.pool).await
+            }
             None => Ok(()),
         }
     }
@@ -298,7 +366,12 @@ impl SqliteStore {
     /// `anchor_status`) and retried by the next append or `anchor_flush` (RISK-119-6).
     pub(crate) async fn anchor_after_commit(&self) {
         if let Some(a) = &self.anchor {
-            a.sync(&self.pool).await.ok();
+            if a.anchored.load(Ordering::Acquire) {
+                a.kick(self.pool.clone());
+            } else {
+                // Only the first-ever row: no file yet, so write it inline (ADR 0003).
+                a.sync(&self.pool).await.ok();
+            }
         }
     }
 
@@ -322,12 +395,19 @@ impl SqliteStore {
             return Err(RepoError::Unavailable);
         }
         let old_seq = old.ok().map(|r| r.seq);
-        if old.is_ok() && check_anchor(&rows, old).is_err() && !accept_rollback {
+        // Any existing anchor (even garbage: it is evidence) needs the explicit acceptance;
+        // only a missing file adopts freely.
+        let old_fault = if old == Err(AnchorFault::Missing) {
+            None
+        } else if accept_rollback {
+            check_anchor(&rows, old).err()
+        } else {
             return Err(RepoError::Conflict);
-        }
+        };
         let Some(tail) = rows.last() else {
             return Ok(AdoptReport {
                 old_seq,
+                old_fault,
                 new_seq: 0,
             });
         };
@@ -340,6 +420,7 @@ impl SqliteStore {
             .map_err(|_| RepoError::Other)?;
         Ok(AdoptReport {
             old_seq,
+            old_fault,
             new_seq: rec.seq,
         })
     }

@@ -78,6 +78,11 @@ Fix round (PR 133): `reload` is idempotent (ids already queued or finished are s
 - Idempotency is an in-memory bounded cache (256 keys, per actor+order+key); it is lost on restart, where the pipeline's own one-decision rule (409) still holds. F13 idempotency TODO: BZ-512 replaces it with a persisted key store.
 - A re-gate refusal writes a `gate_blocked` audit row with actor `pipeline` and no `approvals` row; decision rows (decline, approve that reaches send) carry the session actor. Store-side `audit.actor == actor` assertion stays deferred to BZ-207 (SEC-132-1).
 
+## Slice 9a (audit anchor, PR 174)
+- `<db>.anchor` beside the database (ADR 0003), checked by `open_anchored` (used by `compose::open_store`); written detached after each audit-appending commit; `anchor_adopt` recovery (command is 9b).
+- OPEN CONDITION (9b or later, before any paper day counts): wire `anchor_status().lag` into the server status alarm and call `anchor_flush` on shutdown. Until then a lagging anchor is visible only in the log (`audit anchor write failed`, category only), and the undetected-truncation window can grow.
+- Known limits: detective and unkeyed; single writer per database; rows after the last good anchor write can be truncated undetected.
+
 ## Deferred
 - RISK-152-1 / CR-152-1: the Rs 60 sizing floor rejected every equity order once real costs are wired (`BufferBelowFloor`). Fixed in BZ-522: allowance is `max(cost, floor)` in sizing, no `risk.toml` change (floor now means "assume at least Rs 60 cost"; owner confirmed 2026-11-23). BZ-519 depends on BZ-522.
 - RISK-144-4: `GET /killswitch` must show the pipeline latch (pipeline accessor), not only the stored state. Kept on the T2/BZ-206 list.

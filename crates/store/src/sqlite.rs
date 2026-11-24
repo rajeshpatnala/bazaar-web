@@ -197,7 +197,7 @@ fn to_instrument(row: &SqliteRow) -> Result<Instrument, RepoError> {
 #[derive(Debug, Clone)]
 pub struct SqliteStore {
     pub(crate) pool: SqlitePool,
-    /// Audit anchor (ADR 0002); `None` for stores opened without it (tests, in-memory).
+    /// Audit anchor (ADR 0003); `None` for stores opened without it (tests, in-memory).
     pub(crate) anchor: Option<std::sync::Arc<crate::anchor::AnchorState>>,
 }
 
