@@ -43,6 +43,23 @@ pub enum Command {
         #[arg(long)]
         file: PathBuf,
     },
+    /// The audit anchor beside the database (ADR 0003).
+    #[command(subcommand)]
+    AuditAnchor(AuditAnchorCommand),
+}
+
+/// `audit-anchor` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum AuditAnchorCommand {
+    /// HUMAN-ONLY: verify the audit chain and write the anchor for its tail (new database,
+    /// restored backup). Replacing an existing anchor needs `--accept-rollback`.
+    Adopt {
+        /// Replace an existing anchor file (it may be ahead of the log: rows would be lost).
+        #[arg(long)]
+        accept_rollback: bool,
+    },
+    /// Verify the chain and the anchor and print the anchored seq.
+    Status,
 }
 
 #[cfg(test)]
@@ -78,6 +95,26 @@ mod tests {
             Cli::try_parse_from(["bazaar-cli", "import-instruments", "--file", "a.csv"]).unwrap();
         assert!(matches!(c.command, Some(Command::ImportInstruments { .. })));
         assert!(Cli::try_parse_from(["bazaar-cli", "import-instruments"]).is_err());
+    }
+
+    #[test]
+    fn audit_anchor_adopt_defaults_to_no_rollback() {
+        let c = Cli::try_parse_from(["bazaar-cli", "audit-anchor", "adopt"]).unwrap();
+        assert!(matches!(
+            c.command,
+            Some(Command::AuditAnchor(AuditAnchorCommand::Adopt {
+                accept_rollback: false
+            }))
+        ));
+        let c = Cli::try_parse_from(["bazaar-cli", "audit-anchor", "adopt", "--accept-rollback"])
+            .unwrap();
+        assert!(matches!(
+            c.command,
+            Some(Command::AuditAnchor(AuditAnchorCommand::Adopt {
+                accept_rollback: true
+            }))
+        ));
+        assert!(Cli::try_parse_from(["bazaar-cli", "audit-anchor"]).is_err());
     }
 
     #[test]

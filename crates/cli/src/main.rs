@@ -3,8 +3,10 @@
 
 use std::process::ExitCode;
 
-use bazaar_cli::commands::{check_connections, import_instruments};
-use bazaar_cli::{Cli, Command};
+use bazaar_cli::commands::{
+    CommandError, audit_anchor_adopt, audit_anchor_status, check_connections, import_instruments,
+};
+use bazaar_cli::{AuditAnchorCommand, Cli, Command};
 use bazaar_core::clock::SystemClock;
 use bazaar_data::instruments::ParseLimits;
 use clap::Parser;
@@ -38,6 +40,40 @@ async fn main() -> ExitCode {
                 }
                 Err(e) => {
                     eprintln!("import failed: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some(Command::AuditAnchor(AuditAnchorCommand::Adopt { accept_rollback })) => {
+            match audit_anchor_adopt(&cli.data_dir, accept_rollback).await {
+                Ok(r) => {
+                    let old = r.old_seq.map_or("none".to_owned(), |s| s.to_string());
+                    let fault = r.old_fault.map_or("none".to_owned(), |f| format!("{f:?}"));
+                    println!(
+                        "anchor adopted: old seq {old} (fault: {fault}), new seq {}",
+                        r.new_seq
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("adopt refused: {e}");
+                    if e == CommandError::Store("conflict") {
+                        eprintln!(
+                            "an anchor file exists; replacing it can hide cut rows. Check it, then pass --accept-rollback"
+                        );
+                    }
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some(Command::AuditAnchor(AuditAnchorCommand::Status)) => {
+            match audit_anchor_status(&cli.data_dir).await {
+                Ok(r) => {
+                    println!("anchor ok: seq {}, lag {}", r.seq, r.lag);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("anchor check failed: {e}");
                     ExitCode::FAILURE
                 }
             }
