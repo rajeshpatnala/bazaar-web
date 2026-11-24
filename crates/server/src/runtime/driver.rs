@@ -29,6 +29,10 @@ use crate::state::AlarmBoard;
 
 /// Alarm code shown on `GET /status` while a square-off is blocked.
 pub const ALARM_SQUARE_OFF: &str = "square_off_blocked";
+/// Alarm code while the audit anchor write is failing (ADR 0003): rows after the last good anchor
+/// write could be truncated undetected until it is repaired.
+const ALARM_AUDIT_ANCHOR: &str = "audit_anchor_lag";
+const ANCHOR_TEXT: &str = "audit anchor write failing; the audit tail is not protected";
 const ALARM_TEXT: &str = "MIS square-off blocked; a position stays open until it fills";
 /// While an alarm is up, the driver's own error log repeats every this many passes.
 const LOG_EVERY: u32 = 30;
@@ -124,6 +128,8 @@ pub struct Driver {
     alarms: AlarmBoard,
     clock: Arc<dyn Clock>,
     watch: Mutex<SquareOffWatch>,
+    /// The store whose audit anchor health is watched (`None`: nothing watched).
+    anchor: Option<SqliteStore>,
     /// Passes since the alarm went up (for the log rate limit).
     up_passes: AtomicU32,
 }
@@ -142,7 +148,38 @@ impl Driver {
             alarms,
             clock,
             watch: Mutex::new(SquareOffWatch::default()),
+            anchor: None,
             up_passes: AtomicU32::new(0),
+        }
+    }
+
+    /// Watch the audit anchor of `store` each timer pass: a lagging anchor raises
+    /// [`ALARM_AUDIT_ANCHOR`] (after one retry) and a repaired one clears it.
+    #[must_use]
+    pub fn with_anchor(mut self, store: SqliteStore) -> Self {
+        self.anchor = Some(store);
+        self
+    }
+
+    /// Retry a lagging anchor write once, then raise or clear the alarm from the status.
+    async fn check_anchor(&self) {
+        let Some(store) = &self.anchor else { return };
+        let mut st = store.anchor_status().await;
+        if st.is_some_and(|s| s.lag) {
+            if store.anchor_flush().await.is_err() {
+                tracing::warn!(category = "anchor_write", "audit anchor still failing");
+            }
+            st = store.anchor_status().await;
+        }
+        // No status at all means no anchor on a store that must have one: alarm, never "fine".
+        if st.is_none_or(|s| s.lag) {
+            self.alarms.raise(
+                ALARM_AUDIT_ANCHOR,
+                ANCHOR_TEXT,
+                &self.clock.now_ist().to_rfc3339(),
+            );
+        } else {
+            self.alarms.clear(ALARM_AUDIT_ANCHOR);
         }
     }
 
@@ -192,6 +229,7 @@ impl Driver {
         if let Err(e) = self.handle.expire_stale().await {
             tracing::error!(error = %e, "approval expiry pass failed");
         }
+        self.check_anchor().await;
     }
 
     fn apply_clock(&self, out: &ClockOutcome) {
@@ -260,7 +298,7 @@ pub async fn serve_while_driven<T>(
 }
 
 /// After cancel: wait up to `wait` for the task; abort it on timeout. True on a clean finish.
-pub async fn stop(task: &mut JoinHandle<()>, wait: Duration) -> bool {
+async fn stop(task: &mut JoinHandle<()>, wait: Duration) -> bool {
     match tokio::time::timeout(wait, &mut *task).await {
         Ok(Ok(())) => true,
         Ok(Err(_)) => false,
@@ -269,6 +307,29 @@ pub async fn stop(task: &mut JoinHandle<()>, wait: Duration) -> bool {
             false
         }
     }
+}
+
+/// Shut down after serving ended (RISK-175-1). `served` is what [`serve_while_driven`] returned.
+/// The driver is cancelled and stopped only when serving ended on its own (`Ok`): on
+/// `Err(DriverStopped)` the select already consumed the finished `JoinHandle`, and polling it
+/// again panics ("`JoinHandle` polled after completion"). `flush` (the audit anchor flush) runs on
+/// every path, after the stop, and never fails the shutdown. Returns `served` unchanged.
+///
+/// # Errors
+/// The `DriverStopped` carried in `served`.
+pub async fn shutdown<T>(
+    served: Result<T, DriverStopped>,
+    cancel: &CancellationToken,
+    task: &mut JoinHandle<()>,
+    wait: Duration,
+    flush: impl Future<Output = ()>,
+) -> Result<T, DriverStopped> {
+    cancel.cancel();
+    if served.is_ok() && !stop(task, wait).await {
+        tracing::error!("tick driver did not stop cleanly");
+    }
+    flush.await;
+    served
 }
 
 #[cfg(test)]
@@ -405,6 +466,72 @@ mod tests {
         assert!(!stalled);
     }
 
+    /// A failing anchor write raises the alarm on a timer pass; a repaired one clears it.
+    #[tokio::test]
+    async fn a_lagging_audit_anchor_raises_the_alarm_and_repair_clears_it() {
+        let c = clock();
+        let (r, dir) = rt(&c).await;
+        let alarms = AlarmBoard::new();
+        let d = Driver::new(r.paper.clone(), r.handle.clone(), alarms.clone(), c.clone())
+            .with_anchor(r.store.clone());
+        d.on_timer().await;
+        assert_eq!(alarms.snapshot(), vec![], "healthy anchor: no alarm");
+        // The first audit row creates the anchor file; a second one then has to rewrite it.
+        r.handle
+            .set_kill_switch(true, "owner", "first")
+            .await
+            .unwrap();
+        r.store.anchor_flush().await.unwrap();
+        // A directory where the anchor file belongs makes every write fail.
+        let ap = dir.path().join("x.db.anchor");
+        std::fs::remove_file(&ap).unwrap();
+        std::fs::create_dir(&ap).unwrap();
+        r.handle
+            .set_kill_switch(false, "owner", "RELEASE KILL SWITCH")
+            .await
+            .unwrap();
+        r.store.anchor_flush().await.unwrap_err();
+        d.on_timer().await;
+        let a = alarms.snapshot();
+        assert_eq!(a.len(), 1, "{a:?}");
+        assert_eq!(
+            (a[0].code.as_str(), a[0].message.as_str()),
+            (ALARM_AUDIT_ANCHOR, ANCHOR_TEXT)
+        );
+        // Repair: the next pass retries the write, finds it good and clears the alarm.
+        std::fs::remove_dir(&ap).unwrap();
+        d.on_timer().await;
+        assert_eq!(alarms.snapshot(), vec![]);
+        assert!(!r.store.anchor_status().await.unwrap().lag);
+    }
+
+    /// A driver that watches no store never raises the anchor alarm.
+    #[tokio::test]
+    async fn a_driver_without_an_anchor_store_never_raises_the_anchor_alarm() {
+        let c = clock();
+        let (r, _d) = rt(&c).await;
+        let (d, alarms) = driver(&r, &c);
+        d.on_timer().await;
+        assert_eq!(alarms.snapshot(), vec![]);
+    }
+
+    /// RISK-175-2: a watched store that has no anchor (opened without one) is an alarm, not a pass.
+    #[tokio::test]
+    async fn a_watched_store_without_an_anchor_raises_the_alarm() {
+        let c = clock();
+        let (r, dir) = rt(&c).await;
+        let plain = SqliteStore::open(&dir.path().join("plain.db"))
+            .await
+            .unwrap();
+        let alarms = AlarmBoard::new();
+        let d = Driver::new(r.paper.clone(), r.handle.clone(), alarms.clone(), c.clone())
+            .with_anchor(plain);
+        d.on_timer().await;
+        let a = alarms.snapshot();
+        assert_eq!(a.len(), 1, "{a:?}");
+        assert_eq!(a[0].code.as_str(), ALARM_AUDIT_ANCHOR);
+    }
+
     #[tokio::test]
     async fn run_stops_on_cancel_through_the_public_entry() {
         let c = clock();
@@ -414,6 +541,59 @@ mod tests {
         let mut task = tokio::spawn(Arc::new(d).run(Duration::from_millis(100), cancel.clone()));
         cancel.cancel();
         assert!(stop(&mut task, Duration::from_secs(5)).await);
+    }
+
+    /// RISK-175-1: the tokio claim behind `shutdown`: a finished `JoinHandle` polled again panics.
+    #[tokio::test]
+    async fn a_joinhandle_polled_after_completion_panics() {
+        let mut t = tokio::spawn(async {});
+        (&mut t).await.unwrap();
+        let again = tokio::spawn(t);
+        assert!(again.await.unwrap_err().is_panic());
+    }
+
+    /// RISK-175-1: driver died first: no second poll, the flush still runs, the error returns.
+    #[tokio::test]
+    async fn shutdown_after_a_dead_driver_flushes_without_polling_the_task_again() {
+        let mut t = tokio::spawn(async { panic!("boom") });
+        let served = serve_while_driven(std::future::pending::<()>(), &mut t).await;
+        let flushed = Arc::new(AtomicU32::new(0));
+        let f = flushed.clone();
+        let cancel = CancellationToken::new();
+        let out = tokio::spawn(async move {
+            shutdown(
+                served,
+                &cancel,
+                &mut t,
+                Duration::from_secs(5),
+                async move {
+                    f.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+            .await
+        })
+        .await
+        .expect("shutdown must not panic");
+        assert_eq!(out.unwrap_err().0, "task panicked");
+        assert_eq!(flushed.load(Ordering::SeqCst), 1);
+    }
+
+    /// RISK-175-1: serving ended on its own: the driver is cancelled and stopped, then flushed.
+    #[tokio::test]
+    async fn shutdown_after_clean_serving_stops_the_driver_then_flushes() {
+        let cancel = CancellationToken::new();
+        let c2 = cancel.clone();
+        let mut t = tokio::spawn(async move { c2.cancelled().await });
+        let flushed = Arc::new(AtomicU32::new(0));
+        let f = flushed.clone();
+        let out = shutdown(Ok(7), &cancel, &mut t, Duration::from_secs(5), async move {
+            f.fetch_add(1, Ordering::SeqCst);
+        })
+        .await;
+        assert_eq!(out.unwrap(), 7);
+        assert!(cancel.is_cancelled());
+        assert!(t.is_finished(), "the driver was awaited to completion");
+        assert_eq!(flushed.load(Ordering::SeqCst), 1);
     }
 
     /// RISK-142-1 / SEC-142-1: a dead driver ends serving instead of running silently.

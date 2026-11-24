@@ -2039,6 +2039,18 @@ mod tests {
         Time(i64),
         Kill(bool),
         GateBlock(bool),
+        /// The quote moved past the drift limit (gate verdict `Drifted`), or back to a pass.
+        Drift(bool),
+        /// The timer pass that expires stale approvals.
+        ExpireStale,
+    }
+
+    /// What the fake gate says; the model keeps it to assert WHICH rule refused.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Gate {
+        Pass,
+        Block,
+        Drift,
     }
 
     fn op() -> impl Strategy<Value = Op> {
@@ -2049,6 +2061,8 @@ mod tests {
             (0..400i64).prop_map(Op::Time),
             any::<bool>().prop_map(Op::Kill),
             any::<bool>().prop_map(Op::GateBlock),
+            any::<bool>().prop_map(Op::Drift),
+            Just(Op::ExpireStale),
         ]
     }
 
@@ -2062,14 +2076,19 @@ mod tests {
                 let mut r = rig(1000, 0).await;
                 // (id, reduce_only, queued_at_secs, open)
                 let mut items: Vec<(u128, bool, i64, bool)> = vec![];
-                let (mut secs, mut killed, mut blocked, mut next) = (0i64, false, false, 1u128);
+                let (mut secs, mut killed, mut gate, mut next) = (0i64, false, Gate::Pass, 1u128);
                 let mut expected: Vec<u128> = vec![];
                 for o in ops {
                     match o {
                         Op::Submit(red) => {
                             let out = r.pipe.submit(intent(next, red)).await;
-                            prop_assert_eq!(out == Outcome::Queued, !blocked);
-                            if !blocked { items.push((next, red, secs, true)); }
+                            // A refused submit names the gate verdict (block vs drift).
+                            match gate {
+                                Gate::Pass => prop_assert_eq!(&out, &Outcome::Queued),
+                                Gate::Block => prop_assert!(matches!(out, Outcome::GateBlocked(_)), "{out:?}"),
+                                Gate::Drift => prop_assert!(matches!(out, Outcome::QuoteDrifted { .. }), "{out:?}"),
+                            }
+                            if gate == Gate::Pass { items.push((next, red, secs, true)); }
                             next += 1;
                         }
                         Op::Decline(i) => {
@@ -2082,9 +2101,21 @@ mod tests {
                             if let Some(it) = items.get_mut(i) {
                                 let out = r.pipe.decide(IntentId(it.0), Approve, "u").await;
                                 if it.3 {
-                                    let ok = secs - it.2 < 300 && !blocked && (!killed || it.1);
+                                    let fresh = secs - it.2 < 300;
+                                    let ok = fresh && gate == Gate::Pass && (!killed || it.1);
                                     if ok { expected.push(it.0); }
                                     prop_assert_eq!(matches!(out, Outcome::Placed(_)), ok);
+                                    // Which rule refused: expiry first, then the gate verdict.
+                                    if !fresh {
+                                        prop_assert_eq!(&out, &Outcome::Expired);
+                                    } else if gate == Gate::Block {
+                                        prop_assert!(matches!(out, Outcome::GateBlocked(_)), "{out:?}");
+                                    } else if gate == Gate::Drift {
+                                        prop_assert!(matches!(out, Outcome::QuoteDrifted { .. }), "{out:?}");
+                                    } else if !ok {
+                                        // Only the kill switch is left: it must be the named refuser.
+                                        prop_assert_eq!(&out, &Outcome::GuardBlocked(ExecError::KillSwitch));
+                                    }
                                     it.3 = false;
                                 } else {
                                     prop_assert!(matches!(out, Outcome::AlreadyDecided(_)));
@@ -2101,8 +2132,21 @@ mod tests {
                             killed = on;
                         }
                         Op::GateBlock(b) => {
-                            blocked = b;
+                            gate = if b { Gate::Block } else { Gate::Pass };
                             *r.gate.verdict.lock().unwrap() = if b { GateOutcome::Block("x".into()) } else { GateOutcome::Pass { risk_inr: Decimal::ZERO } };
+                        }
+                        Op::Drift(d) => {
+                            gate = if d { Gate::Drift } else { Gate::Pass };
+                            *r.gate.verdict.lock().unwrap() = if d { GateOutcome::Drifted { new_risk: Decimal::from(9) } } else { GateOutcome::Pass { risk_inr: Decimal::ZERO } };
+                        }
+                        Op::ExpireStale => {
+                            // Exactly the open items past the TTL expire; none is ever placed.
+                            let due = items.iter().filter(|it| it.3 && secs - it.2 >= 300).count();
+                            let n = r.pipe.expire_stale().await;
+                            prop_assert_eq!(n, due);
+                            for it in items.iter_mut().filter(|it| it.3 && secs - it.2 >= 300) {
+                                it.3 = false;
+                            }
                         }
                     }
                     prop_assert_eq!(ids(&r), expected.clone());

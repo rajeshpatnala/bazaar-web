@@ -197,25 +197,40 @@ async fn serve(port_flag: Option<u16>) -> anyhow::Result<()> {
     // drains, so a final pass runs before exit.
     let cancel = tokio_util::sync::CancellationToken::new();
     // `driver` stays alive here: the quote feed slice calls `driver.on_tick` (F10 HARD CONDITION).
-    let driver = Arc::new(runtime::Driver::new(
-        rt.paper.clone(),
-        rt.handle.clone(),
-        state.alarms.clone(),
-        state.clock.clone(),
-    ));
+    let driver = Arc::new(
+        runtime::Driver::new(
+            rt.paper.clone(),
+            rt.handle.clone(),
+            state.alarms.clone(),
+            state.clock.clone(),
+        )
+        .with_anchor(rt.store.clone()),
+    );
     let mut driver_task = tokio::spawn(driver.clone().run(DRIVER_EVERY, cancel.clone()));
     let serve = axum::serve(listener, app::build(state))
         .with_graceful_shutdown(shutdown_signal())
         .into_future();
     // RISK-142-1: if the driver ends or panics first, serving stops (fail closed), loudly.
+    // The result is kept, not `?`-returned, so stop and the anchor flush below always run.
     let served = runtime::serve_while_driven(serve, &mut driver_task)
         .await
-        .inspect_err(|e| tracing::error!(error = %e, "stopping the server"))?;
-    cancel.cancel();
-    if !runtime::stop(&mut driver_task, runtime::STOP_WAIT).await {
-        tracing::error!("tick driver did not stop cleanly");
-    }
-    served?;
+        .inspect_err(|e| tracing::error!(error = %e, "stopping the server"));
+    // `shutdown` stops the driver only if serving ended on its own (a dead driver's handle must
+    // not be polled again, RISK-175-1) and always flushes the audit anchor: the detached write
+    // may still be queued (bounded by the store's own timeout). Flush failure is loud, not fatal.
+    let served = runtime::shutdown(
+        served,
+        &cancel,
+        &mut driver_task,
+        runtime::STOP_WAIT,
+        async {
+            if let Err(e) = rt.store.anchor_flush().await {
+                tracing::error!(error = %e, "audit anchor not flushed at shutdown");
+            }
+        },
+    )
+    .await;
+    served??;
     Ok(())
 }
 

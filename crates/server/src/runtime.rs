@@ -9,7 +9,7 @@
 mod driver;
 mod quotes;
 
-pub use driver::{ALARM_SQUARE_OFF, Driver, LedgerPnl, STOP_WAIT, serve_while_driven, stop};
+pub use driver::{ALARM_SQUARE_OFF, Driver, LedgerPnl, STOP_WAIT, serve_while_driven, shutdown};
 pub use quotes::GuardedQuotes;
 
 use std::path::Path;
@@ -623,6 +623,80 @@ mod tests {
         // The store path is a directory: the verified open fails.
         let e = start(dir.path(), RISK, &cfg(), clock(), calendar()).await;
         assert!(matches!(e, Err(StartError::Store(_))), "{e:?}");
+    }
+
+    /// AC4 / RISK-133-3: a failing `reload` makes `start` return `StartError::Reload`: no
+    /// `Runtime` (so no handle, no state, nothing for `main` to bind) and no stored order touched.
+    /// The failure is real: more `approved` rows than the reload limit is a storage error.
+    #[tokio::test]
+    async fn a_failing_reload_aborts_start_with_reload_error_and_serves_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("x.db");
+        let c = clock();
+        let store = bazaar_cli::compose::open_store(&db).await.unwrap();
+        let payload = intent(&c, 1, Side::Buy, false).to_payload();
+        // One over the limit (1000) in one state.
+        for id in 1..=1001_u128 {
+            OrderRepo::insert(
+                &store,
+                bazaar_core::ports::OrderRecord {
+                    intent_id: id,
+                    version: 0,
+                    state: "approved".into(),
+                    payload: payload.clone(),
+                },
+                AuditDraft {
+                    ts_ist_rfc3339: c.now_ist().to_rfc3339(),
+                    actor: "owner".into(),
+                    kind: "seed".into(),
+                    payload: "{}".into(),
+                },
+                chain_hash,
+            )
+            .await
+            .unwrap();
+        }
+        store.anchor_flush().await.unwrap();
+        drop(store);
+        let e = start(&db, RISK, &cfg(), c.clone(), calendar()).await;
+        assert!(
+            matches!(e, Err(StartError::Reload(ExecError::Storage))),
+            "{e:?}"
+        );
+        // Nothing was half-processed: every row is still `approved`, untouched.
+        let store = bazaar_cli::compose::open_store(&db).await.unwrap();
+        let rows = OrderRepo::list_in_state(&store, "approved", 2000)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1001);
+        assert!(rows.iter().all(|r| r.version == 0));
+    }
+
+    /// `main` must open (and reload) the runtime strictly before it binds the port.
+    #[test]
+    fn main_starts_the_runtime_before_binding_the_listener() {
+        let src = include_str!("main.rs");
+        let start = src.find("= runtime::start(").unwrap();
+        let bind = src.find("TcpListener::bind(").unwrap();
+        assert!(start < bind, "bind must come after a successful start");
+    }
+
+    /// RISK-175-1/2 wiring pin (behaviour is tested on `shutdown` in driver.rs): `main` watches
+    /// the store's anchor, hands the flush to `shutdown`, and returns the serve result only after.
+    #[test]
+    fn main_wires_the_anchor_and_routes_shutdown_through_the_tested_fn() {
+        let src = include_str!("main.rs");
+        assert!(src.contains(".with_anchor(rt.store.clone())"));
+        let serve = src.find("serve_while_driven(").unwrap();
+        let shut = src.find("runtime::shutdown(").unwrap();
+        let flush = src.find("rt.store.anchor_flush()").unwrap();
+        let ret = src.find("served??;").unwrap();
+        assert!(serve < shut && shut < flush && flush < ret);
+        assert!(!src.contains("runtime::stop("), "stop only via shutdown");
+        assert!(
+            !src[serve..shut].contains("?;"),
+            "no early `?` before shutdown"
+        );
     }
 
     #[tokio::test]
