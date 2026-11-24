@@ -3,10 +3,11 @@
 
 use std::str::FromStr;
 
-use bazaar_core::ports::{LedgerEntry, RepoError};
+use bazaar_core::ports::{AuditDraft, ChainFn, LedgerEntry, RepoError};
 use rust_decimal::Decimal;
 use sqlx::Row;
 
+use crate::audit::append_in_tx;
 use crate::sqlite::{SqliteStore, map_err};
 
 const MAX_BATCH: usize = 1_000;
@@ -93,32 +94,39 @@ impl SqliteStore {
             .collect()
     }
 
-    /// Start a new epoch with `opening` (its `epoch` field is ignored); returns the number.
-    /// Old entries stay.
-    pub async fn ledger_new_epoch(&self, opening: &LedgerEntry) -> Result<u32, RepoError> {
+    /// Audited reset: the opening line of epoch `opening.epoch` and the audit row in ONE
+    /// transaction. `opening.epoch` must be the current max + 1, else `Conflict` (a racing
+    /// second reset loses); on any error nothing is stored. Old entries stay.
+    pub async fn ledger_new_epoch(
+        &self,
+        opening: &LedgerEntry,
+        audit: &AuditDraft,
+        chain: ChainFn,
+    ) -> Result<u32, RepoError> {
+        check(opening)?;
         let mut tx = self.pool.begin().await.map_err(|e| map_err(&e))?;
         let max: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(epoch), 0) FROM paper_ledger")
             .fetch_one(&mut *tx)
             .await
             .map_err(|e| map_err(&e))?;
-        let next = u32::try_from(max)
-            .map_err(|_| RepoError::Corrupt)?
-            .checked_add(1)
-            .ok_or(RepoError::Other)?;
-        let e = LedgerEntry {
-            epoch: next,
-            ..opening.clone()
-        };
-        check(&e)?;
-        bind(&e).execute(&mut *tx).await.map_err(|e| map_err(&e))?;
+        if i64::from(opening.epoch) != max.checked_add(1).ok_or(RepoError::Other)? {
+            return Err(RepoError::Conflict);
+        }
+        bind(opening)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| map_err(&e))?;
+        append_in_tx(&mut tx, audit, chain).await?;
         tx.commit().await.map_err(|e| map_err(&e))?;
-        Ok(next)
+        self.anchor_after_commit().await;
+        Ok(opening.epoch)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::{test_chain, test_draft};
 
     fn entry(epoch: u32, kind: &str, amt: &str, r: Option<u128>) -> LedgerEntry {
         LedgerEntry {
@@ -182,9 +190,13 @@ mod tests {
         let mixed = [entry(1, "ok", "1", None), entry(7, "bad", "1", None)];
         assert_eq!(s.ledger_append_many(&mixed).await, Err(RepoError::Conflict));
         assert_eq!(s.ledger_current_epoch().await.unwrap().len(), 1);
-        s.ledger_new_epoch(&entry(0, "opening", "9", None))
-            .await
-            .unwrap();
+        s.ledger_new_epoch(
+            &entry(2, "opening", "9", None),
+            &test_draft("r"),
+            test_chain,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             s.ledger_append(&entry(1, "old", "1", None)).await,
             Err(RepoError::Conflict)
@@ -247,24 +259,63 @@ mod tests {
         );
     }
 
+    async fn audit_count(s: &SqliteStore) -> usize {
+        s.audit_read_all().await.unwrap().len()
+    }
+
     #[tokio::test]
     async fn new_epoch_failures_store_nothing() {
         let s = store().await;
         s.ledger_append(&entry(1, "opening", "5", None))
             .await
             .unwrap();
-        let bad = entry(0, "", "9", None);
-        assert_eq!(s.ledger_new_epoch(&bad).await, Err(RepoError::Other));
+        let (d, c) = (test_draft("paper_reset"), test_chain);
+        // Invalid line, stale epoch and a jumped epoch: refused, no ledger line, no audit row.
+        assert_eq!(
+            s.ledger_new_epoch(&entry(2, "", "9", None), &d, c).await,
+            Err(RepoError::Other)
+        );
+        for e in [1, 3] {
+            assert_eq!(
+                s.ledger_new_epoch(&entry(e, "opening", "9", None), &d, c)
+                    .await,
+                Err(RepoError::Conflict)
+            );
+        }
+        // An audit row that cannot be appended rolls the epoch line back too.
+        let mut huge = d.clone();
+        huge.payload = "x".repeat(1_000_000);
+        assert!(
+            s.ledger_new_epoch(&entry(2, "opening", "9", None), &huge, c)
+                .await
+                .is_err()
+        );
         let cur = s.ledger_current_epoch().await.unwrap();
-        assert_eq!(cur.len(), 1);
-        assert_eq!(cur[0].epoch, 1);
-        // u32 overflow of the epoch counter is refused, not wrapped.
+        assert_eq!((cur.len(), cur[0].epoch), (1, 1));
+        assert_eq!(audit_count(&s).await, 0);
+        // The epoch counter at u32::MAX cannot advance (no wrap).
         let o = store().await;
         raw(&o, i64::from(u32::MAX), "1", None).await;
         assert_eq!(
-            o.ledger_new_epoch(&entry(0, "opening", "1", None)).await,
-            Err(RepoError::Other)
+            o.ledger_new_epoch(&entry(u32::MAX, "opening", "1", None), &d, c)
+                .await,
+            Err(RepoError::Conflict)
         );
+        assert_eq!(audit_count(&o).await, 0);
+    }
+
+    #[tokio::test]
+    async fn racing_resets_one_wins_and_writes_one_audit_row() {
+        let s = store().await;
+        let draft = test_draft("paper_reset");
+        let o = entry(1, "opening", "9", None);
+        let (first, second) = tokio::join!(
+            s.ledger_new_epoch(&o, &draft, test_chain),
+            s.ledger_new_epoch(&o, &draft, test_chain)
+        );
+        assert_eq!(u8::from(first.is_ok()) + u8::from(second.is_ok()), 1);
+        assert_eq!(audit_count(&s).await, 1);
+        assert_eq!(s.ledger_current_epoch().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -303,10 +354,15 @@ mod tests {
             .await
             .unwrap();
         let n = s
-            .ledger_new_epoch(&entry(0, "opening", "9", None))
+            .ledger_new_epoch(
+                &entry(2, "opening", "9", None),
+                &test_draft("paper_reset"),
+                test_chain,
+            )
             .await
             .unwrap();
         assert_eq!(n, 2);
+        assert_eq!(audit_count(&s).await, 1);
         let cur = s.ledger_current_epoch().await.unwrap();
         assert_eq!(cur.len(), 1);
         assert_eq!(cur[0].epoch, 2);

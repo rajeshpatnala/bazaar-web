@@ -29,7 +29,9 @@ use bazaar_execution::executor::{ApprovedOrder, ExecAck, ExecError, Executor};
 use bazaar_execution::gate_adapter::{GateContext, GateInputsOwned};
 use bazaar_execution::pipeline::{PipelineHandle, ReloadReport};
 use bazaar_execution::types::OrderIntent;
-use bazaar_paper::account::{ChargeSource, LedgerKind, PaperAccount};
+use bazaar_paper::account::{
+    ChargeSource, LedgerKind, PaperAccount, RefuseAll, ResetReason, ResetRequest,
+};
 use bazaar_paper::executor::PaperExecutor;
 use bazaar_paper::fill::SimConfig;
 use bazaar_paper::squareoff::ValidatedSquareOffTime;
@@ -434,8 +436,14 @@ async fn build<Q: QuoteSource + 'static, B: GateContext + 'static>(
         .await
         .map_err(|e| StartError::Paper(e.to_string()))?;
     if opened.epoch.is_none() {
+        // First open only: the guard is never consulted for `Initial`; any later reset needs a
+        // real guard (slice 9d), so the fail-closed `RefuseAll` stands in here.
+        let req = ResetRequest {
+            reason: ResetReason::Initial,
+            actor: "system.startup".to_owned(),
+        };
         account
-            .reset()
+            .reset(&req, &RefuseAll)
             .await
             .map_err(|e| StartError::Paper(e.to_string()))?;
     }
@@ -1645,6 +1653,7 @@ mod tests {
         assert_eq!(
             ks,
             [
+                "paper_reset",
                 "proposed",
                 "gate_passed",
                 "kill_switch_engaged",
@@ -1752,7 +1761,7 @@ mod tests {
         assert_eq!(row.state, "blocked");
         assert_eq!(
             ks,
-            ["proposed", "gate_passed", "gate_blocked"],
+            ["paper_reset", "proposed", "gate_passed", "gate_blocked"],
             "refused by the drift re-gate"
         );
         let mut conn = sqlx::sqlite::SqliteConnectOptions::new()
@@ -1787,7 +1796,7 @@ mod tests {
         assert_eq!(row.state, "sent");
         assert_eq!(
             ks,
-            ["proposed", "gate_passed", "approve", "send"],
+            ["paper_reset", "proposed", "gate_passed", "approve", "send"],
             "one send row"
         );
         assert_eq!(kinds, ["opening"], "a working order moves no cash");

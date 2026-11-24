@@ -290,10 +290,15 @@ pub trait PaperLedgerRepo: Send + Sync {
     ) -> impl Future<Output = Result<(), RepoError>> + Send;
     /// Entries of the current epoch in order.
     fn current_epoch(&self) -> impl Future<Output = Result<Vec<LedgerEntry>, RepoError>> + Send;
-    /// Start a new epoch with `opening`; returns its number.
+    /// Audited reset: in ONE transaction insert the opening line of epoch `opening.epoch` and the
+    /// `audit` row; both or neither. `opening.epoch` must be exactly the current epoch + 1 (0 on
+    /// an empty ledger counts as epoch 0), else `RepoError::Conflict` and nothing is stored (a
+    /// racing second reset loses). There is no unaudited way to start an epoch.
     fn new_epoch(
         &self,
         opening: LedgerEntry,
+        audit: AuditDraft,
+        chain: ChainFn,
     ) -> impl Future<Output = Result<u32, RepoError>> + Send;
 }
 

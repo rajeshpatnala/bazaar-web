@@ -418,6 +418,7 @@ const fn reason_str(e: AccountError) -> &'static str {
         AccountError::BadCharge => "bad_charge",
         AccountError::NotOpened => "not_opened",
         AccountError::Ledger(_) => "ledger_error",
+        AccountError::ResetRefused(_) | AccountError::BadActor => "reset_refused",
     }
 }
 
@@ -427,7 +428,10 @@ const fn map_account(e: AccountError) -> ExecError {
         AccountError::NoPosition => ExecError::InvalidInput("no position to sell"),
         AccountError::InvalidFill => ExecError::InvalidInput("invalid fill"),
         AccountError::ChargesUnavailable | AccountError::BadCharge => ExecError::MarginUnavailable,
-        AccountError::Ledger(_) => ExecError::Storage,
+        // Reset errors cannot come from a fill; fail closed as storage if they ever did.
+        AccountError::Ledger(_) | AccountError::ResetRefused(_) | AccountError::BadActor => {
+            ExecError::Storage
+        }
     }
 }
 
@@ -465,7 +469,12 @@ mod tests {
         async fn current_epoch(&self) -> Result<Vec<LedgerEntry>, RepoError> {
             Ok(lock(&self.0).last().cloned().unwrap_or_default())
         }
-        async fn new_epoch(&self, o: LedgerEntry) -> Result<u32, RepoError> {
+        async fn new_epoch(
+            &self,
+            o: LedgerEntry,
+            _: bazaar_core::ports::AuditDraft,
+            _: bazaar_core::ports::ChainFn,
+        ) -> Result<u32, RepoError> {
             let mut g = lock(&self.0);
             g.push(vec![o]);
             Ok(u32::try_from(g.len()).unwrap())
@@ -556,7 +565,15 @@ mod tests {
             clock.clone(),
             d(cash),
         ));
-        acct.reset().await.unwrap();
+        acct.reset(
+            &crate::account::ResetRequest {
+                reason: crate::account::ResetReason::Initial,
+                actor: "test".into(),
+            },
+            &crate::account::RefuseAll,
+        )
+        .await
+        .unwrap();
         let ex = PaperExecutor::new(
             acct,
             audit.clone(),

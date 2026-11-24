@@ -16,7 +16,8 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 use bazaar_core::clock::Clock;
-use bazaar_core::ports::{LedgerEntry, PaperLedgerRepo, RepoError, SourceError};
+use bazaar_core::ports::{AuditDraft, LedgerEntry, PaperLedgerRepo, RepoError, SourceError};
+use bazaar_execution::audit::chain_hash;
 
 /// Ledger entry kinds; stored as their `as_str` label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +50,65 @@ impl LedgerKind {
         [Self::Opening, Self::Buy, Self::Sell, Self::Charge]
             .into_iter()
             .find(|k| k.as_str() == s)
+    }
+}
+
+/// Why a paper reset is requested. Typed on purpose: no free text reaches the audit row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetReason {
+    /// First open of an empty ledger (the only reason that skips the guard).
+    Initial,
+    /// The owner asked for a fresh account.
+    OwnerRequested,
+}
+
+impl ResetReason {
+    /// Stable label stored in the audit row.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Initial => "initial",
+            Self::OwnerRequested => "owner_requested",
+        }
+    }
+}
+
+/// A reset request. The opening amount is never part of it: it comes from config only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetRequest {
+    pub reason: ResetReason,
+    /// Who asked: 1..=64 chars of `[A-Za-z0-9_.:-]` (it lands in the audit JSON verbatim).
+    pub actor: String,
+}
+
+/// The rule that refused a reset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetRule {
+    /// The circuit breaker is latched.
+    BreakerLatched,
+    /// Net P&L of the current IST week (all epochs) is negative.
+    WeeklyLoss,
+    /// The guard could not read what it needs: unknown refuses.
+    GuardUnavailable,
+    /// `Initial` asked on a ledger that already has an epoch.
+    InitialOnOpenedLedger,
+}
+
+/// Port: may the owner reset now? Implemented over the ledger week and the breaker latch by the
+/// server wiring. An unreadable answer must be `GuardUnavailable`, never `Ok`.
+pub trait ResetGuard: Send + Sync {
+    /// # Errors
+    /// The [`ResetRule`] that refuses.
+    fn check(&self) -> impl Future<Output = Result<(), ResetRule>> + Send;
+}
+
+/// Guard that refuses every reset (fail-closed default until a real guard is wired).
+#[derive(Debug, Clone, Copy)]
+pub struct RefuseAll;
+
+impl ResetGuard for RefuseAll {
+    fn check(&self) -> impl Future<Output = Result<(), ResetRule>> + Send {
+        std::future::ready(Err(ResetRule::GuardUnavailable))
     }
 }
 
@@ -109,6 +169,10 @@ pub enum AccountError {
     ChargesUnavailable,
     #[error("charge from source is negative, or zero for a non-zero notional")]
     BadCharge,
+    #[error("reset refused: {0:?}")]
+    ResetRefused(ResetRule),
+    #[error("reset actor must be 1..=64 chars of [A-Za-z0-9_.:-]")]
+    BadActor,
     #[error("no opening balance; reset the account first")]
     NotOpened,
     #[error("ledger: {0}")]
@@ -199,19 +263,55 @@ impl<R: PaperLedgerRepo, C: ChargeSource> PaperAccount<R, C> {
         replay(&self.repo.current_epoch().await?)
     }
 
-    /// Start a new epoch with the configured starting cash; the old epoch's ledger is kept.
-    /// Returns the epoch. Callers must audit the reset; loss-limit carry-over across a reset is
-    /// the wiring slice's job (recorded in the F10 feature record).
+    /// Audited reset: a new epoch with the configured starting cash, its opening line and an
+    /// audit row (`paper_reset`: actor, epoch, opening, reason) in ONE store transaction. The
+    /// old epoch's ledger is kept. `Initial` is allowed only on an empty ledger and skips the
+    /// guard; every other reason needs `guard` to say yes (a refusal writes nothing).
     ///
     /// # Errors
-    /// `InvalidFill` if the configured starting cash is not positive; ledger failure.
-    pub async fn reset(&self) -> Result<u32, AccountError> {
+    /// `ResetRefused(rule)`; `BadActor`; `InvalidFill` if the configured starting cash is not
+    /// positive; ledger failure (`Conflict` when a racing reset won).
+    pub async fn reset<G: ResetGuard>(
+        &self,
+        req: &ResetRequest,
+        guard: &G,
+    ) -> Result<u32, AccountError> {
+        let ok = |c: char| c.is_ascii_alphanumeric() || "_.:-".contains(c);
+        if req.actor.is_empty() || req.actor.len() > 64 || !req.actor.chars().all(ok) {
+            return Err(AccountError::BadActor);
+        }
         if self.starting_cash <= Decimal::ZERO {
             return Err(AccountError::InvalidFill);
         }
         let _g = self.write.lock().await;
-        let e = self.entry(0, LedgerKind::Opening, self.starting_cash, None);
-        Ok(self.repo.new_epoch(e).await?)
+        let epoch = self.balances().await?.epoch;
+        match (req.reason, epoch) {
+            (ResetReason::Initial, Some(_)) => {
+                return Err(AccountError::ResetRefused(ResetRule::InitialOnOpenedLedger));
+            }
+            (ResetReason::Initial, None) => {}
+            (ResetReason::OwnerRequested, _) => {
+                guard.check().await.map_err(AccountError::ResetRefused)?;
+            }
+        }
+        let next = epoch
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(AccountError::Ledger(RepoError::Other))?;
+        let e = self.entry(next, LedgerKind::Opening, self.starting_cash, None);
+        let audit = AuditDraft {
+            ts_ist_rfc3339: e.ts_ist_rfc3339.clone(),
+            actor: req.actor.clone(),
+            kind: "paper_reset".to_owned(),
+            // Canonical JSON: sorted keys, no whitespace; every value is typed or validated.
+            payload: format!(
+                "{{\"actor\":\"{}\",\"epoch\":{next},\"opening\":\"{}\",\"reason\":\"{}\"}}",
+                req.actor,
+                self.starting_cash,
+                req.reason.as_str()
+            ),
+        };
+        Ok(self.repo.new_epoch(e, audit, chain_hash).await?)
     }
 
     /// Signed trade leg and signed (negative) charge leg after validation.
@@ -302,6 +402,8 @@ mod tests {
     struct FakeRepo {
         epochs: StdMutex<Vec<Vec<LedgerEntry>>>,
         fail_next: AtomicBool,
+        fail_audit: AtomicBool,
+        audits: StdMutex<Vec<AuditDraft>>,
     }
     impl FakeRepo {
         fn lines(&self, epoch_idx: usize) -> Vec<LedgerEntry> {
@@ -331,10 +433,18 @@ mod tests {
                 .cloned()
                 .unwrap_or_default())
         }
-        async fn new_epoch(&self, mut opening: LedgerEntry) -> Result<u32, RepoError> {
+        async fn new_epoch(
+            &self,
+            opening: LedgerEntry,
+            audit: AuditDraft,
+            _: bazaar_core::ports::ChainFn,
+        ) -> Result<u32, RepoError> {
             let mut g = self.0.epochs.lock().unwrap();
             let n = u32::try_from(g.len()).unwrap() + 1;
-            opening.epoch = n;
+            if opening.epoch != n || self.0.fail_audit.load(Ordering::SeqCst) {
+                return Err(RepoError::Conflict);
+            }
+            self.0.audits.lock().unwrap().push(audit);
             g.push(vec![opening]);
             Ok(n)
         }
@@ -358,6 +468,31 @@ mod tests {
                 .map(|b| b + self.per_unit * Decimal::from(q))
                 .ok_or(SourceError::Unavailable)
         }
+    }
+
+    struct Allow;
+    impl ResetGuard for Allow {
+        async fn check(&self) -> Result<(), ResetRule> {
+            Ok(())
+        }
+    }
+    struct Deny(ResetRule);
+    impl ResetGuard for Deny {
+        async fn check(&self) -> Result<(), ResetRule> {
+            Err(self.0)
+        }
+    }
+    fn req(reason: ResetReason) -> ResetRequest {
+        ResetRequest {
+            reason,
+            actor: "owner".into(),
+        }
+    }
+    /// First open: the only reset that skips the guard.
+    async fn open(a: &Acct) -> u32 {
+        a.reset(&req(ResetReason::Initial), &RefuseAll)
+            .await
+            .unwrap()
     }
 
     type Acct = PaperAccount<Shared, FakeCharges>;
@@ -397,7 +532,7 @@ mod tests {
     #[tokio::test]
     async fn buy_debits_cost_and_charge_sell_credits() {
         let (a, _) = acct(Some(d("20")), "10000");
-        a.reset().await.unwrap();
+        open(&a).await;
         let b = a.apply_fill(&fill(true, 10, "100")).await.unwrap();
         assert_eq!(b.cash, d("8980"));
         assert_eq!(b.charges_paid, d("20"));
@@ -409,7 +544,7 @@ mod tests {
     #[tokio::test]
     async fn booked_lines_carry_kind_epoch_ref_and_ist_timestamp() {
         let (a, repo) = acct(Some(d("20")), "10000");
-        a.reset().await.unwrap();
+        open(&a).await;
         a.apply_fill(&fill(true, 10, "100")).await.unwrap();
         let l = repo.lines(0);
         assert_eq!(l.len(), 3);
@@ -431,14 +566,14 @@ mod tests {
     #[tokio::test]
     async fn exact_cash_is_accepted_one_rupee_less_is_not() {
         let (a, _) = acct(Some(d("20")), "1020");
-        a.reset().await.unwrap();
+        open(&a).await;
         a.check_funds(&fill(true, 10, "100")).await.unwrap();
         assert_eq!(
             a.apply_fill(&fill(true, 10, "100")).await.unwrap().cash,
             Decimal::ZERO
         );
         let (b, _) = acct(Some(d("20")), "1019");
-        b.reset().await.unwrap();
+        open(&b).await;
         assert_eq!(
             b.check_funds(&fill(true, 10, "100")).await,
             Err(AccountError::InsufficientFunds)
@@ -448,7 +583,7 @@ mod tests {
     #[tokio::test]
     async fn refuses_what_cash_cannot_cover_and_ledger_is_untouched() {
         let (a, repo) = acct(Some(d("20")), "1000");
-        a.reset().await.unwrap();
+        open(&a).await;
         assert_eq!(
             a.apply_fill(&fill(true, 10, "100")).await,
             Err(AccountError::InsufficientFunds)
@@ -460,7 +595,7 @@ mod tests {
     #[tokio::test]
     async fn sell_above_held_quantity_is_refused_and_creates_no_cash() {
         let (a, repo) = acct(Some(d("20")), "1000");
-        a.reset().await.unwrap();
+        open(&a).await;
         let mut s = fill(false, 10, "100");
         s.held_qty = 9;
         assert_eq!(a.apply_fill(&s).await, Err(AccountError::NoPosition));
@@ -483,7 +618,7 @@ mod tests {
             a.check_funds(&fill(true, 1, "1")).await,
             Err(AccountError::NotOpened)
         );
-        a.reset().await.unwrap();
+        open(&a).await;
         assert_eq!(
             a.apply_fill(&fill(true, 0, "1")).await,
             Err(AccountError::InvalidFill)
@@ -499,7 +634,7 @@ mod tests {
             (Some(Decimal::ZERO), AccountError::BadCharge),
         ] {
             let (n, r) = acct(c, "100");
-            n.reset().await.unwrap();
+            open(&n).await;
             assert_eq!(n.apply_fill(&fill(true, 1, "1")).await, Err(want));
             assert_eq!(n.check_funds(&fill(true, 1, "1")).await, Err(want));
             assert_eq!(r.lines(0).len(), 1);
@@ -508,27 +643,100 @@ mod tests {
 
     #[tokio::test]
     async fn reset_uses_configured_cash_and_rejects_non_positive() {
-        let (z, _) = acct(Some(d("1")), "0");
-        assert_eq!(z.reset().await, Err(AccountError::InvalidFill));
-        let (n, _) = acct(Some(d("1")), "-5");
-        assert_eq!(n.reset().await, Err(AccountError::InvalidFill));
+        for start in ["0", "-5"] {
+            let (a, repo) = acct(Some(d("1")), start);
+            assert_eq!(
+                a.reset(&req(ResetReason::Initial), &RefuseAll).await,
+                Err(AccountError::InvalidFill)
+            );
+            assert!(repo.epochs.lock().unwrap().is_empty());
+            assert!(repo.audits.lock().unwrap().is_empty());
+        }
     }
 
     #[tokio::test]
-    async fn reset_starts_new_epoch_and_keeps_old_ledger() {
+    async fn reset_writes_epoch_opening_and_audit_row_and_keeps_old_ledger() {
         let (a, repo) = acct(Some(d("1")), "500");
-        assert_eq!(a.reset().await.unwrap(), 1);
+        assert_eq!(open(&a).await, 1);
         a.apply_fill(&fill(true, 1, "100")).await.unwrap();
-        assert_eq!(a.reset().await.unwrap(), 2);
+        let old = repo.lines(0);
+        assert_eq!(
+            a.reset(&req(ResetReason::OwnerRequested), &Allow).await,
+            Ok(2)
+        );
         let b = a.balances().await.unwrap();
         assert_eq!((b.epoch, b.cash, b.entries), (Some(2), d("500"), 1));
-        assert_eq!(repo.lines(0).len(), 3);
+        assert_eq!(repo.lines(0), old, "old epoch untouched");
+        let au = repo.audits.lock().unwrap().clone();
+        assert_eq!(au.len(), 2);
+        let (first, second) = (&au[0], &au[1]);
+        assert_eq!(
+            (first.kind.as_str(), first.actor.as_str()),
+            ("paper_reset", "owner")
+        );
+        assert_eq!(
+            first.payload,
+            r#"{"actor":"owner","epoch":1,"opening":"500","reason":"initial"}"#
+        );
+        assert_eq!(
+            second.payload,
+            r#"{"actor":"owner","epoch":2,"opening":"500","reason":"owner_requested"}"#
+        );
+        assert_eq!(second.ts_ist_rfc3339, repo.lines(1)[0].ts_ist_rfc3339);
+    }
+
+    #[tokio::test]
+    async fn guard_refusals_name_the_rule_and_write_nothing() {
+        let (a, repo) = acct(Some(d("1")), "500");
+        open(&a).await;
+        for rule in [
+            ResetRule::BreakerLatched,
+            ResetRule::WeeklyLoss,
+            ResetRule::GuardUnavailable,
+        ] {
+            assert_eq!(
+                a.reset(&req(ResetReason::OwnerRequested), &Deny(rule))
+                    .await,
+                Err(AccountError::ResetRefused(rule))
+            );
+        }
+        // The fail-closed default refuses too, and so does Initial on an opened ledger.
+        assert_eq!(
+            a.reset(&req(ResetReason::OwnerRequested), &RefuseAll).await,
+            Err(AccountError::ResetRefused(ResetRule::GuardUnavailable))
+        );
+        assert_eq!(
+            a.reset(&req(ResetReason::Initial), &Allow).await,
+            Err(AccountError::ResetRefused(ResetRule::InitialOnOpenedLedger))
+        );
+        assert_eq!(repo.epochs.lock().unwrap().len(), 1);
+        assert_eq!(repo.audits.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_audit_means_no_new_epoch_and_bad_actor_is_refused() {
+        let (a, repo) = acct(Some(d("1")), "500");
+        open(&a).await;
+        repo.fail_audit.store(true, Ordering::SeqCst);
+        assert_eq!(
+            a.reset(&req(ResetReason::OwnerRequested), &Allow).await,
+            Err(AccountError::Ledger(RepoError::Conflict))
+        );
+        assert_eq!(a.balances().await.unwrap().epoch, Some(1));
+        assert_eq!(repo.audits.lock().unwrap().len(), 1);
+        for bad in ["", "a\"b", &"x".repeat(65)] {
+            let r = ResetRequest {
+                reason: ResetReason::OwnerRequested,
+                actor: bad.into(),
+            };
+            assert_eq!(a.reset(&r, &Allow).await, Err(AccountError::BadActor));
+        }
     }
 
     #[tokio::test]
     async fn failed_append_many_leaves_ledger_unchanged_and_returns_error() {
         let (a, repo) = acct(Some(d("5")), "1000");
-        a.reset().await.unwrap();
+        open(&a).await;
         repo.fail_next.store(true, Ordering::SeqCst);
         assert_eq!(
             a.apply_fill(&fill(true, 1, "100")).await,
@@ -569,7 +777,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_fills_cannot_overdraw_one_account() {
         let (a, _) = acct(Some(d("10")), "1000");
-        a.reset().await.unwrap();
+        open(&a).await;
         let a = Arc::new(a);
         // Each affordable alone (610 of 1000), not together.
         let tasks: Vec<_> = (0..8)
@@ -601,12 +809,12 @@ mod tests {
             let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
             rt.block_on(async {
                 let (a, repo) = acct_with(Some(d("5")), Decimal::from(per_unit), "20000");
-                a.reset().await.unwrap();
+                open(&a).await;
                 let mut held = 0u32;
                 for (op, buy, qty, price) in ops {
                     let before = a.balances().await.unwrap();
                     if op == 0 {
-                        a.reset().await.unwrap();
+                        a.reset(&req(ResetReason::OwnerRequested), &Allow).await.unwrap();
                         continue;
                     }
                     let fail = op == 1;

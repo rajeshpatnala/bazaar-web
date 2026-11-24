@@ -193,8 +193,13 @@ impl PaperLedgerRepo for SqliteStore {
         self.ledger_current_epoch().await
     }
 
-    async fn new_epoch(&self, opening: LedgerEntry) -> Result<u32, RepoError> {
-        self.ledger_new_epoch(&opening).await
+    async fn new_epoch(
+        &self,
+        opening: LedgerEntry,
+        audit: AuditDraft,
+        chain: ChainFn,
+    ) -> Result<u32, RepoError> {
+        self.ledger_new_epoch(&opening, &audit, chain).await
     }
 }
 
@@ -369,8 +374,18 @@ mod tests {
         let cur = PaperLedgerRepo::current_epoch(&s).await.unwrap();
         assert_eq!(cur.len(), 2);
         assert_eq!(cur[1].amount, Decimal::from_str("-1.25").unwrap());
-        assert_eq!(PaperLedgerRepo::new_epoch(&s, entry(0, "50")).await, Ok(2));
-        assert_eq!(PaperLedgerRepo::current_epoch(&s).await.unwrap().len(), 1);
+        assert_eq!(
+            PaperLedgerRepo::new_epoch(&s, entry(2, "50"), test_draft("paper_reset"), test_chain)
+                .await,
+            Ok(2)
+        );
+        let cur = PaperLedgerRepo::current_epoch(&s).await.unwrap();
+        assert_eq!((cur.len(), cur[0].epoch), (1, 2));
+        // The audit row landed in the same transaction and the chain verifies.
+        let rows = AuditRepo::read_all(&s).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].draft.kind, "paper_reset");
+        s.audit_verify(test_chain).await.unwrap();
     }
 
     fn pending(id: u128) -> OrderRecord {
