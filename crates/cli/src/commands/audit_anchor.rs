@@ -161,7 +161,10 @@ mod tests {
             audit_anchor_adopt(dir.path(), false).await.unwrap_err(),
             CommandError::Store("conflict")
         );
-        assert_eq!(std::fs::read_to_string(anchor_file(dir.path())).unwrap(), ahead);
+        assert_eq!(
+            std::fs::read_to_string(anchor_file(dir.path())).unwrap(),
+            ahead
+        );
         let r = audit_anchor_adopt(dir.path(), true).await.unwrap();
         assert_eq!(
             (r.old_seq, r.old_fault, r.new_seq),

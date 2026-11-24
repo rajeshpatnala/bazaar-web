@@ -197,12 +197,15 @@ async fn serve(port_flag: Option<u16>) -> anyhow::Result<()> {
     // drains, so a final pass runs before exit.
     let cancel = tokio_util::sync::CancellationToken::new();
     // `driver` stays alive here: the quote feed slice calls `driver.on_tick` (F10 HARD CONDITION).
-    let driver = Arc::new(runtime::Driver::new(
-        rt.paper.clone(),
-        rt.handle.clone(),
-        state.alarms.clone(),
-        state.clock.clone(),
-    ));
+    let driver = Arc::new(
+        runtime::Driver::new(
+            rt.paper.clone(),
+            rt.handle.clone(),
+            state.alarms.clone(),
+            state.clock.clone(),
+        )
+        .with_anchor(rt.store.clone()),
+    );
     let mut driver_task = tokio::spawn(driver.clone().run(DRIVER_EVERY, cancel.clone()));
     let serve = axum::serve(listener, app::build(state))
         .with_graceful_shutdown(shutdown_signal())
@@ -214,6 +217,11 @@ async fn serve(port_flag: Option<u16>) -> anyhow::Result<()> {
     cancel.cancel();
     if !runtime::stop(&mut driver_task, runtime::STOP_WAIT).await {
         tracing::error!("tick driver did not stop cleanly");
+    }
+    // The detached anchor write may still be queued: flush it so the anchor sits at the audit
+    // tail before exit (bounded by the store's own write timeout). Failure is loud, not fatal.
+    if let Err(e) = rt.store.anchor_flush().await {
+        tracing::error!(error = %e, "audit anchor not flushed at shutdown");
     }
     served?;
     Ok(())

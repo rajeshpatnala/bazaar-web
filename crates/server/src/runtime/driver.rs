@@ -29,6 +29,10 @@ use crate::state::AlarmBoard;
 
 /// Alarm code shown on `GET /status` while a square-off is blocked.
 pub const ALARM_SQUARE_OFF: &str = "square_off_blocked";
+/// Alarm code while the audit anchor write is failing (ADR 0003): rows after the last good anchor
+/// write could be truncated undetected until it is repaired.
+const ALARM_AUDIT_ANCHOR: &str = "audit_anchor_lag";
+const ANCHOR_TEXT: &str = "audit anchor write failing; the audit tail is not protected";
 const ALARM_TEXT: &str = "MIS square-off blocked; a position stays open until it fills";
 /// While an alarm is up, the driver's own error log repeats every this many passes.
 const LOG_EVERY: u32 = 30;
@@ -124,6 +128,8 @@ pub struct Driver {
     alarms: AlarmBoard,
     clock: Arc<dyn Clock>,
     watch: Mutex<SquareOffWatch>,
+    /// The store whose audit anchor health is watched (`None`: nothing watched).
+    anchor: Option<SqliteStore>,
     /// Passes since the alarm went up (for the log rate limit).
     up_passes: AtomicU32,
 }
@@ -142,7 +148,38 @@ impl Driver {
             alarms,
             clock,
             watch: Mutex::new(SquareOffWatch::default()),
+            anchor: None,
             up_passes: AtomicU32::new(0),
+        }
+    }
+
+    /// Watch the audit anchor of `store` each timer pass: a lagging anchor raises
+    /// [`ALARM_AUDIT_ANCHOR`] (after one retry) and a repaired one clears it.
+    #[must_use]
+    pub fn with_anchor(mut self, store: SqliteStore) -> Self {
+        self.anchor = Some(store);
+        self
+    }
+
+    /// Retry a lagging anchor write once, then raise or clear the alarm from the status.
+    async fn check_anchor(&self) {
+        let Some(store) = &self.anchor else { return };
+        let mut st = store.anchor_status().await;
+        if st.is_some_and(|s| s.lag) {
+            if store.anchor_flush().await.is_err() {
+                tracing::warn!(category = "anchor_write", "audit anchor still failing");
+            }
+            st = store.anchor_status().await;
+        }
+        // No status at all means no anchor on a store that must have one: alarm, never "fine".
+        if st.is_none_or(|s| s.lag) {
+            self.alarms.raise(
+                ALARM_AUDIT_ANCHOR,
+                ANCHOR_TEXT,
+                &self.clock.now_ist().to_rfc3339(),
+            );
+        } else {
+            self.alarms.clear(ALARM_AUDIT_ANCHOR);
         }
     }
 
@@ -192,6 +229,7 @@ impl Driver {
         if let Err(e) = self.handle.expire_stale().await {
             tracing::error!(error = %e, "approval expiry pass failed");
         }
+        self.check_anchor().await;
     }
 
     fn apply_clock(&self, out: &ClockOutcome) {
@@ -403,6 +441,55 @@ mod tests {
         )
         .await;
         assert!(!stalled);
+    }
+
+    /// A failing anchor write raises the alarm on a timer pass; a repaired one clears it.
+    #[tokio::test]
+    async fn a_lagging_audit_anchor_raises_the_alarm_and_repair_clears_it() {
+        let c = clock();
+        let (r, dir) = rt(&c).await;
+        let alarms = AlarmBoard::new();
+        let d = Driver::new(r.paper.clone(), r.handle.clone(), alarms.clone(), c.clone())
+            .with_anchor(r.store.clone());
+        d.on_timer().await;
+        assert_eq!(alarms.snapshot(), vec![], "healthy anchor: no alarm");
+        // The first audit row creates the anchor file; a second one then has to rewrite it.
+        r.handle
+            .set_kill_switch(true, "owner", "first")
+            .await
+            .unwrap();
+        r.store.anchor_flush().await.unwrap();
+        // A directory where the anchor file belongs makes every write fail.
+        let ap = dir.path().join("x.db.anchor");
+        std::fs::remove_file(&ap).unwrap();
+        std::fs::create_dir(&ap).unwrap();
+        r.handle
+            .set_kill_switch(false, "owner", "RELEASE KILL SWITCH")
+            .await
+            .unwrap();
+        r.store.anchor_flush().await.unwrap_err();
+        d.on_timer().await;
+        let a = alarms.snapshot();
+        assert_eq!(a.len(), 1, "{a:?}");
+        assert_eq!(
+            (a[0].code.as_str(), a[0].message.as_str()),
+            (ALARM_AUDIT_ANCHOR, ANCHOR_TEXT)
+        );
+        // Repair: the next pass retries the write, finds it good and clears the alarm.
+        std::fs::remove_dir(&ap).unwrap();
+        d.on_timer().await;
+        assert_eq!(alarms.snapshot(), vec![]);
+        assert!(!r.store.anchor_status().await.unwrap().lag);
+    }
+
+    /// A driver that watches no store never raises the anchor alarm.
+    #[tokio::test]
+    async fn a_driver_without_an_anchor_store_never_raises_the_anchor_alarm() {
+        let c = clock();
+        let (r, _d) = rt(&c).await;
+        let (d, alarms) = driver(&r, &c);
+        d.on_timer().await;
+        assert_eq!(alarms.snapshot(), vec![]);
     }
 
     #[tokio::test]

@@ -625,6 +625,62 @@ mod tests {
         assert!(matches!(e, Err(StartError::Store(_))), "{e:?}");
     }
 
+    /// AC4 / RISK-133-3: a failing `reload` makes `start` return `StartError::Reload`: no
+    /// `Runtime` (so no handle, no state, nothing for `main` to bind) and no stored order touched.
+    /// The failure is real: more `approved` rows than the reload limit is a storage error.
+    #[tokio::test]
+    async fn a_failing_reload_aborts_start_with_reload_error_and_serves_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("x.db");
+        let c = clock();
+        let store = bazaar_cli::compose::open_store(&db).await.unwrap();
+        let payload = intent(&c, 1, Side::Buy, false).to_payload();
+        // One over the limit (1000) in one state.
+        for id in 1..=1001_u128 {
+            OrderRepo::insert(
+                &store,
+                bazaar_core::ports::OrderRecord {
+                    intent_id: id,
+                    version: 0,
+                    state: "approved".into(),
+                    payload: payload.clone(),
+                },
+                AuditDraft {
+                    ts_ist_rfc3339: c.now_ist().to_rfc3339(),
+                    actor: "owner".into(),
+                    kind: "seed".into(),
+                    payload: "{}".into(),
+                },
+                chain_hash,
+            )
+            .await
+            .unwrap();
+        }
+        store.anchor_flush().await.unwrap();
+        drop(store);
+        let e = start(&db, RISK, &cfg(), c.clone(), calendar()).await;
+        assert!(
+            matches!(e, Err(StartError::Reload(ExecError::Storage))),
+            "{e:?}"
+        );
+        // Nothing was half-processed: every row is still `approved`, untouched.
+        let store = bazaar_cli::compose::open_store(&db).await.unwrap();
+        let rows = OrderRepo::list_in_state(&store, "approved", 2000)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1001);
+        assert!(rows.iter().all(|r| r.version == 0));
+    }
+
+    /// `main` must open (and reload) the runtime strictly before it binds the port.
+    #[test]
+    fn main_starts_the_runtime_before_binding_the_listener() {
+        let src = include_str!("main.rs");
+        let start = src.find("runtime::start(").unwrap();
+        let bind = src.find("TcpListener::bind(").unwrap();
+        assert!(start < bind, "bind must come after a successful start");
+    }
+
     #[tokio::test]
     async fn an_approved_unsent_order_is_blocked_at_restart_and_never_sent() {
         let dir = tempfile::tempdir().unwrap();
