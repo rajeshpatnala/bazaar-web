@@ -211,9 +211,10 @@ async fn serve(port_flag: Option<u16>) -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .into_future();
     // RISK-142-1: if the driver ends or panics first, serving stops (fail closed), loudly.
+    // The result is kept, not `?`-returned, so stop and the anchor flush below always run.
     let served = runtime::serve_while_driven(serve, &mut driver_task)
         .await
-        .inspect_err(|e| tracing::error!(error = %e, "stopping the server"))?;
+        .inspect_err(|e| tracing::error!(error = %e, "stopping the server"));
     cancel.cancel();
     if !runtime::stop(&mut driver_task, runtime::STOP_WAIT).await {
         tracing::error!("tick driver did not stop cleanly");
@@ -223,7 +224,7 @@ async fn serve(port_flag: Option<u16>) -> anyhow::Result<()> {
     if let Err(e) = rt.store.anchor_flush().await {
         tracing::error!(error = %e, "audit anchor not flushed at shutdown");
     }
-    served?;
+    served??;
     Ok(())
 }
 

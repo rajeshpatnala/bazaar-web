@@ -38,7 +38,14 @@ Human-only `bazaar-cli audit-anchor adopt` (built in slice 9b) verifies the chai
 the anchor for the current tail (`SqliteStore::anchor_adopt`). Needed once for an existing
 database and after restoring a backup. Any existing anchor file (ahead, different hash, garbage,
 oversized, or even consistent) is replaced only with the explicit acceptance (`accept_rollback`);
-only a missing file adopts freely. `AdoptReport` names the old seq and the fault found.
+only a missing file adopts freely. `AdoptReport` names the old seq and the fault found; the CLI also prints the new tail seq and the
+last row's timestamp so the owner can check them against their own records.
+
+Stop the server first: adopt takes no lock, and a running server's anchor writer could race it
+(single writer per database). A missing-file adopt trusts the current tail: an attacker who also
+deleted the anchor and cut rows is not detected. Adopt writes no audit row; the printed report
+(old seq, fault, new seq, tail time on stdout) is the only trail. An audit row for adopt is a
+slice 9c follow-up.
 
 ## Limits (say so, never claim more)
 - Single writer: the high-water mark is per process; a second process on the same database, or

@@ -676,9 +676,24 @@ mod tests {
     #[test]
     fn main_starts_the_runtime_before_binding_the_listener() {
         let src = include_str!("main.rs");
-        let start = src.find("runtime::start(").unwrap();
+        let start = src.find("= runtime::start(").unwrap();
         let bind = src.find("TcpListener::bind(").unwrap();
         assert!(start < bind, "bind must come after a successful start");
+    }
+
+    /// RISK-175-1/2: the driver watches the store's anchor, and shutdown always stops the driver
+    /// and flushes the anchor before the serve result is returned (no early `?`).
+    #[test]
+    fn main_wires_the_anchor_and_flushes_it_on_every_shutdown_path() {
+        let src = include_str!("main.rs");
+        assert!(src.contains(".with_anchor(rt.store.clone())"));
+        let serve = src.find("serve_while_driven(").unwrap();
+        let stop = src.find("runtime::stop(&mut driver_task").unwrap();
+        let flush = src.find("rt.store.anchor_flush()").unwrap();
+        let ret = src.find("served??;").unwrap();
+        assert!(serve < stop && stop < flush && flush < ret);
+        let between = &src[serve..flush];
+        assert!(!between.contains("?;"), "an early `?` would skip the flush");
     }
 
     #[tokio::test]

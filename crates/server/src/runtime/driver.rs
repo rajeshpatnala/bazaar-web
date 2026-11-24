@@ -492,6 +492,23 @@ mod tests {
         assert_eq!(alarms.snapshot(), vec![]);
     }
 
+    /// RISK-175-2: a watched store that has no anchor (opened without one) is an alarm, not a pass.
+    #[tokio::test]
+    async fn a_watched_store_without_an_anchor_raises_the_alarm() {
+        let c = clock();
+        let (r, dir) = rt(&c).await;
+        let plain = SqliteStore::open(&dir.path().join("plain.db"))
+            .await
+            .unwrap();
+        let alarms = AlarmBoard::new();
+        let d = Driver::new(r.paper.clone(), r.handle.clone(), alarms.clone(), c.clone())
+            .with_anchor(plain);
+        d.on_timer().await;
+        let a = alarms.snapshot();
+        assert_eq!(a.len(), 1, "{a:?}");
+        assert_eq!(a[0].code.as_str(), ALARM_AUDIT_ANCHOR);
+    }
+
     #[tokio::test]
     async fn run_stops_on_cancel_through_the_public_entry() {
         let c = clock();
