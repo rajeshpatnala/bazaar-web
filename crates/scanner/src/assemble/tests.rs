@@ -1181,3 +1181,141 @@ fn risk_budget_is_sized_at_the_zone_top_so_a_close_beyond_it_fails_closed() {
     assert_eq!(r.ideas().len(), 0);
     assert_eq!(hard_rules(&r), vec![RuleId::G10, RuleId::G02]);
 }
+
+// ---- F11 T2 (tester) gap tests: slice 8 money fields, sweep, determinism ----
+
+#[test]
+fn t2_pending_capped_idea_moves_every_money_field_together() {
+    // Real fixture cap lowered to Rs 19,505; close 500.25 above entry_high 500.05 binds the cap.
+    let text = tight_cap_text(&semi_text());
+    let item = scored("AAA", 1, 80);
+    let r = run(
+        &text,
+        5,
+        &ref_source(&text, snap(), "500.25"),
+        std::slice::from_ref(&item),
+    );
+    let i = &r.ideas()[0];
+    assert_eq!((i.size().qty, i.size().lots), (38, 38));
+    assert_eq!(i.entry_zone(), (d("500.00"), d("500.05")));
+    assert_eq!(i.stop_loss(), d("489.95"));
+    assert_eq!(i.targets(), &[d("520.00")]);
+    // risk_rupees = 38 x 10.10 + max(cost 20 + 20, floor) = 383.80 + 40.
+    assert_eq!(i.risk_rupees(), d("423.80"));
+    // reward_risk is price-only on the worst fill: (520.00 - 500.05) / 10.10, never the signal'sz.
+    assert_eq!(
+        i.reward_risk(),
+        crate::types::reward_risk(d("500.05"), d("489.95"), d("520.00")).unwrap()
+    );
+    // The sized figures behind it, from the same inputs the assembler gives `size_idea`.
+    let gcfg = gate_cfg(&text);
+    let lim = limits_of(&gcfg);
+    let sig = &item.candidate.hits[0].signal;
+    let given = Levels {
+        entry_low: sig.entry_low,
+        entry_high: sig.entry_high,
+        stop: sig.stop,
+        targets: sig.targets.clone(),
+    };
+    let cost = |_q: u32| Tri::Known(d("40"));
+    let sz = size_idea(
+        &item.candidate.instrument,
+        &given,
+        &snap(),
+        &lim,
+        &cost,
+        Some(d("500.25")),
+    )
+    .unwrap();
+    assert_eq!((sz.size.qty, sz.size.lots), (38, 38));
+    assert_eq!(sz.risk_at_stop, d("383.80"));
+    assert_eq!(sz.allowance, d("40"));
+    assert_eq!(sz.risk_rupees, i.risk_rupees());
+    assert_eq!(sz.budget, d("500"));
+    assert_eq!(sz.notional, d("19001.90"));
+    assert!(sz.capped_by_order_cap);
+    // The position cap (G14) binds first (39), the order cap then takes one more share off.
+    assert!(sz.capped_by_position_cap);
+    assert_eq!(sz.reward_risk, i.reward_risk());
+    // The gate saw the capped notional at the reference and refused only for the approval.
+    assert!(Decimal::from(sz.size.qty) * d("500.25") <= lim.max_notional_per_order_inr);
+    let gs = i.gate();
+    assert!(gs.approval_pending() && !gs.passed);
+    assert_eq!(gs.hard_failures, vec![RuleId::G16]);
+    assert!(gs.overridable_failures.is_empty() && gs.paper_only.is_empty());
+    assert_eq!(r.blocked().len(), 0);
+}
+
+#[test]
+fn t2_sweep_of_closes_pins_idea_or_exact_refusing_rules_per_close() {
+    // close -> Some(qty, risk_rupees) for a pending idea, or None with the exact hard rules.
+    // 499 and 500.50 are outside the G10 price tolerance; 505 and 520 also breach G02 (risk at
+    // the chase fill). G16 is listed beside them because the approval is missing as well.
+    type Row = (&'static str, Option<(u32, &'static str)>, &'static [RuleId]);
+    let table: [Row; 8] = [
+        ("499", None, &[RuleId::G16, RuleId::G10]),
+        ("500.00", Some((39, "433.90")), &[]),
+        ("500.05", Some((39, "433.90")), &[]),
+        ("500.10", Some((39, "433.90")), &[]),
+        ("500.25", Some((38, "423.80")), &[]),
+        ("500.50", None, &[RuleId::G16, RuleId::G10]),
+        ("505", None, &[RuleId::G16, RuleId::G10, RuleId::G02]),
+        ("520", None, &[RuleId::G16, RuleId::G10, RuleId::G02]),
+    ];
+    let text = tight_cap_text(&semi_text());
+    let (mut ideas, mut blocks) = (0, 0);
+    for (close, want, rules) in table {
+        let r = run(
+            &text,
+            5,
+            &ref_source(&text, snap(), close),
+            &[scored("AAA", 1, 80)],
+        );
+        assert_eq!(
+            r.ideas().len() + r.blocked().len(),
+            1,
+            "{close}: never dropped"
+        );
+        match (r.ideas().first(), want) {
+            (Some(i), Some((qty, risk))) => {
+                ideas += 1;
+                let reference = d(close).max(i.entry_zone().1);
+                assert_eq!(i.size().qty, qty, "{close}");
+                assert_eq!(i.risk_rupees(), d(risk), "{close}");
+                assert!(Decimal::from(qty) * reference <= d("19505"), "{close}");
+                assert!(i.risk_rupees() <= d("500"), "{close}");
+                assert_eq!(i.gate().hard_failures, vec![RuleId::G16], "{close}");
+                assert!(i.gate().approval_pending() && !i.gate().passed, "{close}");
+            }
+            (None, None) => {
+                blocks += 1;
+                assert_eq!(hard_rules(&r), rules, "{close}");
+            }
+            (i, w) => assert_eq!(i.is_some(), w.is_some(), "{close}: outcome differs"),
+        }
+    }
+    // Both outcomes really ran.
+    assert_eq!((ideas, blocks), (4, 4));
+}
+
+#[test]
+fn t2_semi_auto_scan_is_deterministic_and_pending_never_reads_as_passed() {
+    let text = semi_text();
+    let items = [scored("AAA", 1, 90), scored("BBB", 2, 80)];
+    let a = run(&text, 5, &semi_source(snap(), "500"), &items);
+    let b = run(&text, 5, &semi_source(snap(), "500"), &items);
+    assert_eq!(format!("{a:?}"), format!("{b:?}"));
+    assert_eq!(a.ideas().len(), 2);
+    for i in a.ideas() {
+        assert!(!i.gate().passed && i.gate().approval_pending());
+        let why = crate::why::render(i).join("\n").to_lowercase();
+        assert!(why.contains("needs your approval"), "{why}");
+        for w in ["ready", "cleared", "confirmed", "good to go", "passed all"] {
+            assert!(!why.contains(w), "{w}: {why}");
+        }
+        assert!(
+            !why.contains("approved") || why.contains("not approved"),
+            "{why}"
+        );
+    }
+}
