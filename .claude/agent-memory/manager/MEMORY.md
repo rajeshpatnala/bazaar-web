@@ -7,3 +7,4 @@
 - [Trade lifecycle expectation](project_trade_lifecycle_expectation.md) — owner wants daily position tracking and hold/sell/add decisions, not one-shot ideas (2026-11-23)
 - [Review economy](feedback_review_economy.md) — security reviewer only when sensitive; verify-fixes for minors; risk-guardian always on its paths
 - [First-pass quality](feedback_first_pass_quality.md) — checklist-first, failure modes in plans, self-review gate, 400-line stop; baseline 72% round-2
+- [T2 only when complete](feedback_t2_only_when_complete.md) — never offer/launch T2 while slices remain; check plan + record first (owner, 2026-11-25)
