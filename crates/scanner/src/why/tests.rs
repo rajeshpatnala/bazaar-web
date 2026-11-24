@@ -519,6 +519,42 @@ fn gate_hard_soft_and_paper_only() {
     assert_eq!(gate_line(&gate(&[])), GATE_PASSED);
 }
 
+fn pending_gate() -> GateSummary {
+    let mut g = gate(&[RuleId::G16]);
+    g.approval_pending = true;
+    g
+}
+
+#[test]
+fn pending_idea_gets_the_exact_needs_approval_line_never_passed() {
+    let line = gate_line(&pending_gate());
+    assert_eq!(
+        line,
+        "Needs your approval. No order exists yet. The other safety checks pass right now and run again when you approve."
+    );
+    let lower = line.to_lowercase();
+    for w in [
+        "approved",
+        "ready",
+        "cleared",
+        "confirmed",
+        "good to go",
+        "passed",
+    ] {
+        assert!(!lower.contains(w), "`{w}` in {line}");
+    }
+}
+
+#[test]
+fn the_pending_line_needs_the_flag_and_only_g16() {
+    // Flag off: the same failure is a plain block.
+    assert!(gate_line(&gate(&[RuleId::G16])).starts_with("Blocked by the safety checks"));
+    // Flag on with another failure beside it: never the pending wording.
+    let mut g = gate(&[RuleId::G16, RuleId::G02]);
+    g.approval_pending = true;
+    assert!(gate_line(&g).starts_with("Blocked by the safety checks"));
+}
+
 #[test]
 fn hostile_note_is_escaped() {
     let note = "Results\n<script>alert(\"x\")</script> & 'more'\r\u{0007}\u{202E}end";

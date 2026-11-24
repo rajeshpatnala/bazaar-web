@@ -1,6 +1,6 @@
 # F11: Scanner (run strategies over a fixture universe, score, rank, Why text, Recommendation)
 
-Status: slices 1-7 done (config, universe and runner, scoring, guards, sizing, gate port and assemble, Why text, end-to-end fixture scan test); slice 8 (risk crate: ApprovalPending marker and G16-aware sizing) is still to come, so F11 is not closed. Not investment advice.
+Status: slices 1-8 done (config, universe and runner, scoring, guards, sizing, gate port and assemble, Why text, end-to-end fixture scan test, risk-crate approval marker and G16-aware sizing, scanner use of the marker); ready for T2. Not investment advice.
 
 Summary: a fixture scan yields ranked, explained, sized, gate-summarised recommendations; no route, no UI.
 Owner area: `crates/scanner`, `[scanner]` in `config/strategies.toml` (typed in `core::config::files`).
@@ -53,8 +53,9 @@ Step 4 acceptance (SEC-118-1): event `note` text is config-sourced and goes into
 
 ## Slice 6 note (gate port, assemble, truncate)
 `assemble.rs` gates each idea alone against the same snapshot and cash, with its own per-instrument data (`GateContextSource::data_for`; the scanner overlays its evidence and event facts, anything it does not hold stays Unknown). "Passed" means passes by itself, not all shown ideas together; the gate re-runs at approval. The `max_results` cut is silent by design (lowest-ranked passing ideas only). The recommendation id names instrument and bar only, never an approval key.
-Limitation until slice 8: in `semi_auto` the scan holds no approval, so G16 "approval not on record" fails every idea and all are blocked (test pins `[G01, G16]`). Paper (default) is unaffected. Nothing is loosened.
-- RISK-165-2 ApprovalPending marker + RISK-165-3 G16-aware sizing: defer: slice 8 (risk crate; owner wording first).
+`semi_auto`: an idea whose only gap is the missing approval (G16 `Unknown`) is listed in `ideas` with `approval_pending` true and `passed` false; the Why gate line reads "Needs your approval. No order exists yet. The other safety checks pass right now and run again when you approve." Any other failure (G01 outside paper, a real G16 breach, `Known(false)` approval) stays in `blocked`. `Recommendation::new` rejects the flag unless the hard list is exactly [G16]. Paper output is unchanged. Nothing is loosened; the DecisionGate still runs again at approval.
+- RISK-165-2 ApprovalPending marker and RISK-165-3 G16-aware sizing: closed (slices 8a and 8b).
 - Visible per-idea-gating line and cut count: defer: slice 7.
 - Second order sees the first at approval: defer: F12.
-- F11 8a review (PR 168): QUAN-168-1 `size_with_cost` now also applies the G16 per-order cap (`max_notional_per_order_inr`), so backtests with capital above Rs 1 lakh are capped by G16 (stricter only, never larger); default-capital results unchanged. The backtest test at capital 5,00,000 goes to the F9 Deferred list (no backtest edit here). RISK-168-3 deferred to slice 8b: scanner test where the order cap binds (sized qty x reference never breaches G16 in the gate run that follows).
+- F11 8a review (PR 168): QUAN-168-1 `size_with_cost` now also applies the G16 per-order cap (`max_notional_per_order_inr`), so backtests with capital above Rs 1 lakh are capped by G16 (stricter only, never larger); default-capital results unchanged. The backtest test at capital 5,00,000 goes to the F9 Deferred list (no backtest edit here). RISK-168-3 closed in 8b (CR-168-3, QUAN-168-2): scanner sizes at max(entry_high, decision-bar close), an Unknown close means entry_high; tests use the real fixture cap, compare qty x reference to the cap, and cover a close above entry_high. Earlier wording: scanner test where the order cap binds (sized qty x reference never breaches G16 in the gate run that follows).
+Slice 8b deferred: `within_order_cap` failure reports `BudgetBelowOneLot` rather than `OrderCapBelowOneLot` in the step-down path (cosmetic); the UI copy for the pending state is F12.

@@ -139,6 +139,10 @@ pub struct GateSummary {
     pub overridable_failures: Vec<RuleId>,
     /// The subset of `overridable_failures` that can be overridden in paper mode only.
     pub paper_only: Vec<RuleId>,
+    /// True only when the one failure is G16 and its sole reason is the missing approval (the
+    /// verdict's typed marker, never parsed from text). `passed` stays false and `hard_failures`
+    /// still lists G16. The idea is not approved: no order exists until the user approves it.
+    pub approval_pending: bool,
     pub evaluated_at: DateTime<Tz>,
     pub config_hash: String,
 }
@@ -166,9 +170,19 @@ impl GateSummary {
             hard_failures: hard,
             overridable_failures: soft,
             paper_only: paper,
+            approval_pending: v.approval_pending_only(),
             evaluated_at,
             config_hash: v.config_hash().as_str().to_owned(),
         }
+    }
+
+    /// The pending flag is allowed only on a failed gate whose one failure is G16.
+    fn pending_is_consistent(&self) -> bool {
+        !self.approval_pending
+            || (!self.passed
+                && self.hard_failures == [RuleId::G16]
+                && self.overridable_failures.is_empty()
+                && self.paper_only.is_empty())
     }
 }
 
@@ -210,6 +224,8 @@ pub enum RecError {
     BadRewardRisk,
     #[error("reward:risk does not match (first target - worst entry) / (worst entry - stop)")]
     RewardRiskMismatch,
+    #[error("`approval_pending` needs a failed gate whose only failure is G16")]
+    ApprovalPendingInconsistent,
     #[error("paper-only failures are not exactly the Paper-level overridable failures")]
     PaperOnlyNotOverridable,
     #[error("quantity must be above zero")]
@@ -350,6 +366,9 @@ impl Recommendation {
         want.sort();
         if have != want {
             return Err(RecError::PaperOnlyNotOverridable);
+        }
+        if !g.pending_is_consistent() {
+            return Err(RecError::ApprovalPendingInconsistent);
         }
         if g.passed != (g.hard_failures.is_empty() && g.overridable_failures.is_empty()) {
             return Err(RecError::GateInconsistent);

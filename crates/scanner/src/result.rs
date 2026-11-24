@@ -78,7 +78,7 @@ impl ScanResult {
     ) -> Self {
         let (mut ideas, mut hard) = (Vec::new(), Vec::new());
         for r in all_ideas {
-            if r.gate().hard_failures.is_empty() {
+            if r.gate().hard_failures.is_empty() || r.gate().approval_pending {
                 ideas.push(r);
             } else {
                 hard.push(r);

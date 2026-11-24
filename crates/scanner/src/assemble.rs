@@ -88,6 +88,8 @@ fn mode_aware(mut g: GateSummary, mode: ExecutionMode) -> GateSummary {
         let moved = std::mem::take(&mut g.paper_only);
         g.overridable_failures.retain(|r| !moved.contains(r));
         g.hard_failures.extend(moved);
+        // A failure moved to hard means the approval is not the only gap.
+        g.approval_pending = false;
     }
     g
 }
@@ -272,7 +274,9 @@ fn idea(
         (Tri::Known(a), Tri::Known(b)) => a.checked_add(b).map_or(Tri::Unknown, Tri::Known),
         _ => Tri::Unknown,
     };
-    let sized = size_idea(inst, &given, ctx.snapshot(), ctx.limits(), &cost)?;
+    // The gate's reference is max(intent.price, live); the scanner never invents one.
+    let reference = ctx.reference_price(inst.instrument_token);
+    let sized = size_idea(inst, &given, ctx.snapshot(), ctx.limits(), &cost, reference)?;
     let l = &sized.levels;
     let intent = OrderIntent {
         symbol: inst.tradingsymbol.clone(),
@@ -373,7 +377,10 @@ pub fn assemble(
             (Ok(c), Some(h)) => idea(s, h, cx, c),
         };
         match out {
-            Ok(r) if r.gate().hard_failures.is_empty() => ideas.push(r),
+            // A pending-only idea (G16, sole reason: no approval yet) is shown, not blocked.
+            Ok(r) if r.gate().hard_failures.is_empty() || r.gate().approval_pending => {
+                ideas.push(r);
+            }
             Ok(r) => {
                 let reason = BlockReason::GateHardFail(r.gate().hard_failures.clone());
                 blocked.push(BlockedIdea {

@@ -355,3 +355,32 @@ fn paper_only_must_be_exactly_the_paper_level_failures() {
         RecError::PaperOnlyNotOverridable
     );
 }
+
+#[test]
+fn approval_pending_flag_is_accepted_only_for_exactly_g16() {
+    let mut p = parts();
+    p.gate = GateSummary::from_verdict(&verdict(&[RuleId::G16]), t(18));
+    p.gate.approval_pending = true; // hand-set: the verdict never marked G16 pending
+    assert!(Recommendation::new(p.clone(), 30, 55).is_ok());
+    // Flag with a passed gate, a different rule, or extra failures is refused.
+    let mut q = parts();
+    q.gate.approval_pending = true;
+    assert_eq!(
+        Recommendation::new(q, 30, 55).unwrap_err(),
+        RecError::ApprovalPendingInconsistent
+    );
+    for failing in [
+        &[RuleId::G02][..],
+        &[RuleId::G16, RuleId::G02][..],
+        &[RuleId::G16, RuleId::G05][..],
+    ] {
+        let mut q = parts();
+        q.gate = GateSummary::from_verdict(&verdict(failing), t(18));
+        q.gate.approval_pending = true;
+        assert_eq!(
+            Recommendation::new(q, 30, 55).unwrap_err(),
+            RecError::ApprovalPendingInconsistent,
+            "{failing:?}"
+        );
+    }
+}

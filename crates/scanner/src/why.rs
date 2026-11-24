@@ -31,6 +31,8 @@ const BAN_UNCHECKED: &str =
     "The ban list was not checked, so confirm this name is not banned before acting.";
 const EVENTS_UNCHECKED: &str = "Results or policy dates were not checked.";
 const NO_TESTING: &str = "No testing result is shown for this method. Treat this as an idea to study, not a signal to trust.";
+/// Pending-only idea (RISK-165-2): the one gap is the missing approval. Never the passed wording.
+const GATE_PENDING: &str = "Needs your approval. No order exists yet. The other safety checks pass right now and run again when you approve.";
 const GATE_PASSED: &str = "The risk-rule checks passed when scanned (a pass does not make the trade safe); they run again before any order.";
 
 /// Risk, reward and invalidation lines, the checks that stop a trade, the gate line and the
@@ -330,6 +332,15 @@ fn gate_line(g: &GateSummary) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     };
+    // The lists decide too: the flag counts only with exactly G16 failing and nothing else.
+    if g.approval_pending
+        && !g.passed
+        && g.hard_failures == [RuleId::G16]
+        && g.overridable_failures.is_empty()
+        && g.paper_only.is_empty()
+    {
+        return GATE_PENDING.to_owned();
+    }
     let mut hard = g.hard_failures.clone();
     let mut paper = Vec::new();
     for r in &g.paper_only {

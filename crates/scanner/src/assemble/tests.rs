@@ -488,11 +488,173 @@ fn a_paper_level_failure_is_overridable_in_paper_but_blocked_in_semi_auto() {
     let src = source(move || Ok(context(&g)));
     let r = run(&semi, 5, &src, &[with_trades(scored("AAA", 1, 80), 5)]);
     assert_eq!(r.ideas().len(), 0, "non-actionable outside paper");
-    // G16 "approval not on record" fails every semi_auto idea until slice 8 (the scan never
-    // supplies an approval); G01 moved from paper-only to hard outside paper.
+    // G16 "approval not on record" fails every semi_auto idea (the scan never supplies an
+    // approval); G01 moved from paper-only to hard outside paper, so the approval is not the only
+    // gap: blocked as [G01, G16], never pending.
     let mut rules = hard_rules(&r);
     rules.sort();
     assert_eq!(rules, vec![RuleId::G01, RuleId::G16]);
+}
+
+fn semi_text() -> String {
+    TEXT.replace(
+        "execution_mode = \"paper\"",
+        "execution_mode = \"semi_auto\"",
+    )
+}
+
+/// A `semi_auto` context built from `snap` and the given reference price for token 1.
+fn semi_source(snap: PortfolioSnapshot, reference: &str) -> Source {
+    semi_source_with(&semi_text(), snap, reference)
+}
+
+fn semi_source_with(text: &str, snap: PortfolioSnapshot, reference: &str) -> Source {
+    let g = gate_cfg(text);
+    let reference = d(reference);
+    source(move || {
+        Ok(ScanGateContext::new(
+            snap.clone(),
+            limits_of(&g),
+            Box::new(Flat),
+            mode(),
+            BTreeMap::from([(1, reference), (2, reference)]),
+            Some(exposure()),
+        ))
+    })
+}
+
+#[test]
+fn semi_auto_idea_whose_only_gap_is_the_approval_is_pending_and_listed() {
+    let text = semi_text();
+    let r = run(
+        &text,
+        5,
+        &semi_source(snap(), "500"),
+        &[scored("AAA", 1, 80)],
+    );
+    assert_eq!(r.ideas().len(), 1, "{:?}", r.blocked());
+    assert_eq!(r.blocked().len(), 0);
+    let g = r.ideas()[0].gate();
+    assert!(g.approval_pending && !g.passed);
+    assert_eq!(g.hard_failures, vec![RuleId::G16]);
+    assert!(g.overridable_failures.is_empty() && g.paper_only.is_empty());
+    // A pending idea is not an empty result.
+    assert!(!matches!(
+        r.verdict(),
+        crate::result::ScanVerdict::NoHighQualitySetups { .. }
+    ));
+    let why = crate::why::render(&r.ideas()[0]).join("\n");
+    assert!(why.contains("Needs your approval"), "{why}");
+    assert!(!why.contains("passed"), "{why}");
+}
+
+#[test]
+fn paper_output_has_no_pending_flag() {
+    let r = run(TEXT, 5, &ok_source(), &[scored("AAA", 1, 80)]);
+    let g = r.ideas()[0].gate();
+    assert!(g.passed && !g.approval_pending);
+}
+
+#[test]
+fn a_real_g16_breach_beside_the_missing_approval_is_blocked_not_pending() {
+    let text = semi_text();
+    // Kill switch on: G16 fails for two reasons (and G03/others as the gate decides).
+    let mut s = snap();
+    s.kill_switch = Tri::Known(true);
+    let r = run(&text, 5, &semi_source(s, "500"), &[scored("AAA", 1, 80)]);
+    assert_eq!(r.ideas().len(), 0);
+    assert!(hard_rules(&r).contains(&RuleId::G16), "{:?}", r.blocked());
+    // Orders per day at the limit: the same.
+    let mut s = snap();
+    s.orders_today = Tri::Known(10_000);
+    let r = run(&text, 5, &semi_source(s, "500"), &[scored("AAA", 1, 80)]);
+    assert_eq!(r.ideas().len(), 0);
+    assert!(hard_rules(&r).contains(&RuleId::G16), "{:?}", r.blocked());
+}
+
+#[test]
+fn pending_ideas_keep_rank_order_under_max_results() {
+    let text = semi_text();
+    let items = [
+        scored("AAA", 1, 90),
+        scored("BBB", 2, 80),
+        scored("CCC", 3, 70),
+    ];
+    let src = semi_source(snap(), "500");
+    let r = run(&text, 2, &src, &items);
+    let names: Vec<_> = r
+        .ideas()
+        .iter()
+        .map(|i| i.instrument().tradingsymbol.clone())
+        .collect();
+    assert_eq!(names, ["AAA", "BBB"]);
+    assert!(r.ideas().iter().all(|i| i.gate().approval_pending));
+}
+
+#[test]
+fn a_close_above_entry_high_sizes_so_qty_times_the_close_fits_g16() {
+    // A real config cap (Rs 19,505, in both the gate's text and the limits) between 39 x 500.05
+    // and 39 x 500.25. The close 500.25 is above entry_high 500.05 but inside the G10 tolerance.
+    let text = semi_text().replace(
+        "max_notional_per_order_inr = \"20000\"",
+        "max_notional_per_order_inr = \"19505\"",
+    );
+    let at_entry = run(
+        &text,
+        5,
+        &semi_source_with(&text, snap(), "500.05"),
+        &[scored("AAA", 1, 80)],
+    );
+    let above = run(
+        &text,
+        5,
+        &semi_source_with(&text, snap(), "500.25"),
+        &[scored("AAA", 1, 80)],
+    );
+    let (a, b) = (&at_entry.ideas()[0], &above.ideas()[0]);
+    assert_eq!((a.size().qty, b.size().qty), (39, 38));
+    // QUAN-168-2: compare qty x reference to the cap.
+    assert!(Decimal::from(b.size().qty) * d("500.25") <= d("19505"));
+    // The uncapped qty would breach G16 at the gate's reference: the gate run saw no breach.
+    assert!(Decimal::from(a.size().qty) * d("500.25") > d("19505"));
+    assert!(b.gate().approval_pending, "{:?}", b.gate());
+    assert_eq!(b.gate().hard_failures, vec![RuleId::G16]);
+}
+
+#[test]
+fn an_unknown_close_sizes_at_entry_high_and_the_gate_still_decides() {
+    let text = semi_text();
+    let g = gate_cfg(&text);
+    let src = source(move || {
+        Ok(ScanGateContext::new(
+            snap(),
+            limits_of(&g),
+            Box::new(Flat),
+            mode(),
+            BTreeMap::new(),
+            Some(exposure()),
+        ))
+    });
+    let r = run(&text, 5, &src, &[scored("AAA", 1, 80)]);
+    // Unknown reference: G10 fails closed (existing behaviour), so it is blocked and not pending.
+    assert_eq!(r.ideas().len(), 0);
+    assert!(hard_rules(&r).contains(&RuleId::G10), "{:?}", r.blocked());
+}
+
+#[test]
+fn a_failure_moved_to_hard_clears_the_pending_flag() {
+    let g = GateSummary {
+        passed: false,
+        hard_failures: vec![RuleId::G16],
+        overridable_failures: vec![RuleId::G01],
+        paper_only: vec![RuleId::G01],
+        approval_pending: true,
+        evaluated_at: now(),
+        config_hash: "h".into(),
+    };
+    let out = mode_aware(g, ExecutionMode::SemiAuto);
+    assert_eq!(out.hard_failures, vec![RuleId::G16, RuleId::G01]);
+    assert!(!out.approval_pending);
 }
 
 #[test]
