@@ -333,7 +333,7 @@ fn gate_line(g: &GateSummary) -> String {
             .join(", ")
     };
     // The lists decide too: the flag counts only with exactly G16 failing and nothing else.
-    if g.approval_pending
+    if g.approval_pending()
         && !g.passed
         && g.hard_failures == [RuleId::G16]
         && g.overridable_failures.is_empty()

@@ -120,7 +120,9 @@ fn charged_risk(
     Ok((allowance, risk))
 }
 
-/// Round, size through `risk::size_with_reference` (`reference` = the gate's live/close price) and compute the charges-inclusive risk.
+/// Round, size through `risk::size_with_reference` and compute the charges-inclusive risk.
+/// `reference` is the gate's live/close price (`None` sizes at `entry_high`). Only the G16 order
+/// cap sees it: the risk budget and the G14 cap are still worked out at `entry_high` (F11 record).
 /// `cost(qty)` must be pure and deterministic (it is called more than once for the same qty): the
 /// round-trip charges plus slippage for `qty`, with the entry at the rounded `entry_high` and the
 /// stop-out exit at the rounded stop (all `charges.toml` terms, sell-side STT/DP included), so the

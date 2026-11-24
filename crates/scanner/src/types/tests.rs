@@ -360,11 +360,11 @@ fn paper_only_must_be_exactly_the_paper_level_failures() {
 fn approval_pending_flag_is_accepted_only_for_exactly_g16() {
     let mut p = parts();
     p.gate = GateSummary::from_verdict(&verdict(&[RuleId::G16]), t(18));
-    p.gate.approval_pending = true; // hand-set: the verdict never marked G16 pending
+    p.gate.force_pending(); // hand-set: the verdict never marked G16 pending
     assert!(Recommendation::new(p.clone(), 30, 55).is_ok());
     // Flag with a passed gate, a different rule, or extra failures is refused.
     let mut q = parts();
-    q.gate.approval_pending = true;
+    q.gate.force_pending();
     assert_eq!(
         Recommendation::new(q, 30, 55).unwrap_err(),
         RecError::ApprovalPendingInconsistent
@@ -376,11 +376,19 @@ fn approval_pending_flag_is_accepted_only_for_exactly_g16() {
     ] {
         let mut q = parts();
         q.gate = GateSummary::from_verdict(&verdict(failing), t(18));
-        q.gate.approval_pending = true;
+        q.gate.force_pending();
         assert_eq!(
             Recommendation::new(q, 30, 55).unwrap_err(),
             RecError::ApprovalPendingInconsistent,
             "{failing:?}"
         );
     }
+}
+
+#[test]
+fn a_plain_g16_failure_is_never_pending() {
+    // What a `Known(false)` approval yields in the gate: a G16 failure that is not the marker.
+    let s = GateSummary::from_verdict(&verdict(&[RuleId::G16]), t(18));
+    assert!(!s.approval_pending());
+    assert_eq!(s.hard_failures, vec![RuleId::G16]);
 }

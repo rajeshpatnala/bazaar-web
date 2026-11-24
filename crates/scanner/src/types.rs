@@ -142,7 +142,7 @@ pub struct GateSummary {
     /// True only when the one failure is G16 and its sole reason is the missing approval (the
     /// verdict's typed marker, never parsed from text). `passed` stays false and `hard_failures`
     /// still lists G16. The idea is not approved: no order exists until the user approves it.
-    pub approval_pending: bool,
+    approval_pending: bool,
     pub evaluated_at: DateTime<Tz>,
     pub config_hash: String,
 }
@@ -174,6 +174,24 @@ impl GateSummary {
             evaluated_at,
             config_hash: v.config_hash().as_str().to_owned(),
         }
+    }
+
+    /// True when the one gap is the missing approval (see the field note above).
+    #[must_use]
+    pub const fn approval_pending(&self) -> bool {
+        self.approval_pending
+    }
+
+    /// Drop the flag (a failure was moved to hard, so the approval is no longer the only gap).
+    pub(crate) fn clear_approval_pending(&mut self) {
+        self.approval_pending = false;
+    }
+
+    /// Test-only: set the flag by hand to prove `Recommendation::new` and the Why text refuse
+    /// what the gate never marked.
+    #[cfg(test)]
+    pub(crate) fn force_pending(&mut self) {
+        self.approval_pending = true;
     }
 
     /// The pending flag is allowed only on a failed gate whose one failure is G16.

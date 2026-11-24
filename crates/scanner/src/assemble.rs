@@ -89,7 +89,7 @@ fn mode_aware(mut g: GateSummary, mode: ExecutionMode) -> GateSummary {
         g.overridable_failures.retain(|r| !moved.contains(r));
         g.hard_failures.extend(moved);
         // A failure moved to hard means the approval is not the only gap.
-        g.approval_pending = false;
+        g.clear_approval_pending();
     }
     g
 }
@@ -297,9 +297,11 @@ fn idea(
         s,
     );
     data.margin.qty = sized.size.qty;
-    data.margin.required = sized
-        .notional
-        .checked_add(sized.allowance)
+    // The cash need is judged at the gate's reference (max of the zone top and the close), like G16.
+    data.margin.required = reference
+        .map_or(l.entry_high, |c| c.max(l.entry_high))
+        .checked_mul(Decimal::from(sized.size.qty))
+        .and_then(|n| n.checked_add(sized.allowance))
         .map_or(Tri::Unknown, Tri::Known);
     let inputs = GateInputs {
         cost: ctx.cost(),
@@ -378,7 +380,7 @@ pub fn assemble(
         };
         match out {
             // A pending-only idea (G16, sole reason: no approval yet) is shown, not blocked.
-            Ok(r) if r.gate().hard_failures.is_empty() || r.gate().approval_pending => {
+            Ok(r) if r.gate().hard_failures.is_empty() || r.gate().approval_pending() => {
                 ideas.push(r);
             }
             Ok(r) => {
