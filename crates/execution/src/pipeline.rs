@@ -2113,7 +2113,8 @@ mod tests {
                                     } else if gate == Gate::Drift {
                                         prop_assert!(matches!(out, Outcome::QuoteDrifted { .. }), "{out:?}");
                                     } else if !ok {
-                                        prop_assert!(!matches!(out, Outcome::Placed(_)), "kill switch: {out:?}");
+                                        // Only the kill switch is left: it must be the named refuser.
+                                        prop_assert_eq!(&out, &Outcome::GuardBlocked(ExecError::KillSwitch));
                                     }
                                     it.3 = false;
                                 } else {
