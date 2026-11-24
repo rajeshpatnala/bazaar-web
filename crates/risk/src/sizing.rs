@@ -119,6 +119,8 @@ pub struct Sized {
     pub risk_at_stop: Decimal,
     /// Risk budget for the trade (`equity x risk%`).
     pub budget: Decimal,
+    /// Quantity x entry price. Not x the gate's reference; a caller checking G16 compares
+    /// `qty x reference` itself.
     pub notional: Decimal,
     /// True when the position-value cap (G14) reduced the size.
     pub capped_by_position_cap: bool,

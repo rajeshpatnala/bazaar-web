@@ -57,3 +57,4 @@ Limitation until slice 8: in `semi_auto` the scan holds no approval, so G16 "app
 - RISK-165-2 ApprovalPending marker + RISK-165-3 G16-aware sizing: defer: slice 8 (risk crate; owner wording first).
 - Visible per-idea-gating line and cut count: defer: slice 7.
 - Second order sees the first at approval: defer: F12.
+- F11 8a review (PR 168): QUAN-168-1 `size_with_cost` now also applies the G16 per-order cap (`max_notional_per_order_inr`), so backtests with capital above Rs 1 lakh are capped by G16 (stricter only, never larger); default-capital results unchanged. The backtest test at capital 5,00,000 goes to the F9 Deferred list (no backtest edit here). RISK-168-3 deferred to slice 8b: scanner test where the order cap binds (sized qty x reference never breaches G16 in the gate run that follows).

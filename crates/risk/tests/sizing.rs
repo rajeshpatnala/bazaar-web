@@ -646,9 +646,25 @@ fn bad_reference_cap_or_overflow_is_a_typed_error() {
         size_with_reference(&neg, &input(), &cost60, d(500)),
         Err(SizingError::Arithmetic)
     );
-    assert!(size_with_reference(&l, &input(), &cost60, Decimal::MAX).is_err());
+    // Reference at Decimal::MAX: cap 30,000 / MAX floors to 0 lots, no trade (typed, no panic).
+    assert_eq!(
+        size_with_reference(&l, &input(), &cost60, Decimal::MAX),
+        Err(SizingError::OrderCapBelowOneLot)
+    );
+    // Cap at Decimal::MAX, entry 0.05: MAX / 0.05 overflows, a typed Arithmetic error.
     let mut huge = l;
     huge.max_notional_per_order_inr = Decimal::MAX;
-    let r = size_with_reference(&huge, &input(), &cost60, Decimal::new(1, 28));
-    assert!(r.is_ok() || r.is_err()); // must not panic
+    let mut tiny = input();
+    tiny.entry = Decimal::new(5, 2);
+    tiny.stop = Decimal::new(4, 2);
+    tiny.tick_size = Decimal::new(1, 2);
+    assert_eq!(
+        size_with_reference(&huge, &tiny, &cost60, Decimal::new(5, 2)),
+        Err(SizingError::Arithmetic)
+    );
+    // A tiny reference never loosens: the entry is the floor, so the result equals size_with_cost.
+    assert_eq!(
+        size_with_reference(&huge, &input(), &cost60, Decimal::new(1, 28)),
+        size_with_cost(&huge, &input(), &cost60)
+    );
 }
