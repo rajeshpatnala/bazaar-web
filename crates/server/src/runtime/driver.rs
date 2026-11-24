@@ -298,7 +298,7 @@ pub async fn serve_while_driven<T>(
 }
 
 /// After cancel: wait up to `wait` for the task; abort it on timeout. True on a clean finish.
-pub async fn stop(task: &mut JoinHandle<()>, wait: Duration) -> bool {
+async fn stop(task: &mut JoinHandle<()>, wait: Duration) -> bool {
     match tokio::time::timeout(wait, &mut *task).await {
         Ok(Ok(())) => true,
         Ok(Err(_)) => false,
@@ -307,6 +307,29 @@ pub async fn stop(task: &mut JoinHandle<()>, wait: Duration) -> bool {
             false
         }
     }
+}
+
+/// Shut down after serving ended (RISK-175-1). `served` is what [`serve_while_driven`] returned.
+/// The driver is cancelled and stopped only when serving ended on its own (`Ok`): on
+/// `Err(DriverStopped)` the select already consumed the finished `JoinHandle`, and polling it
+/// again panics ("`JoinHandle` polled after completion"). `flush` (the audit anchor flush) runs on
+/// every path, after the stop, and never fails the shutdown. Returns `served` unchanged.
+///
+/// # Errors
+/// The `DriverStopped` carried in `served`.
+pub async fn shutdown<T>(
+    served: Result<T, DriverStopped>,
+    cancel: &CancellationToken,
+    task: &mut JoinHandle<()>,
+    wait: Duration,
+    flush: impl Future<Output = ()>,
+) -> Result<T, DriverStopped> {
+    cancel.cancel();
+    if served.is_ok() && !stop(task, wait).await {
+        tracing::error!("tick driver did not stop cleanly");
+    }
+    flush.await;
+    served
 }
 
 #[cfg(test)]
@@ -518,6 +541,59 @@ mod tests {
         let mut task = tokio::spawn(Arc::new(d).run(Duration::from_millis(100), cancel.clone()));
         cancel.cancel();
         assert!(stop(&mut task, Duration::from_secs(5)).await);
+    }
+
+    /// RISK-175-1: the tokio claim behind `shutdown`: a finished `JoinHandle` polled again panics.
+    #[tokio::test]
+    async fn a_joinhandle_polled_after_completion_panics() {
+        let mut t = tokio::spawn(async {});
+        (&mut t).await.unwrap();
+        let again = tokio::spawn(t);
+        assert!(again.await.unwrap_err().is_panic());
+    }
+
+    /// RISK-175-1: driver died first: no second poll, the flush still runs, the error returns.
+    #[tokio::test]
+    async fn shutdown_after_a_dead_driver_flushes_without_polling_the_task_again() {
+        let mut t = tokio::spawn(async { panic!("boom") });
+        let served = serve_while_driven(std::future::pending::<()>(), &mut t).await;
+        let flushed = Arc::new(AtomicU32::new(0));
+        let f = flushed.clone();
+        let cancel = CancellationToken::new();
+        let out = tokio::spawn(async move {
+            shutdown(
+                served,
+                &cancel,
+                &mut t,
+                Duration::from_secs(5),
+                async move {
+                    f.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+            .await
+        })
+        .await
+        .expect("shutdown must not panic");
+        assert_eq!(out.unwrap_err().0, "task panicked");
+        assert_eq!(flushed.load(Ordering::SeqCst), 1);
+    }
+
+    /// RISK-175-1: serving ended on its own: the driver is cancelled and stopped, then flushed.
+    #[tokio::test]
+    async fn shutdown_after_clean_serving_stops_the_driver_then_flushes() {
+        let cancel = CancellationToken::new();
+        let c2 = cancel.clone();
+        let mut t = tokio::spawn(async move { c2.cancelled().await });
+        let flushed = Arc::new(AtomicU32::new(0));
+        let f = flushed.clone();
+        let out = shutdown(Ok(7), &cancel, &mut t, Duration::from_secs(5), async move {
+            f.fetch_add(1, Ordering::SeqCst);
+        })
+        .await;
+        assert_eq!(out.unwrap(), 7);
+        assert!(cancel.is_cancelled());
+        assert!(t.is_finished(), "the driver was awaited to completion");
+        assert_eq!(flushed.load(Ordering::SeqCst), 1);
     }
 
     /// RISK-142-1 / SEC-142-1: a dead driver ends serving instead of running silently.

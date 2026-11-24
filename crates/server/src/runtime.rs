@@ -9,7 +9,7 @@
 mod driver;
 mod quotes;
 
-pub use driver::{ALARM_SQUARE_OFF, Driver, LedgerPnl, STOP_WAIT, serve_while_driven, stop};
+pub use driver::{ALARM_SQUARE_OFF, Driver, LedgerPnl, STOP_WAIT, serve_while_driven, shutdown};
 pub use quotes::GuardedQuotes;
 
 use std::path::Path;
@@ -681,19 +681,22 @@ mod tests {
         assert!(start < bind, "bind must come after a successful start");
     }
 
-    /// RISK-175-1/2: the driver watches the store's anchor, and shutdown always stops the driver
-    /// and flushes the anchor before the serve result is returned (no early `?`).
+    /// RISK-175-1/2 wiring pin (behaviour is tested on `shutdown` in driver.rs): `main` watches
+    /// the store's anchor, hands the flush to `shutdown`, and returns the serve result only after.
     #[test]
-    fn main_wires_the_anchor_and_flushes_it_on_every_shutdown_path() {
+    fn main_wires_the_anchor_and_routes_shutdown_through_the_tested_fn() {
         let src = include_str!("main.rs");
         assert!(src.contains(".with_anchor(rt.store.clone())"));
         let serve = src.find("serve_while_driven(").unwrap();
-        let stop = src.find("runtime::stop(&mut driver_task").unwrap();
+        let shut = src.find("runtime::shutdown(").unwrap();
         let flush = src.find("rt.store.anchor_flush()").unwrap();
         let ret = src.find("served??;").unwrap();
-        assert!(serve < stop && stop < flush && flush < ret);
-        let between = &src[serve..flush];
-        assert!(!between.contains("?;"), "an early `?` would skip the flush");
+        assert!(serve < shut && shut < flush && flush < ret);
+        assert!(!src.contains("runtime::stop("), "stop only via shutdown");
+        assert!(
+            !src[serve..shut].contains("?;"),
+            "no early `?` before shutdown"
+        );
     }
 
     #[tokio::test]
