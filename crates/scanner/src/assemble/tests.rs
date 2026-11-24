@@ -6,12 +6,13 @@ use bazaar_core::config::{self, StrategiesConfig};
 use bazaar_core::instrument::{Exchange, Instrument, InstrumentType};
 use bazaar_regime::{Fact, RegimeState};
 use bazaar_risk::baseline::{BaselineError, LimitsBaseline};
+use bazaar_risk::config::ConfigHash;
 use bazaar_risk::config::{Baseline, GateConfig};
 use bazaar_risk::gate::{CostModel, ModeEvidence};
 use bazaar_risk::rules::exposure::ExposureInputs;
 use bazaar_risk::rules::inputs::{DataInputs, EventFlags, EvidenceInputs, MarginInputs};
 use bazaar_risk::snapshot::PortfolioSnapshot;
-use bazaar_risk::verdict::RuleId;
+use bazaar_risk::verdict::{GateVerdict, RuleId, RuleResult};
 use bazaar_strategies::{ExitPlan, Signal};
 use chrono::{NaiveDate, TimeZone};
 use chrono_tz::Asia::Kolkata;
@@ -488,11 +489,180 @@ fn a_paper_level_failure_is_overridable_in_paper_but_blocked_in_semi_auto() {
     let src = source(move || Ok(context(&g)));
     let r = run(&semi, 5, &src, &[with_trades(scored("AAA", 1, 80), 5)]);
     assert_eq!(r.ideas().len(), 0, "non-actionable outside paper");
-    // G16 "approval not on record" fails every semi_auto idea until slice 8 (the scan never
-    // supplies an approval); G01 moved from paper-only to hard outside paper.
+    // G16 "approval not on record" fails every semi_auto idea (the scan never supplies an
+    // approval); G01 moved from paper-only to hard outside paper, so the approval is not the only
+    // gap: blocked as [G01, G16], never pending.
     let mut rules = hard_rules(&r);
     rules.sort();
     assert_eq!(rules, vec![RuleId::G01, RuleId::G16]);
+}
+
+fn semi_text() -> String {
+    TEXT.replace(
+        "execution_mode = \"paper\"",
+        "execution_mode = \"semi_auto\"",
+    )
+}
+
+/// A context built from `text`, `snap` and the given reference price for tokens 1 and 2.
+fn ref_source(text: &str, snap: PortfolioSnapshot, reference: &str) -> Source {
+    let g = gate_cfg(text);
+    let reference = d(reference);
+    source(move || {
+        Ok(ScanGateContext::new(
+            snap.clone(),
+            limits_of(&g),
+            Box::new(Flat),
+            mode(),
+            BTreeMap::from([(1, reference), (2, reference)]),
+            Some(exposure()),
+        ))
+    })
+}
+
+/// A `semi_auto` context built from `snap` and the given reference price for token 1.
+fn semi_source(snap: PortfolioSnapshot, reference: &str) -> Source {
+    ref_source(&semi_text(), snap, reference)
+}
+
+#[test]
+fn semi_auto_idea_whose_only_gap_is_the_approval_is_pending_and_listed() {
+    let text = semi_text();
+    let r = run(
+        &text,
+        5,
+        &semi_source(snap(), "500"),
+        &[scored("AAA", 1, 80)],
+    );
+    assert_eq!(r.ideas().len(), 1, "{:?}", r.blocked());
+    assert_eq!(r.blocked().len(), 0);
+    let g = r.ideas()[0].gate();
+    assert!(g.approval_pending() && !g.passed);
+    assert_eq!(g.hard_failures, vec![RuleId::G16]);
+    assert!(g.overridable_failures.is_empty() && g.paper_only.is_empty());
+    // A pending idea is not an empty result.
+    assert!(!matches!(
+        r.verdict(),
+        crate::result::ScanVerdict::NoHighQualitySetups { .. }
+    ));
+    let why = crate::why::render(&r.ideas()[0]).join("\n");
+    assert!(why.contains("Needs your approval"), "{why}");
+    assert!(!why.contains("passed"), "{why}");
+}
+
+#[test]
+fn paper_output_has_no_pending_flag() {
+    let r = run(TEXT, 5, &ok_source(), &[scored("AAA", 1, 80)]);
+    let g = r.ideas()[0].gate();
+    assert!(g.passed && !g.approval_pending());
+}
+
+#[test]
+fn a_real_g16_breach_beside_the_missing_approval_is_blocked_not_pending() {
+    type Breach = (&'static str, fn(&mut PortfolioSnapshot));
+    let text = semi_text();
+    let cases: [Breach; 3] = [
+        ("kill switch", |s| s.kill_switch = Tri::Known(true)),
+        ("orders per day", |s| s.orders_today = Tri::Known(10_000)),
+        ("orders per minute", |s| {
+            s.orders_last_minute = Tri::Known(10_000);
+        }),
+    ];
+    for (name, set) in cases {
+        let mut s = snap();
+        set(&mut s);
+        let r = run(&text, 5, &semi_source(s, "500"), &[scored("AAA", 1, 80)]);
+        assert_eq!(r.ideas().len(), 0, "{name}");
+        assert_eq!(r.blocked().len(), 1, "{name}");
+        assert_eq!(hard_rules(&r), vec![RuleId::G16], "{name}");
+    }
+}
+
+#[test]
+fn pending_ideas_keep_rank_order_under_max_results() {
+    let text = semi_text();
+    let items = [
+        scored("AAA", 1, 90),
+        scored("BBB", 2, 80),
+        scored("CCC", 3, 70),
+    ];
+    let src = semi_source(snap(), "500");
+    let r = run(&text, 2, &src, &items);
+    let names: Vec<_> = r
+        .ideas()
+        .iter()
+        .map(|i| i.instrument().tradingsymbol.clone())
+        .collect();
+    assert_eq!(names, ["AAA", "BBB"]);
+    assert!(r.ideas().iter().all(|i| i.gate().approval_pending()));
+}
+
+#[test]
+fn a_close_above_entry_high_sizes_so_qty_times_the_close_fits_g16() {
+    // A real config cap (Rs 19,505, in both the gate's text and the limits) between 39 x 500.05
+    // and 39 x 500.25. The close 500.25 is above entry_high 500.05 but inside the G10 tolerance.
+    let text = semi_text().replace(
+        "max_notional_per_order_inr = \"20000\"",
+        "max_notional_per_order_inr = \"19505\"",
+    );
+    let at_entry = run(
+        &text,
+        5,
+        &ref_source(&text, snap(), "500.05"),
+        &[scored("AAA", 1, 80)],
+    );
+    let above = run(
+        &text,
+        5,
+        &ref_source(&text, snap(), "500.25"),
+        &[scored("AAA", 1, 80)],
+    );
+    let (a, b) = (&at_entry.ideas()[0], &above.ideas()[0]);
+    assert_eq!((a.size().qty, b.size().qty), (39, 38));
+    // QUAN-168-2: compare qty x reference to the cap.
+    assert!(Decimal::from(b.size().qty) * d("500.25") <= d("19505"));
+    // The uncapped qty would breach G16 at the gate's reference: the gate run saw no breach.
+    assert!(Decimal::from(a.size().qty) * d("500.25") > d("19505"));
+    assert!(b.gate().approval_pending(), "{:?}", b.gate());
+    assert_eq!(b.gate().hard_failures, vec![RuleId::G16]);
+}
+
+#[test]
+fn an_unknown_close_sizes_at_entry_high_and_the_gate_still_decides() {
+    let text = semi_text();
+    let g = gate_cfg(&text);
+    let src = source(move || {
+        Ok(ScanGateContext::new(
+            snap(),
+            limits_of(&g),
+            Box::new(Flat),
+            mode(),
+            BTreeMap::new(),
+            Some(exposure()),
+        ))
+    });
+    let r = run(&text, 5, &src, &[scored("AAA", 1, 80)]);
+    // Unknown reference: G10 fails closed (existing behaviour), so it is blocked and not pending.
+    assert_eq!(r.ideas().len(), 0);
+    assert!(hard_rules(&r).contains(&RuleId::G10), "{:?}", r.blocked());
+}
+
+#[test]
+fn a_failure_moved_to_hard_clears_the_pending_flag() {
+    let rs: Vec<RuleResult> = RuleId::EVALUATION_ORDER
+        .iter()
+        .map(|r| match r {
+            RuleId::G16 | RuleId::G01 => RuleResult::fail(*r, "o", "l", "no"),
+            _ => RuleResult::pass(*r, "o", "l"),
+        })
+        .collect();
+    let v = GateVerdict::new(ConfigHash::of_text("cfg"), &rs).unwrap();
+    let mut g = GateSummary::from_verdict(&v, now());
+    g.force_pending();
+    assert_eq!(g.paper_only, vec![RuleId::G01]);
+    let out = mode_aware(g, ExecutionMode::SemiAuto);
+    assert_eq!(out.hard_failures, vec![RuleId::G16, RuleId::G01]);
+    assert!(!out.approval_pending());
 }
 
 #[test]
@@ -942,4 +1112,72 @@ fn fixture_scan_to_gate_to_why_end_to_end() {
         text.contains("Educational tool, not investment advice"),
         "{text}"
     );
+}
+
+/// The fixture text with the G16 per-order cap lowered so it binds near 39 shares.
+fn tight_cap_text(text: &str) -> String {
+    text.replacen(
+        "max_notional_per_order_inr = \"20000\"",
+        "max_notional_per_order_inr = \"19505\"",
+        1,
+    )
+}
+
+#[test]
+fn paper_scan_of_the_fixture_is_pinned() {
+    // Regression for RISK-169-2: the paper scan at a close inside the zone.
+    let r = run(TEXT, 5, &ok_source(), &[scored("AAA", 1, 80)]);
+    assert_eq!(r.blocked().len(), 0);
+    let i = &r.ideas()[0];
+    assert_eq!((i.size().qty, i.size().lots), (39, 39));
+    assert_eq!(i.entry_zone(), (d("500.00"), d("500.05")));
+    assert_eq!(i.stop_loss(), d("489.95"));
+    let g = i.gate();
+    assert!(g.passed && !g.approval_pending());
+    assert!(
+        g.hard_failures.is_empty() && g.overridable_failures.is_empty() && g.paper_only.is_empty()
+    );
+}
+
+#[test]
+fn paper_close_above_entry_high_sizes_to_the_close_under_the_real_order_cap() {
+    // Paper sizing also honours the close (no longer byte-identical to before 8b): with the
+    // cap at Rs 19,505, 39 shares fit the zone top but 39 x 500.25 does not.
+    let text = tight_cap_text(TEXT);
+    let at = run(
+        &text,
+        5,
+        &ref_source(&text, snap(), "500"),
+        &[scored("AAA", 1, 80)],
+    );
+    let above = run(
+        &text,
+        5,
+        &ref_source(&text, snap(), "500.25"),
+        &[scored("AAA", 1, 80)],
+    );
+    assert_eq!(at.ideas()[0].size().qty, 39);
+    let b = &above.ideas()[0];
+    assert_eq!(b.size().qty, 38);
+    assert!(Decimal::from(b.size().qty) * d("500.25") <= d("19505"));
+    assert!(b.gate().passed, "{:?}", b.gate());
+}
+
+#[test]
+fn risk_budget_is_sized_at_the_zone_top_so_a_close_beyond_it_fails_closed() {
+    // QUAN-169-1 (known limit): the risk budget is not reference-aware. Budget binds (0.30%),
+    // the close is well above the zone: the gate refuses (G10 and G02), the idea is blocked.
+    let text = TEXT.replacen(
+        "max_risk_per_trade_pct = \"0.5\"",
+        "max_risk_per_trade_pct = \"0.30\"",
+        1,
+    );
+    let r = run(
+        &text,
+        5,
+        &ref_source(&text, snap(), "520"),
+        &[scored("AAA", 1, 80)],
+    );
+    assert_eq!(r.ideas().len(), 0);
+    assert_eq!(hard_rules(&r), vec![RuleId::G10, RuleId::G02]);
 }

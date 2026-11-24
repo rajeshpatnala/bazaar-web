@@ -7,7 +7,7 @@
 
 use bazaar_core::instrument::Instrument;
 use bazaar_risk::config::EffectiveLimits;
-use bazaar_risk::sizing::{SizingError, SizingInput, size_with_cost, sizing_equity};
+use bazaar_risk::sizing::{SizingError, SizingInput, size_with_reference, sizing_equity};
 use bazaar_risk::snapshot::PortfolioSnapshot;
 use bazaar_risk::types::{Side, Tri};
 use rust_decimal::Decimal;
@@ -40,6 +40,8 @@ pub struct SizedIdea {
     /// `(first target - entry_high) / (entry_high - stop)` on the rounded levels.
     pub reward_risk: Decimal,
     pub capped_by_position_cap: bool,
+    /// True when the per-order cap (G16), at `max(entry_high, reference)`, reduced the size.
+    pub capped_by_order_cap: bool,
 }
 
 fn collapse(why: &str) -> BlockReason {
@@ -118,7 +120,9 @@ fn charged_risk(
     Ok((allowance, risk))
 }
 
-/// Round, size through `risk::size_with_cost` and compute the charges-inclusive risk.
+/// Round, size through `risk::size_with_reference` and compute the charges-inclusive risk.
+/// `reference` is the gate's live/close price (`None` sizes at `entry_high`). Only the G16 order
+/// cap sees it: the risk budget and the G14 cap are still worked out at `entry_high` (F11 record).
 /// `cost(qty)` must be pure and deterministic (it is called more than once for the same qty): the
 /// round-trip charges plus slippage for `qty`, with the entry at the rounded `entry_high` and the
 /// stop-out exit at the rounded stop (all `charges.toml` terms, sell-side STT/DP included), so the
@@ -130,6 +134,7 @@ pub fn size_idea(
     snapshot: &PortfolioSnapshot,
     limits: &EffectiveLimits,
     cost: &dyn Fn(u32) -> Tri<Decimal>,
+    reference: Option<Decimal>,
 ) -> Result<SizedIdea, BlockReason> {
     let sizing = |e: SizingError| BlockReason::Sizing(e.to_string());
     let r = round_levels(levels, instrument.tick_size)?;
@@ -144,7 +149,9 @@ pub fn size_idea(
         buffer: Tri::Unknown,
         overridden: false,
     };
-    let s = size_with_cost(limits, &input, cost).map_err(sizing)?;
+    // The gate's reference is `max(intent.price, live)`: same here, `entry_high` alone if unknown.
+    let reference = reference.map_or(r.entry_high, |c| c.max(r.entry_high));
+    let s = size_with_reference(limits, &input, cost, reference).map_err(sizing)?;
     let spent = *cost(s.qty)
         .known()
         .ok_or_else(|| BlockReason::Sizing("the charges estimate is unknown".to_owned()))?;
@@ -170,6 +177,7 @@ pub fn size_idea(
         notional: s.notional,
         reward_risk: rr,
         capped_by_position_cap: s.capped_by_position_cap,
+        capped_by_order_cap: s.capped_by_order_cap,
         levels: r,
     })
 }

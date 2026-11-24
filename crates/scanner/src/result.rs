@@ -1,4 +1,6 @@
-//! What a scan returns: gate-passed ideas, blocked ideas with the reason, and every drop.
+//! What a scan returns: ideas that are not blocked (check `gate().passed` and
+//! `gate().approval_pending()` before showing a state; a pending idea is not approved), blocked
+//! ideas with the reason, and every drop.
 //! No `Default`: the verdict is always derived from the lists by [`ScanResult::new`].
 
 use bazaar_risk::verdict::RuleId;
@@ -50,13 +52,14 @@ pub struct BlockedIdea {
 /// The one-line outcome of a scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScanVerdict {
-    /// At least one sized idea passed the gate.
+    /// At least one sized idea is not blocked. It may be pending: only `gate().passed` means the
+    /// checks passed, and nothing here means approved.
     Setups { count: usize },
     /// "No high-quality setups today", with the reasons (never empty).
     NoHighQualitySetups { reasons: Vec<String> },
 }
 
-/// Ranked ideas that passed the gate, blocked ideas (never truncated, same rank order) and drops.
+/// Ranked ideas that are not blocked (passed, or pending the user's approval), blocked ideas (never truncated, same rank order) and drops.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScanResult {
     ideas: Vec<Recommendation>,
@@ -78,7 +81,7 @@ impl ScanResult {
     ) -> Self {
         let (mut ideas, mut hard) = (Vec::new(), Vec::new());
         for r in all_ideas {
-            if r.gate().hard_failures.is_empty() {
+            if r.gate().hard_failures.is_empty() || r.gate().approval_pending() {
                 ideas.push(r);
             } else {
                 hard.push(r);

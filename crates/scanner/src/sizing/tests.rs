@@ -4,6 +4,17 @@ use bazaar_risk::sizing::SizingError;
 
 use super::*;
 
+/// The existing cases pass no reference (the gate's `max(price, live)` is then the entry).
+fn size_idea(
+    i: &Instrument,
+    l: &Levels,
+    s: &PortfolioSnapshot,
+    lim: &EffectiveLimits,
+    c: &dyn Fn(u32) -> Tri<Decimal>,
+) -> Result<SizedIdea, BlockReason> {
+    super::size_idea(i, l, s, lim, c, None)
+}
+
 const RISK: &str = include_str!("../../../../fixtures/config/risk.toml");
 
 fn d(n: i64) -> Decimal {
@@ -329,4 +340,59 @@ fn rounding_holds_at_other_ticks_and_leaves_grid_levels_alone() {
         );
         assert_eq!(round_levels(&r, tick).unwrap(), r, "idempotent at {t}");
     }
+}
+
+/// The fixture's own per-order cap (Rs 20,000), not the large override `limits()` applies.
+fn real_cap_limits() -> EffectiveLimits {
+    let mut l = limits();
+    l.max_position_value_pct = d(100);
+    l.max_notional_per_order_inr = GateConfig::from_toml_str(RISK)
+        .unwrap()
+        .effective(&Baseline::none())
+        .max_notional_per_order_inr;
+    assert_eq!(l.max_notional_per_order_inr, d(20_000));
+    l
+}
+
+#[test]
+fn close_above_entry_high_shrinks_qty_so_qty_times_reference_fits_the_cap() {
+    let (i, lv, sn, l) = (inst("0.05", 1), levels(), snap(), real_cap_limits());
+    let at_entry = super::size_idea(&i, &lv, &sn, &l, &flat(10), None).unwrap();
+    // 20,000 / 500.05 = 39.99: 39 shares, the cap binds (position cap is 100% here).
+    assert_eq!(
+        (at_entry.size.qty, at_entry.capped_by_order_cap),
+        (39, true)
+    );
+    assert!(!at_entry.capped_by_position_cap);
+    // Close 600 above entry_high 500.05: 20,000 / 600 = 33.
+    let above = super::size_idea(&i, &lv, &sn, &l, &flat(10), Some(d(600))).unwrap();
+    assert_eq!((above.size.qty, above.size.lots), (33, 33));
+    assert!(above.capped_by_order_cap && !above.capped_by_position_cap);
+    // QUAN-168-2: compare qty x reference to the cap, not `notional` (which is at entry).
+    assert!(Decimal::from(above.size.qty) * d(600) <= l.max_notional_per_order_inr);
+    assert_eq!(above.notional, px("500.05") * d(33));
+    assert_eq!(above.risk_at_stop, px("10.10") * d(33));
+    assert_eq!(above.budget, d(1000));
+    assert_eq!(above.risk_rupees, above.risk_at_stop + above.allowance);
+}
+
+#[test]
+fn unknown_or_lower_close_sizes_at_entry_high_and_never_loosens() {
+    let (i, lv, sn, l) = (inst("0.05", 1), levels(), snap(), real_cap_limits());
+    let base = super::size_idea(&i, &lv, &sn, &l, &flat(10), None).unwrap();
+    let below = super::size_idea(&i, &lv, &sn, &l, &flat(10), Some(d(400))).unwrap();
+    assert_eq!(base, below);
+}
+
+#[test]
+fn one_lot_above_the_order_cap_is_blocked_with_the_cap_reason() {
+    let mut l = real_cap_limits();
+    l.max_notional_per_order_inr = d(400);
+    let r = super::size_idea(&inst("0.05", 1), &levels(), &snap(), &l, &flat(10), None);
+    assert_eq!(
+        r,
+        Err(BlockReason::Sizing(
+            SizingError::OrderCapBelowOneLot.to_string()
+        ))
+    );
 }

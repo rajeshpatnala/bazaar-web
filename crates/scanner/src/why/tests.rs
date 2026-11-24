@@ -43,6 +43,12 @@ pub(crate) const FORBIDDEN: &[&str] = &[
     "no chance of loss",
     "probability of profit",
     "% chance",
+    // A pending idea is not approved (RISK-169-1): none of these may describe it.
+    "ready",
+    "cleared",
+    "confirmed",
+    "good to go",
+    "approved",
 ];
 
 /// The only negated uses of "safe" and "promise" the renderer may print.
@@ -519,6 +525,53 @@ fn gate_hard_soft_and_paper_only() {
     assert_eq!(gate_line(&gate(&[])), GATE_PASSED);
 }
 
+fn pending_gate() -> GateSummary {
+    let mut g = gate(&[RuleId::G16]);
+    g.force_pending();
+    g
+}
+
+#[test]
+fn pending_idea_gets_the_exact_needs_approval_line_never_passed() {
+    let line = gate_line(&pending_gate());
+    assert_eq!(
+        line,
+        "Needs your approval. No order exists yet. The other safety checks pass right now and run again when you approve."
+    );
+    let lower = line.to_lowercase();
+    for w in [
+        "approved",
+        "ready",
+        "cleared",
+        "confirmed",
+        "good to go",
+        "passed",
+    ] {
+        assert!(!lower.contains(w), "`{w}` in {line}");
+    }
+}
+
+#[test]
+fn a_full_pending_render_shows_the_pending_line() {
+    let mut s = spec(all_factors());
+    s.gate = pending_gate();
+    let lines = render(&make(s));
+    assert!(
+        lines.iter().any(|l| l.starts_with("Needs your approval.")),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn the_pending_line_needs_the_flag_and_only_g16() {
+    // Flag off: the same failure is a plain block.
+    assert!(gate_line(&gate(&[RuleId::G16])).starts_with("Blocked by the safety checks"));
+    // Flag on with another failure beside it: never the pending wording.
+    let mut g = gate(&[RuleId::G16, RuleId::G02]);
+    g.force_pending();
+    assert!(gate_line(&g).starts_with("Blocked by the safety checks"));
+}
+
 #[test]
 fn hostile_note_is_escaped() {
     let note = "Results\n<script>alert(\"x\")</script> & 'more'\r\u{0007}\u{202E}end";
@@ -657,6 +710,7 @@ fn variants() -> Vec<Recommendation> {
     };
     vec![
         full(),
+        with(&|s| s.gate = pending_gate()),
         with(&|s| s.backtest = None),
         with(&|s| s.backtest = Some(low.clone())),
         with(&|s| s.backtest = Some(no_costs.clone())),
