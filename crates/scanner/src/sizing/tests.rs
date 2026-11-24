@@ -22,6 +22,8 @@ fn limits() -> EffectiveLimits {
     l.max_risk_per_trade_pct = d(1);
     l.max_position_value_pct = d(25);
     l.min_charges_slippage_buffer = d(60);
+    // G16 per-order cap is not under test here (8b covers it): too large to bind.
+    l.max_notional_per_order_inr = d(1_000_000);
     l.cap_equity_at_starting_cash = true;
     l
 }

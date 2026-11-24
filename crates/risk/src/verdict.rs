@@ -150,6 +150,9 @@ pub struct RuleResult {
     /// True when the rule failed because an input was missing or unknown, not because a limit
     /// was breached. Such a failure can never be overridden.
     input_missing: bool,
+    /// True only when G16 failed and the sole reason is the missing `semi_auto` approval. Set
+    /// inside the crate by `g16`; no public setter and never an input anywhere.
+    approval_pending: bool,
 }
 
 impl RuleResult {
@@ -162,6 +165,7 @@ impl RuleResult {
             passed: true,
             message: format!("{observed} is within {limit} ({rule})"),
             input_missing: false,
+            approval_pending: false,
             observed,
             limit,
         }
@@ -182,7 +186,26 @@ impl RuleResult {
             limit: limit.into(),
             message: format!("{} ({rule})", message.trim_end()),
             input_missing: false,
+            approval_pending: false,
         }
+    }
+
+    /// The G16 failure whose only reason is the missing approval. Crate-private: only `g16`
+    /// calls it, so a caller cannot mark a result.
+    pub(crate) fn g16_approval_pending(
+        observed: impl Into<String>,
+        limit: impl Into<String>,
+        message: &str,
+    ) -> Self {
+        let mut r = Self::fail(RuleId::G16, observed, limit, message);
+        r.approval_pending = true;
+        r
+    }
+
+    /// True for a G16 failure caused only by the missing `semi_auto` approval.
+    #[must_use]
+    pub const fn is_approval_pending(&self) -> bool {
+        self.approval_pending && !self.passed && matches!(self.rule, RuleId::G16)
     }
 
     /// A failing result because an input is missing or unknown (fail closed). `message` says
@@ -332,6 +355,20 @@ impl GateVerdict {
     /// Failed results, in evaluation order.
     pub fn failures(&self) -> impl Iterator<Item = &RuleResult> {
         self.results.iter().filter(|r| !r.passed)
+    }
+
+    /// True when something failed and every failure is G16 carrying the approval-pending flag:
+    /// the only gap is the missing approval. Never makes `passed()` true.
+    #[must_use]
+    pub fn approval_pending_only(&self) -> bool {
+        let mut any = false;
+        for r in self.failures() {
+            if !r.is_approval_pending() {
+                return false;
+            }
+            any = true;
+        }
+        any
     }
 
     /// True when there is at least one failure and every failure is Soft or Paper and a real breach. Any Hard, No or missing-input failure
@@ -586,6 +623,45 @@ mod tests {
             })
             .collect();
         assert!(!GateVerdict::new(hash(), &results).unwrap().overridable());
+    }
+
+    fn pending(rule_fail: &[RuleId], pend: bool) -> GateVerdict {
+        let results: Vec<RuleResult> = pass_all()
+            .into_iter()
+            .map(|r| match r.rule() {
+                RuleId::G16 if pend => RuleResult::g16_approval_pending("o", "l", "no"),
+                x if rule_fail.contains(&x) => RuleResult::fail(x, "o", "l", "no"),
+                _ => r,
+            })
+            .collect();
+        GateVerdict::new(hash(), &results).unwrap()
+    }
+
+    #[test]
+    fn pending_only_when_g16_flagged_is_the_sole_failure() {
+        let v = pending(&[], true);
+        assert!(v.approval_pending_only() && !v.passed() && !v.overridable());
+        assert_eq!(v.failures().count(), 1);
+        // Same G16 failure without the flag, another failure beside it, or nothing failing.
+        assert!(!with_fail(&[RuleId::G16]).approval_pending_only());
+        assert!(!pending(&[RuleId::G01], true).approval_pending_only());
+        assert!(!pending(&[RuleId::G03], true).approval_pending_only());
+        assert!(!with_fail(&[RuleId::G01]).approval_pending_only());
+        assert!(
+            !GateVerdict::new(hash(), &pass_all())
+                .unwrap()
+                .approval_pending_only()
+        );
+        // The flag changes no level, message or equality of the failing rule's facts.
+        let (a, b) = (
+            RuleResult::g16_approval_pending("o", "l", "no"),
+            RuleResult::fail(RuleId::G16, "o", "l", "no"),
+        );
+        assert_eq!(
+            (a.level(), a.message(), a.passed()),
+            (b.level(), b.message(), b.passed())
+        );
+        assert!(a.is_approval_pending() && !b.is_approval_pending());
     }
 
     #[test]

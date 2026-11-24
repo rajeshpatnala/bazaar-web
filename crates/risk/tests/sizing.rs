@@ -7,7 +7,9 @@
 )]
 
 use bazaar_risk::config::{Baseline, EffectiveLimits, GateConfig};
-use bazaar_risk::sizing::{Sized, SizingError, SizingInput, size, size_with_cost, sizing_equity};
+use bazaar_risk::sizing::{
+    Sized, SizingError, SizingInput, size, size_with_cost, size_with_reference, sizing_equity,
+};
 use bazaar_risk::snapshot::PortfolioSnapshot;
 use bazaar_risk::types::{Side, Tri};
 use proptest::prelude::*;
@@ -28,6 +30,8 @@ fn limits() -> EffectiveLimits {
     l.max_position_value_pct = d(25);
     l.min_charges_slippage_buffer = d(60);
     l.override_size_factor = Decimal::new(5, 1);
+    // G16 is not under test unless a test sets it: large enough that it never binds here.
+    l.max_notional_per_order_inr = d(1_000_000);
     l.cap_equity_at_starting_cash = true;
     l
 }
@@ -452,6 +456,7 @@ fn production_floor_sizes_a_normal_equity_entry_with_a_small_real_cost() {
     // give 95); with the production floor of Rs 60 this is the spec's 94 / Rs 940.
     let mut wide = l.clone();
     wide.max_position_value_pct = d(100);
+    wide.max_notional_per_order_inr = d(1_000_000); // G16 not under test here
     let s = size_with_cost(&wide, &i, &cost).unwrap();
     let want = ((s.budget - floor) / d(10)).floor();
     assert_eq!((Decimal::from(s.qty), s.risk_at_stop), (want, want * d(10)));
@@ -549,4 +554,131 @@ proptest! {
             prop_assert!(s.notional <= d(eq) * l.max_position_value_pct / d(100));
         }
     }
+}
+
+fn cost60(_q: u32) -> Tri<Decimal> {
+    Tri::Known(d(60))
+}
+
+/// Limits where the order cap (not G14) is the binding one: budget allows 94, G14 allows 250.
+fn order_cap_limits(cap: i64) -> EffectiveLimits {
+    let mut l = limits();
+    l.max_position_value_pct = d(100);
+    l.max_notional_per_order_inr = d(cap);
+    l
+}
+
+#[test]
+fn order_cap_binds_and_every_moving_field_follows() {
+    // Uncapped: qty 94 (Rs 940 risk + 60 buffer = budget 1,000).
+    let l = order_cap_limits(1_000_000);
+    let free = size_with_reference(&l, &input(), &cost60, d(500)).unwrap();
+    assert_eq!((free.qty, free.capped_by_order_cap), (94, false));
+    // Cap Rs 30,000 at 500: 60 units.
+    let mut tight = l.clone();
+    tight.max_notional_per_order_inr = d(30_000);
+    let s = size_with_reference(&tight, &input(), &cost60, d(500)).unwrap();
+    assert_eq!(s.qty, 60);
+    assert_eq!(s.lots, 60);
+    assert_eq!(s.risk_at_stop, d(600));
+    assert_eq!(s.budget, d(1000));
+    assert_eq!(s.notional, d(30_000));
+    assert!(s.capped_by_order_cap && !s.capped_by_position_cap && !s.reduced_by_override);
+    // size_with_cost delegates with reference = entry: identical.
+    assert_eq!(size_with_cost(&tight, &input(), &cost60).unwrap(), s);
+}
+
+#[test]
+fn close_above_entry_shrinks_qty_and_matches_the_gate_reference() {
+    let l = order_cap_limits(30_000);
+    let at_entry = size_with_reference(&l, &input(), &cost60, d(500)).unwrap();
+    let above = size_with_reference(&l, &input(), &cost60, d(600)).unwrap();
+    assert_eq!((at_entry.qty, above.qty), (60, 50));
+    assert!(d(600) * Decimal::from(above.qty) <= l.max_notional_per_order_inr);
+    // A reference below entry never loosens: the entry is the floor.
+    let below = size_with_reference(&l, &input(), &cost60, d(400)).unwrap();
+    assert_eq!(below, at_entry);
+}
+
+#[test]
+fn order_cap_equal_to_the_position_cap_is_reported_as_the_position_cap() {
+    // G14 25% of 100,000 = 25,000 = the order cap: no extra reduction from the order cap.
+    let mut l = limits();
+    l.max_notional_per_order_inr = d(25_000);
+    let s = size_with_reference(&l, &input(), &cost60, d(500)).unwrap();
+    assert_eq!(s.qty, 50);
+    assert!(s.capped_by_position_cap && !s.capped_by_order_cap);
+}
+
+#[test]
+fn one_lot_above_the_order_cap_is_no_trade() {
+    let mut l = order_cap_limits(400);
+    assert_eq!(
+        size_with_reference(&l, &input(), &cost60, d(500)),
+        Err(SizingError::OrderCapBelowOneLot)
+    );
+    l.max_notional_per_order_inr = Decimal::ZERO;
+    assert_eq!(
+        size_with_reference(&l, &input(), &cost60, d(500)),
+        Err(SizingError::OrderCapBelowOneLot)
+    );
+    // Lot of 50 at 500 = 25,000 per lot (inside the risk budget), above a 20,000 cap.
+    let mut inp = input();
+    inp.lot_size = 50;
+    assert_eq!(
+        size_with_reference(&order_cap_limits(20_000), &inp, &cost60, d(500)),
+        Err(SizingError::OrderCapBelowOneLot)
+    );
+}
+
+#[test]
+fn bad_reference_cap_or_overflow_is_a_typed_error() {
+    let l = order_cap_limits(30_000);
+    for r in [Decimal::ZERO, d(-5)] {
+        assert_eq!(
+            size_with_reference(&l, &input(), &cost60, r),
+            Err(SizingError::BadPrice)
+        );
+    }
+    let mut neg = l.clone();
+    neg.max_notional_per_order_inr = d(-1);
+    assert_eq!(
+        size_with_reference(&neg, &input(), &cost60, d(500)),
+        Err(SizingError::Arithmetic)
+    );
+    // Reference at Decimal::MAX: cap 30,000 / MAX floors to 0 lots, no trade (typed, no panic).
+    assert_eq!(
+        size_with_reference(&l, &input(), &cost60, Decimal::MAX),
+        Err(SizingError::OrderCapBelowOneLot)
+    );
+    // Cap at Decimal::MAX, entry 0.05: MAX / 0.05 overflows, which means "not binding" (saturates),
+    // so the size is the one without the cap.
+    let mut huge = l.clone();
+    huge.max_notional_per_order_inr = Decimal::MAX;
+    let mut tiny = input();
+    tiny.entry = Decimal::new(5, 2);
+    tiny.stop = Decimal::new(4, 2);
+    tiny.tick_size = Decimal::new(1, 2);
+    let capped = size_with_reference(&huge, &tiny, &cost60, Decimal::new(5, 2)).unwrap();
+    assert!(!capped.capped_by_order_cap);
+    assert_eq!(Ok(capped), size_with_cost(&l_wide(), &tiny, &cost60));
+    // A negative cap that overflows the division is still a typed error (never saturates).
+    let mut neg_huge = l;
+    neg_huge.max_notional_per_order_inr = Decimal::MIN;
+    assert_eq!(
+        size_with_reference(&neg_huge, &tiny, &cost60, Decimal::new(5, 2)),
+        Err(SizingError::Arithmetic)
+    );
+    // A tiny reference never loosens: the entry is the floor, so the result equals size_with_cost.
+    assert_eq!(
+        size_with_reference(&huge, &input(), &cost60, Decimal::new(1, 28)),
+        size_with_cost(&huge, &input(), &cost60)
+    );
+}
+
+/// Limits whose caps cannot bind (G16 not under test).
+fn l_wide() -> EffectiveLimits {
+    let mut l = order_cap_limits(1_000_000);
+    l.max_notional_per_order_inr = Decimal::MAX;
+    l
 }

@@ -789,3 +789,75 @@ fn limits_digest_is_pinned() {
         "94b528797cb980ce8c9053c5b72d8f6bf2316cc1cabf874b2070860da0339add"
     );
 }
+
+#[test]
+fn only_a_missing_approval_is_pending_and_the_verdict_still_fails() {
+    let i = intent(Side::Buy, 10);
+    let s = snap();
+    let mut rig = Rig::new(&semi_auto_text());
+    let e = rig.eval(&i, &s);
+    assert_eq!(failed(&e), vec![RuleId::G16]);
+    assert!(e.verdict().approval_pending_only() && !e.verdict().passed());
+    // An approval for another order is not "pending".
+    rig.mode = mode_evidence(Some(IntentDigest::of(&intent(Side::Buy, 11))));
+    let e = rig.eval(&i, &s);
+    assert_eq!(failed(&e), vec![RuleId::G16]);
+    assert!(!e.verdict().approval_pending_only());
+    // Approved: passes, not pending.
+    rig.mode = mode_evidence(Some(IntentDigest::of(&i)));
+    let e = rig.eval(&i, &s);
+    assert!(e.verdict().passed() && !e.verdict().approval_pending_only());
+    // Kill switch beside the missing approval: G16 names both, not pending.
+    rig.mode = mode_evidence(None);
+    let mut killed = snap();
+    killed.kill_switch = Tri::Known(true);
+    let e = rig.eval(&i, &killed);
+    let g16 = e
+        .verdict()
+        .failures()
+        .find(|r| r.rule() == RuleId::G16)
+        .unwrap();
+    assert!(g16.message().contains("approval") && g16.message().contains("kill switch"));
+    assert!(!e.verdict().approval_pending_only());
+    // Paper never pending.
+    let e = Rig::new(TEXT).eval(&i, &s);
+    assert!(e.verdict().passed() && !e.verdict().approval_pending_only());
+}
+
+#[test]
+fn capped_qty_passes_g16_at_a_higher_reference_and_the_uncapped_one_fails_it() {
+    use bazaar_risk::sizing::{SizingInput, size_with_cost, size_with_reference};
+    let mut rig = Rig::new(TEXT);
+    rig.live = Tri::Known(d("600"));
+    let limits = rig.cfg.effective(&Baseline::none());
+    let input = SizingInput {
+        equity: d("250000"),
+        side: Side::Buy,
+        entry: d("500"),
+        stop: d("490"),
+        lot_size: 1,
+        tick_size: d("0.05"),
+        buffer: Tri::Known(d("20")),
+        overridden: false,
+    };
+    let cost = |_q: u32| Tri::Known(d("20"));
+    let uncapped = size_with_cost(&limits, &input, &cost).unwrap();
+    let capped = size_with_reference(&limits, &input, &cost, d("600")).unwrap();
+    assert!(capped.qty < uncapped.qty && capped.capped_by_order_cap);
+    // The gate's reference is max(intent.price, live) = 600 and the cap is the config's.
+    assert!(d("600") * Decimal::from(capped.qty) <= limits.max_notional_per_order_inr);
+    let s = snap();
+    let ok = rig.eval(&intent(Side::Buy, capped.qty), &s);
+    assert!(
+        !failed(&ok).contains(&RuleId::G16),
+        "{:?}",
+        ok.verdict().results()
+    );
+    let bad = rig.eval(&intent(Side::Buy, uncapped.qty), &s);
+    let g16 = bad
+        .verdict()
+        .failures()
+        .find(|r| r.rule() == RuleId::G16)
+        .unwrap();
+    assert!(g16.message().contains("per-order cap"), "{}", g16.message());
+}

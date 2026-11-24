@@ -171,12 +171,35 @@ fn g13_defined(ctx: &RuleCtx, snap: &PortfolioSnapshot, max_loss: Decimal) -> Ru
     }
 }
 
-fn mode_check(ctx: &RuleCtx, m: ModeInputs) -> Result<(), String> {
+/// Why the mode check failed, as a type (never parsed from text). `ApprovalMissing` is produced
+/// only in `semi_auto`, only when no approval was supplied (`Unknown`), and only when nothing
+/// else in the mode check failed. An approval for another order (`Known(false)`) is `Other`.
+enum ModeGap {
+    ApprovalMissing(String),
+    Other(String),
+}
+
+impl ModeGap {
+    fn into_text(self) -> String {
+        match self {
+            Self::ApprovalMissing(t) | Self::Other(t) => t,
+        }
+    }
+}
+
+const APPROVAL_TEXT: &str =
+    "Your approval of this order is not on record. To pass, approve it in the queue.";
+
+fn mode_check(ctx: &RuleCtx, m: ModeInputs) -> Result<(), ModeGap> {
+    let mut approval_missing = false;
     match ctx.mode {
         ExecutionMode::Paper => {}
         ExecutionMode::SemiAuto => {
             if !yes(m.user_approval) {
-                return Err("Your approval of this order is not on record. To pass, approve it in the queue.".into());
+                if !matches!(m.user_approval, Tri::Unknown) {
+                    return Err(ModeGap::Other(APPROVAL_TEXT.into()));
+                }
+                approval_missing = true;
             }
         }
         ExecutionMode::Auto => {
@@ -191,22 +214,29 @@ fn mode_check(ctx: &RuleCtx, m: ModeInputs) -> Result<(), String> {
                 missing.push("your opt-in to auto orders");
             }
             if !missing.is_empty() {
-                return Err(format!(
+                return Err(ModeGap::Other(format!(
                     "Auto mode is locked: missing {}. To pass, supply them.",
                     missing.join(", ")
-                ));
+                )));
             }
         }
     }
-    match m.live {
-        Tri::Unknown => Err("Cannot confirm whether this order goes to the live broker.".into()),
+    let live_gap = match m.live {
+        Tri::Unknown => Some("Cannot confirm whether this order goes to the live broker."),
         Tri::Known(true) if ctx.mode == ExecutionMode::Paper => {
-            Err("Mode is paper, so orders cannot go to the live broker.".into())
+            Some("Mode is paper, so orders cannot go to the live broker.")
         }
         Tri::Known(true) if !yes(m.live_trading_compiled) => {
-            Err("Live orders need the live-trading build, which is not confirmed here.".into())
+            Some("Live orders need the live-trading build, which is not confirmed here.")
         }
-        Tri::Known(_) => Ok(()),
+        Tri::Known(_) => None,
+    };
+    match (approval_missing, live_gap) {
+        (false, None) => Ok(()),
+        (true, None) => Err(ModeGap::ApprovalMissing(APPROVAL_TEXT.into())),
+        // Both gaps: name both reasons, and it is not "only the approval".
+        (true, Some(t)) => Err(ModeGap::Other(format!("{APPROVAL_TEXT} {t}"))),
+        (false, Some(t)) => Err(ModeGap::Other(t.into())),
     }
 }
 
@@ -262,9 +292,11 @@ pub fn g16(
     let lim = &ctx.limits;
     let entry = cls.entry_qty > 0;
     let mut why: Vec<String> = Vec::new();
+    let mut approval_only = false;
 
-    if let Err(e) = mode_check(ctx, inputs.mode) {
-        why.push(e);
+    if let Err(gap) = mode_check(ctx, inputs.mode) {
+        approval_only = matches!(gap, ModeGap::ApprovalMissing(_));
+        why.push(gap.into_text());
     }
     // Exits always pass the kill switch (reduce-only); owner to confirm.
     match snap.kill_switch {
@@ -303,6 +335,9 @@ pub fn g16(
     );
     if why.is_empty() {
         RuleResult::pass(rule, observed, limit)
+    // `why.len() == 1`: the approval text must be the only reason (kill switch, limits, live gap add more).
+    } else if approval_only && why.len() == 1 {
+        RuleResult::g16_approval_pending(observed, limit, &why.join(" "))
     } else {
         RuleResult::fail(rule, observed, limit, &why.join(" "))
     }
@@ -511,6 +546,120 @@ mod tests {
         assert!(!run16(&c, &i, &snap(), &inp).passed());
         inp.mode.user_approval = Tri::Known(true);
         assert!(run16(&c, &i, &snap(), &inp).passed());
+    }
+
+    /// Table: only the `SemiAuto` + approval absent (`Unknown`) + no other reason case is pending.
+    #[test]
+    fn approval_pending_marker_table() {
+        use ExecutionMode::{Auto, Paper, SemiAuto};
+        let i = intent(Side::Buy, 10, "500");
+        let kill = {
+            let mut s = snap();
+            s.kill_switch = Tri::Known(true);
+            s
+        };
+        let per_day = {
+            let mut s = snap();
+            s.orders_today = Tri::Known(10_000);
+            s
+        };
+        let live_unknown = {
+            let mut m = inputs();
+            m.mode.live = Tri::Unknown;
+            m
+        };
+        let approved_other = {
+            let mut m = inputs();
+            m.mode.user_approval = Tri::Known(false);
+            m
+        };
+        let approved = {
+            let mut m = inputs();
+            m.mode.user_approval = Tri::Known(true);
+            m
+        };
+        // (label, mode, snapshot, inputs, expect pending, expect failed)
+        let cases = [
+            ("sole approval gap", SemiAuto, snap(), inputs(), true, true),
+            (
+                "approval for another order",
+                SemiAuto,
+                snap(),
+                approved_other,
+                false,
+                true,
+            ),
+            ("approved", SemiAuto, snap(), approved, false, false),
+            ("kill switch too", SemiAuto, kill, inputs(), false, true),
+            (
+                "orders per day too",
+                SemiAuto,
+                per_day,
+                inputs(),
+                false,
+                true,
+            ),
+            (
+                "live unknown too",
+                SemiAuto,
+                snap(),
+                live_unknown,
+                false,
+                true,
+            ),
+            ("auto locked", Auto, snap(), inputs(), false, true),
+            ("paper", Paper, snap(), inputs(), false, false),
+        ];
+        for (label, mode, s, inp, pending, failed) in cases {
+            let r = run16(&ctx(mode), &i, &s, &inp);
+            assert_eq!(r.is_approval_pending(), pending, "{label}");
+            assert_eq!(!r.passed(), failed, "{label}");
+            if failed {
+                assert_eq!(r.rule(), RuleId::G16, "{label}");
+            }
+        }
+    }
+
+    #[test]
+    fn missing_approval_and_live_gap_name_both_reasons() {
+        let c = ctx(ExecutionMode::SemiAuto);
+        let mut m = inputs();
+        m.mode.live = Tri::Unknown;
+        let r = run16(&c, &intent(Side::Buy, 10, "500"), &snap(), &m);
+        assert!(!r.is_approval_pending());
+        assert!(
+            r.message()
+                .contains("approval of this order is not on record"),
+            "{}",
+            r.message()
+        );
+        assert!(r.message().contains("live broker"), "{}", r.message());
+    }
+
+    #[test]
+    fn marker_leaves_message_and_level_alone_and_names_every_reason() {
+        let c = ctx(ExecutionMode::SemiAuto);
+        let i = intent(Side::Buy, 10, "500");
+        let pending = run16(&c, &i, &snap(), &inputs());
+        assert!(
+            pending
+                .message()
+                .contains("approval of this order is not on record")
+        );
+        assert_eq!(pending.level(), crate::verdict::OverrideLevel::HardCeiling);
+        let mut s = snap();
+        s.kill_switch = Tri::Known(true);
+        let both = run16(&c, &i, &s, &inputs());
+        assert!(
+            both.message()
+                .contains("approval of this order is not on record")
+        );
+        assert!(
+            both.message().contains("kill switch is on"),
+            "{}",
+            both.message()
+        );
+        assert!(!both.is_approval_pending());
     }
 
     #[test]
