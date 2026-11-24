@@ -74,8 +74,8 @@ pub(crate) async fn append_in_tx(
 /// `chain`. A mismatch is `Corrupt` (category only; no row contents).
 ///
 /// Limit (ADR 0001): hashes link each row to its predecessor only, so removing rows from the
-/// tail leaves a valid shorter chain. Tail truncation is undetectable by hash alone; it needs
-/// the external anchor of the latest (seq, hash) planned for slice 8.
+/// tail leaves a valid shorter chain. Tail truncation is undetectable by hash alone; the anchor
+/// file (`anchor.rs`, ADR 0002) covers it at open.
 pub(crate) fn verify_rows(rows: &[AuditRow], chain: ChainFn) -> Result<(), RepoError> {
     let mut prev = GENESIS;
     for (i, r) in rows.iter().enumerate() {
@@ -104,6 +104,16 @@ fn audit_row(r: &sqlx::sqlite::SqliteRow) -> Result<AuditRow, RepoError> {
         prev_hash: to_arr(&prev)?,
         hash: to_arr(&hash)?,
     })
+}
+
+/// Read every audit row and verify the chain; `Corrupt` when it is broken.
+pub(crate) async fn audit_read_verified(
+    store: &SqliteStore,
+    chain: ChainFn,
+) -> Result<Vec<AuditRow>, RepoError> {
+    let rows = store.audit_read_all().await?;
+    verify_rows(&rows, chain)?;
+    Ok(rows)
 }
 
 impl SqliteStore {
@@ -137,6 +147,7 @@ impl SqliteStore {
         .map_err(|e| map_err(&e))?;
         let out = audit_row(&row)?;
         tx.commit().await.map_err(|e| map_err(&e))?;
+        self.anchor_after_commit().await;
         Ok(out)
     }
 
@@ -146,7 +157,8 @@ impl SqliteStore {
         verify_rows(&self.audit_read_all().await?, chain)
     }
 
-    /// Open like [`SqliteStore::open`], then verify the audit chain: a broken chain refuses to
+    /// Open like [`SqliteStore::open`] (no anchor check; the execution store uses
+    /// `open_anchored`), then verify the audit chain: a broken chain refuses to
     /// open (`Corrupt`), so a tampered log is never silently appended to.
     pub async fn open_verified(path: &std::path::Path, chain: ChainFn) -> Result<Self, RepoError> {
         let store = Self::open(path).await?;

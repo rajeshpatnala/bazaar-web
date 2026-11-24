@@ -145,7 +145,9 @@ impl SqliteStore {
         .await
         .map_err(|e| map_err(&e))?;
         append_in_tx(&mut tx, audit, chain).await?;
-        tx.commit().await.map_err(|e| map_err(&e))
+        tx.commit().await.map_err(|e| map_err(&e))?;
+        self.anchor_after_commit().await;
+        Ok(())
     }
 }
 

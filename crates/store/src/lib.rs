@@ -1,6 +1,9 @@
 //! SQLite and Parquet/DuckDB repositories implementing the `core` ports.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+mod anchor;
+#[cfg(test)]
+mod anchor_tests;
 mod approvals;
 mod audit;
 #[cfg(test)]
@@ -14,6 +17,7 @@ mod parquet;
 mod port_impls;
 mod sqlite;
 
+pub use anchor::{AdoptReport, AnchorFault, AnchorStatus};
 pub use approvals::{ApprovalDecision, ApprovalRow};
 pub use duck::DuckStore;
 pub use killswitch::KillSwitchRow;

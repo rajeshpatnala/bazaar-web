@@ -197,6 +197,8 @@ fn to_instrument(row: &SqliteRow) -> Result<Instrument, RepoError> {
 #[derive(Debug, Clone)]
 pub struct SqliteStore {
     pub(crate) pool: SqlitePool,
+    /// Audit anchor (ADR 0002); `None` for stores opened without it (tests, in-memory).
+    pub(crate) anchor: Option<std::sync::Arc<crate::anchor::AnchorState>>,
 }
 
 /// Best effort: owner-only access to the database and its WAL/SHM files (unix).
@@ -250,7 +252,7 @@ impl SqliteStore {
             .await
             .map_err(|e| map_err(&e))?;
         migrator().run(&pool).await.map_err(|_| RepoError::Schema)?;
-        Ok(Self { pool })
+        Ok(Self { pool, anchor: None })
     }
 }
 
