@@ -302,10 +302,13 @@ pub trait PaperLedgerRepo: Send + Sync {
     /// an empty ledger counts as epoch 0), else `RepoError::Conflict` and nothing is stored (a
     /// racing second reset loses). `opening.kind` must be [`LEDGER_OPENING_KIND`] and
     /// `audit.kind` [`PAPER_RESET_AUDIT_KIND`], else `RepoError::Other`. This is the only way to
-    /// start an epoch, so none starts without an audit row.
+    /// start an epoch, so none starts without an audit row. `expected_tail` is the highest line
+    /// id the caller's decision was based on (0 = empty ledger): if the ledger tail differs
+    /// inside the write transaction, `RepoError::Conflict` and nothing is stored.
     fn new_epoch(
         &self,
         opening: LedgerEntry,
+        expected_tail: u64,
         audit: AuditDraft,
         chain: ChainFn,
     ) -> impl Future<Output = Result<u32, RepoError>> + Send;

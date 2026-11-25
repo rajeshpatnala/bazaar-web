@@ -89,20 +89,29 @@ pub struct ResetRequest {
 pub enum ResetRule {
     /// The circuit breaker is latched.
     BreakerLatched,
+    /// Net P&L of today (IST, all epochs) is negative.
+    DailyLoss,
     /// Net P&L of the current IST week (all epochs) is negative.
     WeeklyLoss,
+    /// The executor holds a position or a working order.
+    BookNotFlat,
+    /// The current epoch has a buy or sell line.
+    OpenLots,
     /// The guard could not read what it needs: unknown refuses.
     GuardUnavailable,
     /// `Initial` asked on a ledger that already has an epoch.
     InitialOnOpenedLedger,
 }
 
-/// Port: may the owner reset now? Implemented over the ledger week and the breaker latch by the
-/// server wiring. An unreadable answer must be `GuardUnavailable`, never `Ok`.
+/// Port: may the owner reset now? An unreadable answer must be `GuardUnavailable`, never `Ok`.
 pub trait ResetGuard: Send + Sync {
+    /// Allow a reset, returning the ledger tail (highest line id, 0 = empty) the decision was
+    /// based on. The tail must be read no later than anything else judged: the store refuses
+    /// the new epoch if the ledger moved past it.
+    ///
     /// # Errors
     /// The [`ResetRule`] that refuses.
-    fn check(&self) -> impl Future<Output = Result<(), ResetRule>> + Send;
+    fn check(&self) -> impl Future<Output = Result<u64, ResetRule>> + Send;
 }
 
 /// Guard that refuses every reset (fail-closed default until a real guard is wired).
@@ -110,7 +119,7 @@ pub trait ResetGuard: Send + Sync {
 pub struct RefuseAll;
 
 impl ResetGuard for RefuseAll {
-    fn check(&self) -> impl Future<Output = Result<(), ResetRule>> + Send {
+    fn check(&self) -> impl Future<Output = Result<u64, ResetRule>> + Send {
         std::future::ready(Err(ResetRule::GuardUnavailable))
     }
 }
@@ -273,7 +282,8 @@ impl<R: PaperLedgerRepo, C: ChargeSource> PaperAccount<R, C> {
     ///
     /// # Errors
     /// `ResetRefused(rule)`; `BadActor`; `InvalidFill` if the configured starting cash is not
-    /// positive; ledger failure (`Conflict` when a racing reset won).
+    /// positive; ledger failure (`Conflict` when a racing reset won or the ledger tail moved
+    /// after the guard judged it).
     pub async fn reset<G: ResetGuard>(
         &self,
         req: &ResetRequest,
@@ -288,15 +298,16 @@ impl<R: PaperLedgerRepo, C: ChargeSource> PaperAccount<R, C> {
         }
         let _g = self.write.lock().await;
         let epoch = self.balances().await?.epoch;
-        match (req.reason, epoch) {
+        let tail = match (req.reason, epoch) {
             (ResetReason::Initial, Some(_)) => {
                 return Err(AccountError::ResetRefused(ResetRule::InitialOnOpenedLedger));
             }
-            (ResetReason::Initial, None) => {}
+            // A first open is valid on an empty ledger only: tail 0.
+            (ResetReason::Initial, None) => 0,
             (ResetReason::OwnerRequested, _) => {
-                guard.check().await.map_err(AccountError::ResetRefused)?;
+                guard.check().await.map_err(AccountError::ResetRefused)?
             }
-        }
+        };
         let next = epoch
             .unwrap_or(0)
             .checked_add(1)
@@ -314,7 +325,7 @@ impl<R: PaperLedgerRepo, C: ChargeSource> PaperAccount<R, C> {
                 req.reason.as_str()
             ),
         };
-        Ok(self.repo.new_epoch(e, audit, chain_hash).await?)
+        Ok(self.repo.new_epoch(e, tail, audit, chain_hash).await?)
     }
 
     /// Signed trade leg and signed (negative) charge leg after validation.
@@ -410,6 +421,10 @@ mod tests {
         audits: StdMutex<Vec<AuditDraft>>,
     }
     impl FakeRepo {
+        /// Line ids are 1..=n over all epochs.
+        fn tail(&self) -> u64 {
+            self.epochs.lock().unwrap().iter().flatten().count() as u64
+        }
         fn lines(&self, epoch_idx: usize) -> Vec<LedgerEntry> {
             self.epochs.lock().unwrap()[epoch_idx].clone()
         }
@@ -446,12 +461,17 @@ mod tests {
         async fn new_epoch(
             &self,
             opening: LedgerEntry,
+            expected_tail: u64,
             audit: AuditDraft,
             _: bazaar_core::ports::ChainFn,
         ) -> Result<u32, RepoError> {
+            let tail = self.0.tail();
             let mut g = self.0.epochs.lock().unwrap();
             let n = u32::try_from(g.len()).unwrap() + 1;
-            if opening.epoch != n || self.0.fail_audit.load(Ordering::SeqCst) {
+            if expected_tail != tail
+                || opening.epoch != n
+                || self.0.fail_audit.load(Ordering::SeqCst)
+            {
                 return Err(RepoError::Conflict);
             }
             self.0.audits.lock().unwrap().push(audit);
@@ -480,15 +500,28 @@ mod tests {
         }
     }
 
-    struct Allow;
+    /// Allows, having judged the ledger as it is now.
+    struct Allow(Arc<FakeRepo>);
     impl ResetGuard for Allow {
-        async fn check(&self) -> Result<(), ResetRule> {
-            Ok(())
+        async fn check(&self) -> Result<u64, ResetRule> {
+            Ok(self.0.tail())
+        }
+    }
+    /// Allows, but another writer appends a line after the guard read the tail.
+    struct ThenAppend(Arc<FakeRepo>);
+    impl ResetGuard for ThenAppend {
+        async fn check(&self) -> Result<u64, ResetRule> {
+            let tail = self.0.tail();
+            let mut g = self.0.epochs.lock().unwrap();
+            let last = g.last_mut().unwrap();
+            let line = last[0].clone();
+            last.push(line);
+            Ok(tail)
         }
     }
     struct Deny(ResetRule);
     impl ResetGuard for Deny {
-        async fn check(&self) -> Result<(), ResetRule> {
+        async fn check(&self) -> Result<u64, ResetRule> {
             Err(self.0)
         }
     }
@@ -671,19 +704,30 @@ mod tests {
         a.apply_fill(&fill(true, 1, "100")).await.unwrap();
         let old = repo.lines(0);
         assert_eq!(
-            a.reset(&req(ResetReason::OwnerRequested), &Allow).await,
+            a.reset(&req(ResetReason::OwnerRequested), &Allow(repo.clone()))
+                .await,
             Ok(2)
         );
         let b = a.balances().await.unwrap();
-        assert_eq!((b.epoch, b.cash, b.entries), (Some(2), d("500"), 1));
+        assert_eq!(
+            (b.epoch, b.cash, b.charges_paid, b.entries),
+            (Some(2), d("500"), Decimal::ZERO, 1)
+        );
+        let new = &repo.lines(1)[0];
+        assert_eq!(
+            (new.kind.as_str(), new.amount, new.ref_id, new.epoch),
+            ("opening", d("500"), None, 2)
+        );
         assert_eq!(repo.lines(0), old, "old epoch untouched");
         let au = repo.audits.lock().unwrap().clone();
         assert_eq!(au.len(), 2);
         let (first, second) = (&au[0], &au[1]);
-        assert_eq!(
-            (first.kind.as_str(), first.actor.as_str()),
-            ("paper_reset", "owner")
-        );
+        for row in [first, second] {
+            assert_eq!(
+                (row.kind.as_str(), row.actor.as_str()),
+                ("paper_reset", "owner")
+            );
+        }
         assert_eq!(
             first.payload,
             r#"{"actor":"owner","epoch":1,"opening":"500","reason":"initial"}"#
@@ -701,7 +745,10 @@ mod tests {
         open(&a).await;
         for rule in [
             ResetRule::BreakerLatched,
+            ResetRule::DailyLoss,
             ResetRule::WeeklyLoss,
+            ResetRule::BookNotFlat,
+            ResetRule::OpenLots,
             ResetRule::GuardUnavailable,
         ] {
             assert_eq!(
@@ -716,7 +763,8 @@ mod tests {
             Err(AccountError::ResetRefused(ResetRule::GuardUnavailable))
         );
         assert_eq!(
-            a.reset(&req(ResetReason::Initial), &Allow).await,
+            a.reset(&req(ResetReason::Initial), &Allow(repo.clone()))
+                .await,
             Err(AccountError::ResetRefused(ResetRule::InitialOnOpenedLedger))
         );
         assert_eq!(repo.epochs.lock().unwrap().len(), 1);
@@ -740,7 +788,7 @@ mod tests {
         repo.fail_read.store(true, Ordering::SeqCst);
         for reason in [ResetReason::Initial, ResetReason::OwnerRequested] {
             assert_eq!(
-                a.reset(&req(reason), &Allow).await,
+                a.reset(&req(reason), &Allow(repo.clone())).await,
                 Err(AccountError::Ledger(RepoError::Unavailable))
             );
         }
@@ -770,7 +818,8 @@ mod tests {
         open(&a).await;
         repo.fail_audit.store(true, Ordering::SeqCst);
         assert_eq!(
-            a.reset(&req(ResetReason::OwnerRequested), &Allow).await,
+            a.reset(&req(ResetReason::OwnerRequested), &Allow(repo.clone()))
+                .await,
             Err(AccountError::Ledger(RepoError::Conflict))
         );
         assert_eq!(a.balances().await.unwrap().epoch, Some(1));
@@ -780,8 +829,37 @@ mod tests {
                 reason: ResetReason::OwnerRequested,
                 actor: bad.into(),
             };
-            assert_eq!(a.reset(&r, &Allow).await, Err(AccountError::BadActor));
+            assert_eq!(
+                a.reset(&r, &Allow(repo.clone())).await,
+                Err(AccountError::BadActor)
+            );
         }
+        // No refused actor writes anything, even with the store healthy again.
+        repo.fail_audit.store(false, Ordering::SeqCst);
+        let mut r = req(ResetReason::OwnerRequested);
+        r.actor = "x".repeat(65);
+        assert_eq!(
+            a.reset(&r, &Allow(repo.clone())).await,
+            Err(AccountError::BadActor)
+        );
+        assert_eq!((repo.tail(), repo.audits.lock().unwrap().len()), (1, 1));
+        r.actor = "x".repeat(64);
+        assert_eq!(a.reset(&r, &Allow(repo.clone())).await, Ok(2));
+        assert_eq!(repo.audits.lock().unwrap()[1].actor, r.actor);
+    }
+
+    /// RISK-176-2: the account commits against the guard's tail, not a fresh read.
+    #[tokio::test]
+    async fn a_line_landing_after_the_guard_read_refuses_the_reset() {
+        let (a, repo) = acct(Some(d("1")), "500");
+        open(&a).await;
+        assert_eq!(
+            a.reset(&req(ResetReason::OwnerRequested), &ThenAppend(repo.clone()))
+                .await,
+            Err(AccountError::Ledger(RepoError::Conflict))
+        );
+        assert_eq!(repo.epochs.lock().unwrap().len(), 1);
+        assert_eq!(repo.audits.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -865,7 +943,7 @@ mod tests {
                 for (op, buy, qty, price) in ops {
                     let before = a.balances().await.unwrap();
                     if op == 0 {
-                        a.reset(&req(ResetReason::OwnerRequested), &Allow).await.unwrap();
+                        a.reset(&req(ResetReason::OwnerRequested), &Allow(repo.clone())).await.unwrap();
                         continue;
                     }
                     let fail = op == 1;

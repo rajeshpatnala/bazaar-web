@@ -40,6 +40,15 @@ fn bind<'q>(
         .bind(e.ts_ist_rfc3339.clone())
 }
 
+/// Highest ledger line id, 0 on an empty ledger. A negative id is `Corrupt`.
+async fn ledger_tail(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<u64, RepoError> {
+    let id: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM paper_ledger")
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| map_err(&e))?;
+    u64::try_from(id).map_err(|_| RepoError::Corrupt)
+}
+
 impl SqliteStore {
     /// Append one entry.
     pub async fn ledger_append(&self, entry: &LedgerEntry) -> Result<(), RepoError> {
@@ -104,10 +113,13 @@ impl SqliteStore {
 
     /// Audited reset: the opening line of epoch `opening.epoch` and the audit row in ONE
     /// transaction. `opening.epoch` must be the current max + 1, else `Conflict` (a racing
-    /// second reset loses); on any error nothing is stored. Old entries stay.
+    /// second reset loses). The ledger tail must still be `expected_tail` inside this
+    /// transaction, else `Conflict` (a line landed after the caller's decision). On any error
+    /// nothing is stored. Old entries stay.
     pub async fn ledger_new_epoch(
         &self,
         opening: &LedgerEntry,
+        expected_tail: u64,
         audit: &AuditDraft,
         chain: ChainFn,
     ) -> Result<u32, RepoError> {
@@ -116,6 +128,9 @@ impl SqliteStore {
             return Err(RepoError::Other);
         }
         let mut tx = self.pool.begin().await.map_err(|e| map_err(&e))?;
+        if ledger_tail(&mut tx).await? != expected_tail {
+            return Err(RepoError::Conflict);
+        }
         let max: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(epoch), 0) FROM paper_ledger")
             .fetch_one(&mut *tx)
             .await
@@ -158,6 +173,7 @@ mod tests {
         let s = store().await;
         s.ledger_new_epoch(
             &entry(1, "opening", "5", None),
+            0,
             &test_draft("paper_reset"),
             test_chain,
         )
@@ -220,6 +236,7 @@ mod tests {
         assert_eq!(s.ledger_current_epoch().await.unwrap().len(), 1);
         s.ledger_new_epoch(
             &entry(2, "opening", "9", None),
+            1,
             &test_draft("paper_reset"),
             test_chain,
         )
@@ -267,6 +284,7 @@ mod tests {
             assert_eq!(
                 s.ledger_new_epoch(
                     &entry(2, line, "100000", None),
+                    1,
                     &test_draft(audit),
                     test_chain
                 )
@@ -292,6 +310,7 @@ mod tests {
             assert_eq!(
                 s.ledger_new_epoch(
                     &entry(2, "opening", "9", None),
+                    1,
                     &test_draft("paper_reset"),
                     test_chain
                 )
@@ -364,12 +383,12 @@ mod tests {
         let (d, c) = (test_draft("paper_reset"), test_chain);
         // Invalid line, stale epoch and a jumped epoch: refused, no ledger line, no audit row.
         assert_eq!(
-            s.ledger_new_epoch(&entry(2, "", "9", None), &d, c).await,
+            s.ledger_new_epoch(&entry(2, "", "9", None), 1, &d, c).await,
             Err(RepoError::Other)
         );
         for e in [1, 3] {
             assert_eq!(
-                s.ledger_new_epoch(&entry(e, "opening", "9", None), &d, c)
+                s.ledger_new_epoch(&entry(e, "opening", "9", None), 1, &d, c)
                     .await,
                 Err(RepoError::Conflict)
             );
@@ -378,7 +397,7 @@ mod tests {
         let mut huge = d.clone();
         huge.payload = "x".repeat(1_000_000);
         assert_eq!(
-            s.ledger_new_epoch(&entry(2, "opening", "9", None), &huge, c)
+            s.ledger_new_epoch(&entry(2, "opening", "9", None), 1, &huge, c)
                 .await,
             Err(RepoError::TooLarge)
         );
@@ -389,7 +408,7 @@ mod tests {
         let o = store().await;
         raw(&o, i64::from(u32::MAX), "1", None).await;
         assert_eq!(
-            o.ledger_new_epoch(&entry(u32::MAX, "opening", "1", None), &d, c)
+            o.ledger_new_epoch(&entry(u32::MAX, "opening", "1", None), 1, &d, c)
                 .await,
             Err(RepoError::Conflict)
         );
@@ -402,8 +421,8 @@ mod tests {
         let draft = test_draft("paper_reset");
         let o = entry(1, "opening", "9", None);
         let (first, second) = tokio::join!(
-            s.ledger_new_epoch(&o, &draft, test_chain),
-            s.ledger_new_epoch(&o, &draft, test_chain)
+            s.ledger_new_epoch(&o, 0, &draft, test_chain),
+            s.ledger_new_epoch(&o, 0, &draft, test_chain)
         );
         assert_eq!(u8::from(first.is_ok()) + u8::from(second.is_ok()), 1);
         assert_eq!(first.and(second), Err(RepoError::Conflict), "the loser");
@@ -446,6 +465,7 @@ mod tests {
         let n = s
             .ledger_new_epoch(
                 &entry(2, "opening", "9", None),
+                1,
                 &test_draft("paper_reset"),
                 test_chain,
             )
@@ -473,5 +493,46 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    /// RISK-176-2: the tail is rechecked inside the write transaction. The epoch number is
+    /// right in every refused call, so only the tail check can refuse it.
+    #[tokio::test]
+    async fn new_epoch_refuses_a_tail_that_is_not_the_ledger_tail() {
+        let s = opened().await;
+        let judged = 1; // the opening line
+        s.ledger_append(&entry(1, "charge", "-1", None))
+            .await
+            .unwrap();
+        let (next, d) = (entry(2, "opening", "9", None), test_draft("paper_reset"));
+        // Moved by an append; `Initial` (0) on a non-empty ledger; a tail ahead of the ledger.
+        for stale in [judged, 0, 3] {
+            assert_eq!(
+                s.ledger_new_epoch(&next, stale, &d, test_chain).await,
+                Err(RepoError::Conflict),
+                "tail {stale}"
+            );
+        }
+        assert_eq!((line_count(&s).await, audit_count(&s).await), (2, 1));
+        assert_eq!(s.ledger_new_epoch(&next, 2, &d, test_chain).await, Ok(2));
+    }
+
+    /// An unreadable tail is never taken as "empty": nothing is written.
+    #[tokio::test]
+    async fn new_epoch_with_a_negative_tail_is_corrupt() {
+        let s = store().await;
+        sqlx::query(
+            "INSERT INTO paper_ledger (id, epoch, kind, amount, ts_ist) \
+             VALUES (-1, 1, 'k', '1', 't')",
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        let (next, d) = (entry(2, "opening", "9", None), test_draft("paper_reset"));
+        assert_eq!(
+            s.ledger_new_epoch(&next, 0, &d, test_chain).await,
+            Err(RepoError::Corrupt)
+        );
+        assert_eq!((line_count(&s).await, audit_count(&s).await), (1, 0));
     }
 }

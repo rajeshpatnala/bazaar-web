@@ -472,6 +472,7 @@ mod tests {
         async fn new_epoch(
             &self,
             o: LedgerEntry,
+            _: u64,
             _: bazaar_core::ports::AuditDraft,
             _: bazaar_core::ports::ChainFn,
         ) -> Result<u32, RepoError> {
