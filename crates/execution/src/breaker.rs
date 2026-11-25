@@ -141,13 +141,20 @@ impl<P: PnlSource, A: AuditRepo> DailyLossBreaker<P, A> {
             tracing::warn!(category = e.safe_reason(), "breaker latch not restorable");
             ExecError::Storage
         })?;
-        let restored = restore_latch(&rows, &calendar, now.date_naive()).until;
+        let restored = restore_latch(&rows, &calendar, now.date_naive());
+        if restored.unparsable > 0 {
+            // The count only, never payload text.
+            tracing::warn!(
+                unparsable = restored.unparsable,
+                "breaker latch restore ignored unreadable trip rows"
+            );
+        }
         Ok(Self {
             src,
             audit,
             calendar,
             max_loss_pct,
-            until: Mutex::new(restored),
+            until: Mutex::new(restored.until),
             pending: Mutex::new(None),
         })
     }
@@ -471,7 +478,20 @@ mod tests {
         let monday = day(23, 0).date_naive();
         let got = restore_latch(&rows, &cal(), today);
         assert_eq!((got.until, got.unparsable), (Some(monday), 0));
-        assert_eq!(restore_latch(&rows, &cal(), monday).until, None);
+        let expired = restore_latch(&rows, &cal(), monday);
+        assert_eq!((expired.until, expired.unparsable), (None, 0));
+        // An unreadable row does not stop the scan: a later open trip still latches.
+        let mixed = [row(TRIP_KIND, "garbage"), rows[0].clone()];
+        let got = restore_latch(&mixed, &cal(), today);
+        assert_eq!((got.until, got.unparsable), (Some(monday), 1));
+        // "max" on a day the calendar still cannot answer: readable, held one calendar day
+        // (a Friday, so a working calendar would not give the Saturday).
+        let uncovered = NaiveDate::from_ymd_opt(2035, 1, 5).unwrap();
+        let next = cal().next_trading_day(uncovered, Segment::Equity);
+        assert!(next.is_err(), "{next:?}");
+        let held = row(TRIP_KIND, r#"{"until":"max","day":"2035-01-05"}"#);
+        let got = restore_latch(&[held], &cal(), today);
+        assert_eq!((got.until, got.unparsable), (uncovered.succ_opt(), 0));
         for bad in [
             "garbage",
             "{}",
@@ -483,6 +503,62 @@ mod tests {
             let got = restore_latch(&[row(TRIP_KIND, bad)], &cal(), today);
             assert_eq!((got.until, got.unparsable), (None, 1), "{bad}");
         }
+    }
+
+    /// Collects every event's fields as one line each.
+    struct Events(Arc<Mutex<Vec<String>>>);
+    impl tracing::Subscriber for Events {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            use std::fmt::Write as _;
+            struct Line(String);
+            impl tracing::field::Visit for Line {
+                fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+                    let _ = write!(self.0, "{}={v:?};", f.name());
+                }
+            }
+            let mut line = Line(format!("{};", event.metadata().level()));
+            event.record(&mut line);
+            self.0.lock().unwrap().push(line.0);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[tokio::test]
+    async fn a_restart_warns_with_the_count_of_unreadable_trip_rows_only() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let _capture = tracing::subscriber::set_default(Events(seen.clone()));
+        let r = Arc::new(MemRepo::default());
+        breaker_on(FakePnl::set(0, false), &r, day(19, 9)).await;
+        assert!(seen.lock().unwrap().is_empty());
+        for payload in [r#"{"until":"secret-text"}"#, "{}"] {
+            r.rows.lock().unwrap().push(AuditRow {
+                seq: 1,
+                draft: AuditDraft {
+                    ts_ist_rfc3339: day(19, 8).to_rfc3339(),
+                    actor: "breaker".into(),
+                    kind: TRIP_KIND.into(),
+                    payload: payload.into(),
+                },
+                prev_hash: [0; 32],
+                hash: [0; 32],
+            });
+        }
+        let b = breaker_on(FakePnl::set(0, false), &r, day(19, 9)).await;
+        assert_eq!(
+            *seen.lock().unwrap(),
+            ["WARN;message=breaker latch restore ignored unreadable trip rows;unparsable=2;"]
+        );
+        // Behaviour is unchanged: unreadable rows do not latch (BZ-F10-S10, RISK-179-1).
+        assert_eq!(b.tripped(day(19, 10)).await, None);
     }
 
     #[tokio::test]
