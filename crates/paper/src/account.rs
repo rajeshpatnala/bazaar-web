@@ -16,7 +16,10 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 use bazaar_core::clock::Clock;
-use bazaar_core::ports::{AuditDraft, LedgerEntry, PaperLedgerRepo, RepoError, SourceError};
+use bazaar_core::ports::{
+    AuditDraft, LEDGER_OPENING_KIND, LedgerEntry, PAPER_RESET_AUDIT_KIND, PaperLedgerRepo,
+    RepoError, SourceError,
+};
 use bazaar_execution::audit::chain_hash;
 
 /// Ledger entry kinds; stored as their `as_str` label.
@@ -37,7 +40,7 @@ impl LedgerKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Opening => "opening",
+            Self::Opening => LEDGER_OPENING_KIND,
             Self::Buy => "buy",
             Self::Sell => "sell",
             Self::Charge => "charge",
@@ -302,7 +305,7 @@ impl<R: PaperLedgerRepo, C: ChargeSource> PaperAccount<R, C> {
         let audit = AuditDraft {
             ts_ist_rfc3339: e.ts_ist_rfc3339.clone(),
             actor: req.actor.clone(),
-            kind: "paper_reset".to_owned(),
+            kind: PAPER_RESET_AUDIT_KIND.to_owned(),
             // Canonical JSON: sorted keys, no whitespace; every value is typed or validated.
             payload: format!(
                 "{{\"actor\":\"{}\",\"epoch\":{next},\"opening\":\"{}\",\"reason\":\"{}\"}}",
@@ -403,6 +406,7 @@ mod tests {
         epochs: StdMutex<Vec<Vec<LedgerEntry>>>,
         fail_next: AtomicBool,
         fail_audit: AtomicBool,
+        fail_read: AtomicBool,
         audits: StdMutex<Vec<AuditDraft>>,
     }
     impl FakeRepo {
@@ -424,14 +428,20 @@ mod tests {
             Ok(())
         }
         async fn current_epoch(&self) -> Result<Vec<LedgerEntry>, RepoError> {
-            Ok(self
+            if self.0.fail_read.load(Ordering::SeqCst) {
+                return Err(RepoError::Unavailable);
+            }
+            let snapshot = self
                 .0
                 .epochs
                 .lock()
                 .unwrap()
                 .last()
                 .cloned()
-                .unwrap_or_default())
+                .unwrap_or_default();
+            // Like a real store: other tasks may run between this read and the caller's write.
+            tokio::task::yield_now().await;
+            Ok(snapshot)
         }
         async fn new_epoch(
             &self,
@@ -707,6 +717,47 @@ mod tests {
         );
         assert_eq!(
             a.reset(&req(ResetReason::Initial), &Allow).await,
+            Err(AccountError::ResetRefused(ResetRule::InitialOnOpenedLedger))
+        );
+        assert_eq!(repo.epochs.lock().unwrap().len(), 1);
+        assert_eq!(repo.audits.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn owner_reset_of_an_empty_ledger_still_asks_the_guard() {
+        let (a, repo) = acct(Some(d("1")), "500");
+        assert_eq!(
+            a.reset(&req(ResetReason::OwnerRequested), &RefuseAll).await,
+            Err(AccountError::ResetRefused(ResetRule::GuardUnavailable))
+        );
+        assert!(repo.epochs.lock().unwrap().is_empty());
+        assert!(repo.audits.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reset_with_an_unreadable_ledger_writes_nothing() {
+        let (a, repo) = acct(Some(d("1")), "500");
+        repo.fail_read.store(true, Ordering::SeqCst);
+        for reason in [ResetReason::Initial, ResetReason::OwnerRequested] {
+            assert_eq!(
+                a.reset(&req(reason), &Allow).await,
+                Err(AccountError::Ledger(RepoError::Unavailable))
+            );
+        }
+        assert!(repo.epochs.lock().unwrap().is_empty());
+        assert!(repo.audits.lock().unwrap().is_empty());
+    }
+
+    /// The write lock makes the second reset see the first one's epoch; without it both would
+    /// read an empty ledger and the loser would only fail at the store.
+    #[tokio::test]
+    async fn concurrent_initial_resets_on_one_account_are_serialised() {
+        let (a, repo) = acct(Some(d("1")), "500");
+        let r = req(ResetReason::Initial);
+        let (first, second) = tokio::join!(a.reset(&r, &RefuseAll), a.reset(&r, &RefuseAll));
+        assert_eq!(first, Ok(1));
+        assert_eq!(
+            second,
             Err(AccountError::ResetRefused(ResetRule::InitialOnOpenedLedger))
         );
         assert_eq!(repo.epochs.lock().unwrap().len(), 1);

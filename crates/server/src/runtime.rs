@@ -832,6 +832,34 @@ mod tests {
         assert!(rt.is_ok(), "{:?}", rt.err());
     }
 
+    /// TS-176-4: the only production reset. Its audit row is pinned field by field, and a
+    /// restart adds neither a second row nor a second opening line.
+    #[tokio::test]
+    async fn first_open_is_audited_once_and_a_restart_adds_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("x.db");
+        for run in ["first open", "restart"] {
+            let rt = start(&db, RISK, &cfg(), clock(), calendar()).await.unwrap();
+            let rows = AuditRepo::read_all(&rt.store).await.unwrap();
+            assert_eq!(rows[0].draft.kind, "paper_reset", "{run}");
+            let resets = rows.iter().filter(|r| r.draft.kind == "paper_reset");
+            assert_eq!(resets.count(), 1, "{run}");
+            assert_eq!(rows[0].draft.actor, "system.startup", "{run}");
+            assert_eq!(
+                rows[0].draft.payload,
+                r#"{"actor":"system.startup","epoch":1,"opening":"250000","reason":"initial"}"#,
+                "{run}"
+            );
+            let lines = PaperLedgerRepo::current_epoch(&rt.store).await.unwrap();
+            assert_eq!(lines.len(), 1, "{run}");
+            assert_eq!(
+                (lines[0].epoch, lines[0].kind.as_str(), lines[0].amount),
+                (1, "opening", Decimal::from(250_000)),
+                "{run}"
+            );
+        }
+    }
+
     /// RISK-136-4: a ledger with fills cannot restore the position book, so startup refuses.
     #[tokio::test]
     async fn reopen_refuses_while_the_ledger_may_hold_open_lots() {

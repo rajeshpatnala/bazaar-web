@@ -268,6 +268,11 @@ pub trait KillSwitchRepo: Send + Sync {
     ) -> impl Future<Output = Result<(), RepoError>> + Send;
 }
 
+/// Ledger line kind that opens an epoch. Only [`PaperLedgerRepo::new_epoch`] may store it.
+pub const LEDGER_OPENING_KIND: &str = "opening";
+/// Audit row kind that [`PaperLedgerRepo::new_epoch`] requires.
+pub const PAPER_RESET_AUDIT_KIND: &str = "paper_reset";
+
 /// One append-only paper ledger line; balances are derived by replay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerEntry {
@@ -281,9 +286,11 @@ pub struct LedgerEntry {
 
 /// Paper account ledger. Reset starts a new epoch and keeps the old entries.
 pub trait PaperLedgerRepo: Send + Sync {
-    /// Append one entry.
+    /// Append one entry; same rules as [`Self::append_many`].
     fn append(&self, entry: LedgerEntry) -> impl Future<Output = Result<(), RepoError>> + Send;
-    /// Append all `entries` in order, all-or-nothing: on error none of them is stored.
+    /// Append all `entries` in order, all-or-nothing: on error none of them is stored. Entries
+    /// must target the current epoch, else `RepoError::Conflict`; an empty ledger has none, so
+    /// every entry is a `Conflict` there. A [`LEDGER_OPENING_KIND`] entry is `RepoError::Other`.
     fn append_many(
         &self,
         entries: Vec<LedgerEntry>,
@@ -293,7 +300,9 @@ pub trait PaperLedgerRepo: Send + Sync {
     /// Audited reset: in ONE transaction insert the opening line of epoch `opening.epoch` and the
     /// `audit` row; both or neither. `opening.epoch` must be exactly the current epoch + 1 (0 on
     /// an empty ledger counts as epoch 0), else `RepoError::Conflict` and nothing is stored (a
-    /// racing second reset loses). There is no unaudited way to start an epoch.
+    /// racing second reset loses). `opening.kind` must be [`LEDGER_OPENING_KIND`] and
+    /// `audit.kind` [`PAPER_RESET_AUDIT_KIND`], else `RepoError::Other`. This is the only way to
+    /// start an epoch, so none starts without an audit row.
     fn new_epoch(
         &self,
         opening: LedgerEntry,

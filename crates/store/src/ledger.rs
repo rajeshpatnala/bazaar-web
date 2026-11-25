@@ -3,7 +3,9 @@
 
 use std::str::FromStr;
 
-use bazaar_core::ports::{AuditDraft, ChainFn, LedgerEntry, RepoError};
+use bazaar_core::ports::{
+    AuditDraft, ChainFn, LEDGER_OPENING_KIND, LedgerEntry, PAPER_RESET_AUDIT_KIND, RepoError,
+};
 use rust_decimal::Decimal;
 use sqlx::Row;
 
@@ -44,16 +46,22 @@ impl SqliteStore {
         self.ledger_append_many(std::slice::from_ref(entry)).await
     }
 
-    /// Append all entries in order in one transaction; on any error none is stored.
+    /// Append all entries in order in one transaction; on any error none is stored. An opening
+    /// line is refused (`Other`) and so is any append on an empty ledger (`Conflict`): only
+    /// [`Self::ledger_new_epoch`], which audits, starts an epoch.
     pub async fn ledger_append_many(&self, entries: &[LedgerEntry]) -> Result<(), RepoError> {
         if entries.len() > MAX_BATCH {
             return Err(RepoError::TooLarge);
         }
         entries.iter().try_for_each(check)?;
+        if entries.iter().any(|e| e.kind == LEDGER_OPENING_KIND) {
+            return Err(RepoError::Other);
+        }
         let mut tx = self.pool.begin().await.map_err(|e| map_err(&e))?;
-        // Appends go to the current epoch only (1 on an empty table); only `ledger_new_epoch`
-        // raises it. A stale or jumped epoch is a `Conflict` and nothing is stored.
-        let max: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(epoch), 1) FROM paper_ledger")
+        // Appends go to the current epoch only; only `ledger_new_epoch` raises it. An empty table
+        // reads as 0, which `check` never lets an entry carry. A stale or jumped epoch is a
+        // `Conflict` and nothing is stored.
+        let max: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(epoch), 0) FROM paper_ledger")
             .fetch_one(&mut *tx)
             .await
             .map_err(|e| map_err(&e))?;
@@ -104,6 +112,9 @@ impl SqliteStore {
         chain: ChainFn,
     ) -> Result<u32, RepoError> {
         check(opening)?;
+        if opening.kind != LEDGER_OPENING_KIND || audit.kind != PAPER_RESET_AUDIT_KIND {
+            return Err(RepoError::Other);
+        }
         let mut tx = self.pool.begin().await.map_err(|e| map_err(&e))?;
         let max: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(epoch), 0) FROM paper_ledger")
             .fetch_one(&mut *tx)
@@ -142,23 +153,43 @@ mod tests {
         SqliteStore::open_in_memory().await.unwrap()
     }
 
+    /// A store whose epoch 1 was opened the only allowed way (writes one audit row).
+    async fn opened() -> SqliteStore {
+        let s = store().await;
+        s.ledger_new_epoch(
+            &entry(1, "opening", "5", None),
+            &test_draft("paper_reset"),
+            test_chain,
+        )
+        .await
+        .unwrap();
+        s
+    }
+
+    async fn line_count(s: &SqliteStore) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM paper_ledger")
+            .fetch_one(&s.pool)
+            .await
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn append_many_roundtrips_in_order_with_exact_decimals() {
-        let s = store().await;
+        let s = opened().await;
         let es = vec![
-            entry(1, "opening", "100000.00", None),
+            entry(1, "buy", "-100000.00", None),
             entry(1, "charge", "-12.345", Some(u128::MAX)),
         ];
         s.ledger_append_many(&es).await.unwrap();
-        assert_eq!(s.ledger_current_epoch().await.unwrap(), es);
+        assert_eq!(s.ledger_current_epoch().await.unwrap()[1..], es);
     }
 
     #[tokio::test]
     async fn append_many_is_all_or_nothing() {
-        let s = store().await;
+        let s = opened().await;
         let es = [entry(1, "a", "1", None), entry(0, "bad_epoch", "2", None)];
         assert_eq!(s.ledger_append_many(&es).await, Err(RepoError::Other));
-        assert_eq!(s.ledger_current_epoch().await.unwrap(), Vec::new());
+        assert_eq!(line_count(&s).await, 1);
         // A failure inside the transaction rolls the earlier rows back.
         sqlx::query(
             "CREATE TRIGGER boom BEFORE INSERT ON paper_ledger WHEN NEW.kind = 'boom' \
@@ -168,16 +199,13 @@ mod tests {
         .await
         .unwrap();
         let es = [entry(1, "a", "1", None), entry(1, "boom", "2", None)];
-        assert!(s.ledger_append_many(&es).await.is_err());
-        assert_eq!(s.ledger_current_epoch().await.unwrap(), Vec::new());
+        assert_eq!(s.ledger_append_many(&es).await, Err(RepoError::Other));
+        assert_eq!(line_count(&s).await, 1);
     }
 
     #[tokio::test]
     async fn appends_must_target_the_current_epoch() {
-        let s = store().await;
-        s.ledger_append(&entry(1, "opening", "5", None))
-            .await
-            .unwrap();
+        let s = opened().await;
         assert_eq!(
             s.ledger_append(&entry(2, "x", "1", None)).await,
             Err(RepoError::Conflict)
@@ -192,7 +220,7 @@ mod tests {
         assert_eq!(s.ledger_current_epoch().await.unwrap().len(), 1);
         s.ledger_new_epoch(
             &entry(2, "opening", "9", None),
-            &test_draft("r"),
+            &test_draft("paper_reset"),
             test_chain,
         )
         .await
@@ -202,17 +230,84 @@ mod tests {
             Err(RepoError::Conflict)
         );
         assert_eq!(s.ledger_append(&entry(2, "new", "1", None)).await, Ok(()));
-        // An empty table accepts epoch 1 only.
-        let e = store().await;
-        assert_eq!(
-            e.ledger_append(&entry(2, "x", "1", None)).await,
-            Err(RepoError::Conflict)
-        );
+    }
+
+    /// RISK-176-3 / CR-176-2 / SEC-176-1: no epoch can be started without an audit row.
+    #[tokio::test]
+    async fn append_on_an_empty_ledger_is_refused_for_any_epoch() {
+        let s = store().await;
+        for epoch in [1, 2] {
+            let e = entry(epoch, "charge", "-1", None);
+            assert_eq!(s.ledger_append(&e).await, Err(RepoError::Conflict));
+            assert_eq!(s.ledger_append_many(&[e]).await, Err(RepoError::Conflict));
+        }
+        assert_eq!((line_count(&s).await, audit_count(&s).await), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn append_refuses_an_opening_line_alone_or_in_a_batch() {
+        for s in [store().await, opened().await] {
+            let before = (line_count(&s).await, audit_count(&s).await);
+            let opening = entry(1, "opening", "100000", None);
+            assert_eq!(s.ledger_append(&opening).await, Err(RepoError::Other));
+            let mixed = [entry(1, "charge", "-1", None), opening];
+            assert_eq!(s.ledger_append_many(&mixed).await, Err(RepoError::Other));
+            assert_eq!((line_count(&s).await, audit_count(&s).await), before);
+        }
+    }
+
+    #[tokio::test]
+    async fn new_epoch_requires_an_opening_line_and_a_paper_reset_audit_row() {
+        let s = opened().await;
+        for (line, audit) in [
+            ("charge", "paper_reset"),
+            ("sell", "paper_reset"),
+            ("opening", "approve"),
+        ] {
+            assert_eq!(
+                s.ledger_new_epoch(
+                    &entry(2, line, "100000", None),
+                    &test_draft(audit),
+                    test_chain
+                )
+                .await,
+                Err(RepoError::Other),
+                "{line}/{audit}"
+            );
+        }
+        assert_eq!((line_count(&s).await, audit_count(&s).await), (1, 1));
+    }
+
+    /// TS-176-2: a failing INSERT on either side stores neither the epoch line nor the audit row.
+    #[tokio::test]
+    async fn new_epoch_insert_failure_on_either_table_rolls_back_both() {
+        for trigger in [
+            "CREATE TRIGGER boom BEFORE INSERT ON paper_ledger BEGIN SELECT RAISE(ABORT, 'x'); END",
+            "CREATE TRIGGER boom BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'x'); END",
+        ] {
+            let s = opened().await;
+            let before = s.ledger_current_epoch().await.unwrap();
+            let rows = s.audit_read_all().await.unwrap();
+            sqlx::query(trigger).execute(&s.pool).await.unwrap();
+            assert_eq!(
+                s.ledger_new_epoch(
+                    &entry(2, "opening", "9", None),
+                    &test_draft("paper_reset"),
+                    test_chain
+                )
+                .await,
+                Err(RepoError::Other),
+                "{trigger}"
+            );
+            assert_eq!(s.ledger_current_epoch().await.unwrap(), before, "{trigger}");
+            assert_eq!(line_count(&s).await, 1, "{trigger}");
+            assert_eq!(s.audit_read_all().await.unwrap(), rows, "{trigger}");
+        }
     }
 
     #[tokio::test]
     async fn caps_accept_exactly_the_maximum() {
-        let s = store().await;
+        let s = opened().await;
         let mut at_max = entry(1, &"k".repeat(MAX_KIND), "1", None);
         at_max.ts_ist_rfc3339 = "t".repeat(MAX_TS);
         assert_eq!(s.ledger_append(&at_max).await, Ok(()));
@@ -221,7 +316,7 @@ mod tests {
         assert_eq!(s.ledger_append(&over_ts).await, Err(RepoError::TooLarge));
         let batch = vec![entry(1, "k", "1", None); MAX_BATCH];
         assert_eq!(s.ledger_append_many(&batch).await, Ok(()));
-        assert_eq!(s.ledger_current_epoch().await.unwrap().len(), MAX_BATCH + 1);
+        assert_eq!(s.ledger_current_epoch().await.unwrap().len(), MAX_BATCH + 2);
     }
 
     async fn raw(s: &SqliteStore, epoch: i64, amount: &str, ref_id: Option<&str>) {
@@ -265,10 +360,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_epoch_failures_store_nothing() {
-        let s = store().await;
-        s.ledger_append(&entry(1, "opening", "5", None))
-            .await
-            .unwrap();
+        let s = opened().await;
         let (d, c) = (test_draft("paper_reset"), test_chain);
         // Invalid line, stale epoch and a jumped epoch: refused, no ledger line, no audit row.
         assert_eq!(
@@ -285,14 +377,14 @@ mod tests {
         // An audit row that cannot be appended rolls the epoch line back too.
         let mut huge = d.clone();
         huge.payload = "x".repeat(1_000_000);
-        assert!(
+        assert_eq!(
             s.ledger_new_epoch(&entry(2, "opening", "9", None), &huge, c)
-                .await
-                .is_err()
+                .await,
+            Err(RepoError::TooLarge)
         );
         let cur = s.ledger_current_epoch().await.unwrap();
         assert_eq!((cur.len(), cur[0].epoch), (1, 1));
-        assert_eq!(audit_count(&s).await, 0);
+        assert_eq!(audit_count(&s).await, 1);
         // The epoch counter at u32::MAX cannot advance (no wrap).
         let o = store().await;
         raw(&o, i64::from(u32::MAX), "1", None).await;
@@ -314,6 +406,7 @@ mod tests {
             s.ledger_new_epoch(&o, &draft, test_chain)
         );
         assert_eq!(u8::from(first.is_ok()) + u8::from(second.is_ok()), 1);
+        assert_eq!(first.and(second), Err(RepoError::Conflict), "the loser");
         assert_eq!(audit_count(&s).await, 1);
         assert_eq!(s.ledger_current_epoch().await.unwrap().len(), 1);
     }
@@ -349,10 +442,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_epoch_keeps_old_entries_and_is_append_only() {
-        let s = store().await;
-        s.ledger_append(&entry(1, "opening", "5", None))
-            .await
-            .unwrap();
+        let s = opened().await;
         let n = s
             .ledger_new_epoch(
                 &entry(2, "opening", "9", None),
@@ -362,7 +452,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 2);
-        assert_eq!(audit_count(&s).await, 1);
+        assert_eq!(audit_count(&s).await, 2);
         let cur = s.ledger_current_epoch().await.unwrap();
         assert_eq!(cur.len(), 1);
         assert_eq!(cur[0].epoch, 2);
