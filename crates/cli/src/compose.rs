@@ -37,8 +37,9 @@ use tokio::runtime::Handle;
 
 /// Open the SQLite store for execution work with the audit chain and the anchor file beside the
 /// database verified (ADR 0003): a tampered, cut or swapped log is `Err(RepoError::Corrupt)` and
-/// is never appended to; a non-empty log with no anchor needs the human `audit-anchor adopt`. Never use
-/// `SqliteStore::open` for the execution store (CR-128-2, SEC-128-2); `tests/compose.rs` fails if that happens.
+/// is never appended to; a non-empty log with no anchor needs the human
+/// `history-checkpoint accept-current`. Never use `SqliteStore::open` for the execution store
+/// (CR-128-2, SEC-128-2); `tests/compose.rs` fails if that happens.
 ///
 /// # Errors
 /// The store's `RepoError`; `Corrupt` when any audit row was altered, removed or reordered, or

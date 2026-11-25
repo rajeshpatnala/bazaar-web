@@ -1,12 +1,15 @@
-//! `audit-anchor adopt|status`: the audit anchor beside the database (ADR 0003).
+//! `history-checkpoint accept-current|verify`: the history checkpoint beside the database, which
+//! protects the activity history (ADR 0003; code names keep "audit anchor").
 //!
-//! `adopt` is HUMAN-ONLY (owner decision 2026-11-25): agents never run it. It verifies the audit
-//! chain, then writes the anchor for the current tail. An existing anchor file of any kind is
-//! replaced only with `accept_rollback`. Neither command creates a database that is missing.
+//! `accept-current` is HUMAN-ONLY (owner decision 2026-11-25): agents never run it. It verifies
+//! the audit chain, then writes the checkpoint for the current tail. An existing checkpoint file
+//! of any kind is replaced only with `--accept-missing-entries`. Neither command creates a
+//! database that is missing.
 //!
-//! Stop the server first: `adopt` takes no lock, and a running server's anchor writer could
-//! race it (single writer per database, ADR 0003). `adopt` leaves no audit row; the printed
-//! report (old seq, fault, new seq, tail time) is the owner's only trail (ADR 0003).
+//! Stop the server first: `accept-current` takes no lock, and a running server's checkpoint
+//! writer could race it (single writer per database, ADR 0003). It leaves no audit row; the
+//! printed report (old entry number, old checkpoint state, new entry number, last entry time) is
+//! the owner's only trail (ADR 0003).
 
 use std::path::{Path, PathBuf};
 
@@ -16,8 +19,8 @@ use bazaar_store::{AdoptReport, SqliteStore};
 
 use super::{CommandError, DB_FILE, repo_label};
 
-/// What `adopt` changed, plus the tail it anchored so the owner can check it against their own
-/// records (a missing anchor adopts the current tail on trust, ADR 0003).
+/// What `accept-current` changed, plus the tail it anchored so the owner can check it against
+/// their own records (a missing anchor adopts the current tail on trust, ADR 0003).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdoptOutcome {
     /// Old seq, fault found and new seq.
@@ -26,7 +29,7 @@ pub struct AdoptOutcome {
     pub tail_ts: Option<String>,
 }
 
-/// What `audit-anchor status` found (the store opened, so the chain and the anchor both passed).
+/// What `history-checkpoint verify` found (the store opened, so the chain and the anchor both passed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnchorReport {
     /// Seq the anchor file holds.

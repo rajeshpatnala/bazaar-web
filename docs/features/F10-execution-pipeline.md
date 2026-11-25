@@ -113,6 +113,12 @@ Fix round (PR 133): `reload` is idempotent (ids already queued or finished are s
 - Known limits: the anchor is detective and unkeyed; it has a lag window; a reset writes no journal row; there is no reset path beyond the first open. The guard reads the latch from audit rows only, so an unwritten live trip (`audit_pending`) is not seen. `PaperAccount::reset` replays the epoch before the guard and commits after it, both outside the guard's deadline. A bad line or unknown kind in the current epoch is refused by that replay (a ledger error, not a `ResetRule`).
 - Test note: sqlx may discard the connection of a dropped future. A file database gets a working replacement; an in-memory one comes back empty, so drop tests must use a file.
 
+## BZ-F10-S10 slice 1 (plain names for the history checkpoint)
+- Terms (ADR 0003 table): "audit log" is "activity history" and "anchor" is "history checkpoint" in owner-facing text; `audit-anchor status|adopt [--accept-rollback]` is now `history-checkpoint verify|accept-current [--accept-missing-entries]`, no aliases. Older entries in this record keep the old names. Later UI wording: use these terms. Alarm code, log category, file name and file format are unchanged.
+- `accept-current` is HUMAN-ONLY, as `adopt` was. OWNER ACTION after merge: update the HUMAN-ONLY lists and deny rules (plan, "Owner inputs needed"); this replaces the pending `audit-anchor adopt` action.
+- A start that fails on `RepoError::Corrupt` from the store now prints a hint to run `history-checkpoint verify`.
+- Only refusals raised before any write say "Not changed". An unavailable or other store error from `accept-current` can follow a stored checkpoint (late write, or the read for the report), so it says to run `verify`.
+
 ## Deferred
 - BZ-F10-S10 (ledger lots, realised P&L, human-only `paper-reset`). Hard conditions: no paper day counts and no first production fill before it.
   - Ledger lines carry symbol, qty and product, so positions restore and open P&L is marked (RISK-136-4 follow-up, RISK-142-4).
