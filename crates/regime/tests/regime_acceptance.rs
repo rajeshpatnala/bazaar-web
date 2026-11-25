@@ -1,4 +1,4 @@
-//! F7 T2 acceptance tests: Downtrend fixture and the +-20% stability sweep (carried gaps from PR 70/72).
+//! Regime classifier acceptance: the Downtrend fixture and label stability under a +-20% sweep.
 //! Synthetic daily bars only; params come from the shipped `config/strategies.toml`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]

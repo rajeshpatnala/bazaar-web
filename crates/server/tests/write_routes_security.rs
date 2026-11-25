@@ -1,6 +1,6 @@
-//! F10 T2: wrong-CSRF-token, foreign-Origin and foreign-Host negatives on the three write routes
-//! the F10 pipeline owns (approval decision, kill-switch engage and release), over the real
-//! pipeline and a temp SQLite store. The existing route tests cover "no session" and "no token";
+//! Wrong-CSRF-token, foreign-Origin and foreign-Host negatives on the three write routes of the
+//! order pipeline (approval decision, kill-switch engage and release), over the real pipeline and
+//! a temp SQLite store. The existing route tests cover "no session" and "no token";
 //! these cover a token that is present but wrong and an Origin/Host that is not ours. Each case
 //! asserts WHICH rule refused (`code`) and that nothing moved (order, approvals, kill switch,
 //! audit rows).
