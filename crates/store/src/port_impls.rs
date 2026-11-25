@@ -196,10 +196,12 @@ impl PaperLedgerRepo for SqliteStore {
     async fn new_epoch(
         &self,
         opening: LedgerEntry,
+        expected_tail: u64,
         audit: AuditDraft,
         chain: ChainFn,
     ) -> Result<u32, RepoError> {
-        self.ledger_new_epoch(&opening, &audit, chain).await
+        self.ledger_new_epoch(&opening, expected_tail, &audit, chain)
+            .await
     }
 }
 
@@ -367,7 +369,7 @@ mod tests {
             ..entry(1, "100000.50")
         };
         assert_eq!(
-            PaperLedgerRepo::new_epoch(&s, opening, test_draft("paper_reset"), test_chain).await,
+            PaperLedgerRepo::new_epoch(&s, opening, 0, test_draft("paper_reset"), test_chain).await,
             Ok(1)
         );
         // One bad epoch in the batch stores none of it.
@@ -384,7 +386,7 @@ mod tests {
             ..entry(2, "50")
         };
         assert_eq!(
-            PaperLedgerRepo::new_epoch(&s, next, test_draft("paper_reset"), test_chain).await,
+            PaperLedgerRepo::new_epoch(&s, next, 2, test_draft("paper_reset"), test_chain).await,
             Ok(2)
         );
         let cur = PaperLedgerRepo::current_epoch(&s).await.unwrap();

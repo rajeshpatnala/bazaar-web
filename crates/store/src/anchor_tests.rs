@@ -482,7 +482,7 @@ async fn all_seven_commit_sites_keep_the_commit_and_set_lag_when_the_anchor_cann
         ref_id: None,
         ts_ist_rfc3339: "2026-11-25T09:15:00+05:30".into(),
     };
-    site!(s.ledger_new_epoch(&opening, &test_draft("paper_reset"), test_chain));
+    site!(s.ledger_new_epoch(&opening, 0, &test_draft("paper_reset"), test_chain));
 }
 
 /// A new commit site that appends an audit row but forgets the hook fails here.
@@ -531,4 +531,35 @@ async fn order_and_kill_switch_commits_also_anchor() {
         .unwrap();
     settle(&s).await;
     assert_eq!(read_file(&ap).map(|r| r.seq), Ok(2));
+}
+
+/// RISK-176-2: a refused epoch (the ledger tail moved) leaves the anchor where it was.
+#[tokio::test]
+async fn a_moved_ledger_tail_leaves_the_anchor_unmoved() {
+    let (_d, db, ap) = paths();
+    let s = SqliteStore::open_anchored(&db, test_chain).await.unwrap();
+    let mut line = bazaar_core::ports::LedgerEntry {
+        epoch: 1,
+        kind: "opening".into(),
+        amount: rust_decimal::Decimal::ONE,
+        ref_id: None,
+        ts_ist_rfc3339: "2026-11-25T09:15:00+05:30".into(),
+    };
+    let draft = test_draft("paper_reset");
+    s.ledger_new_epoch(&line, 0, &draft, test_chain)
+        .await
+        .unwrap();
+    settle(&s).await;
+    let before = std::fs::read(&ap).unwrap();
+    line.kind = "charge".into();
+    s.ledger_append(&line).await.unwrap();
+    line.kind = "opening".into();
+    line.epoch = 2;
+    assert_eq!(
+        s.ledger_new_epoch(&line, 1, &draft, test_chain).await,
+        Err(bazaar_core::ports::RepoError::Conflict)
+    );
+    settle(&s).await;
+    assert_eq!(std::fs::read(&ap).unwrap(), before);
+    assert_eq!(s.audit_read_all().await.unwrap().len(), 1);
 }
