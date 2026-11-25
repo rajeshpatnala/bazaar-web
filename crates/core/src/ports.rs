@@ -284,6 +284,15 @@ pub struct LedgerEntry {
     pub ts_ist_rfc3339: String,
 }
 
+/// Cross-epoch ledger read for the reset guard; both fields come from ONE read transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LedgerSince {
+    /// Lines of ALL epochs, opening lines included, in insertion order.
+    pub lines: Vec<LedgerEntry>,
+    /// Highest ledger line id (0 on an empty ledger); pass it to [`PaperLedgerRepo::new_epoch`].
+    pub tail: u64,
+}
+
 /// Paper account ledger. Reset starts a new epoch and keeps the old entries.
 pub trait PaperLedgerRepo: Send + Sync {
     /// Append one entry; same rules as [`Self::append_many`].
@@ -297,6 +306,14 @@ pub trait PaperLedgerRepo: Send + Sync {
     ) -> impl Future<Output = Result<(), RepoError>> + Send;
     /// Entries of the current epoch in order.
     fn current_epoch(&self) -> impl Future<Output = Result<Vec<LedgerEntry>, RepoError>> + Send;
+    /// Every line of every epoch except those with a well-formed timestamp (RFC 3339 ending in
+    /// `+05:30`) dated before `day`; malformed and other-offset lines of any date are returned
+    /// so the caller can refuse them. More than 10,000 matching lines is `RepoError::TooLarge`,
+    /// never a truncated list; a read failure is an error, never an empty one.
+    fn lines_since(
+        &self,
+        day: NaiveDate,
+    ) -> impl Future<Output = Result<LedgerSince, RepoError>> + Send;
     /// Audited reset: in ONE transaction insert the opening line of epoch `opening.epoch` and the
     /// `audit` row; both or neither. `opening.epoch` must be exactly the current epoch + 1 (0 on
     /// an empty ledger counts as epoch 0), else `RepoError::Conflict` and nothing is stored (a
