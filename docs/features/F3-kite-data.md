@@ -18,6 +18,7 @@ Owner area: `crates/data`, `config/data.toml`, `core/src/{config/data,secret,por
 ## What was built
 - BZ-404 (contracts): `core::config::DataConfig` (typed `[kite]`, `[nse]`, `[staleness]`, `[history]`; loader rejects missing `verified_on`, non-https URLs, hosts off the allowlist, userinfo/port in a host, zero timeouts/limits/spans, oversize caps). `core::secret::{Secret, AccessToken}` (redacting Debug, no Display/Serialize/Clone). `core::ports::{TokenStore, TokenError}`.
 - Config keys: `data.toml` `kite.*`, `kite.span_days.*`, `nse.*`, `staleness.*`, `history.*`, `unverified`. `config/data.toml` is no longer a placeholder.
+- BZ-405a (client base): `data::kite::{KiteClient, KiteCredentials, KiteError, ApiErrorType}`. GET only (no order surface), HTTPS and allowlisted host only, no redirects, no proxy, no automatic retry, timeouts and body cap from `[kite]`. 403 `TokenException` = `LoginRequired`; errors carry no URL, header, body or upstream text. Token expiry is the caller's check.
 
 ## Decisions
 - `data.toml` `verified_on` means "checked against the provider docs": while `unverified` is non-empty it is only the authoring date, the file is reported UNVERIFIED (never fresh) by `stale_warnings` and `check-connections` until the owner check (BZ-490/BZ-491) clears the list.
@@ -27,9 +28,11 @@ Owner area: `crates/data`, `config/data.toml`, `core/src/{config/data,secret,por
 ## Known limits
 - Every value in `config/data.toml` was written from memory without network access; all are listed in `unverified` and need the owner's check against Kite and NSE docs before the first real fetch. The ban list URL is the least certain.
 - The staleness `ban_list_max_age_hours` is not yet cross-checked against `risk.toml` `hard_limits.max_ban_list_age_hours` (add where the scanner consumes it, BZ-409/519).
+- `KiteClient` has no rate limiter or retry yet (BZ-405b); do not wire it to real fetches before that. Its mock-server constructor exists only in `data`'s own tests. `POST` (token exchange, margins) is added by the slice that needs it, as a fixed endpoint list, never a free path.
 
 ## Deferred
 - BZ-411 (WebSocket ticks, optional).
 
 ## History
 - 2026-11-21: BZ-404 contracts.
+- 2026-11-25: BZ-405a Kite HTTP client base.
