@@ -409,7 +409,7 @@ async fn a_stuck_anchor_write_never_delays_a_kill_switch_engage_or_an_order_adva
 /// Every audit-appending commit site keeps the commit and sets `lag` when the anchor cannot be
 /// written, then the flush repairs it (RG-174-4).
 #[tokio::test]
-async fn all_six_commit_sites_keep_the_commit_and_set_lag_when_the_anchor_cannot_be_written() {
+async fn all_seven_commit_sites_keep_the_commit_and_set_lag_when_the_anchor_cannot_be_written() {
     let (_d, db, ap) = paths();
     let s = seeded(&db, 0).await;
     for id in ["o1", "o2", "o3"] {
@@ -475,6 +475,14 @@ async fn all_six_commit_sites_keep_the_commit_and_set_lag_when_the_anchor_cannot
         "2026-11-25T09:15:00+05:30",
         test_chain
     ));
+    let opening = bazaar_core::ports::LedgerEntry {
+        epoch: 1,
+        kind: "opening".into(),
+        amount: rust_decimal::Decimal::ONE,
+        ref_id: None,
+        ts_ist_rfc3339: "2026-11-25T09:15:00+05:30".into(),
+    };
+    site!(s.ledger_new_epoch(&opening, &test_draft("paper_reset"), test_chain));
 }
 
 /// A new commit site that appends an audit row but forgets the hook fails here.
@@ -485,6 +493,7 @@ fn every_append_in_tx_call_is_followed_by_the_anchor_hook() {
         ("orders.rs", 0),
         ("approvals.rs", 0),
         ("killswitch.rs", 0),
+        ("ledger.rs", 0),
         ("audit.rs", 1),
     ] {
         let src = std::fs::read_to_string(dir.join(f)).unwrap();

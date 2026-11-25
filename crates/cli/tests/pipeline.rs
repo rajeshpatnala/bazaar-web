@@ -362,7 +362,16 @@ async fn build_with(env: &Env, cost: Arc<dyn CostModel>, risk: &str) -> (SqliteS
         cfg.execution.paper_starting_cash_inr,
     ));
     if account.balances().await.unwrap().epoch.is_none() {
-        account.reset().await.unwrap();
+        account
+            .reset(
+                &bazaar_paper::account::ResetRequest {
+                    reason: bazaar_paper::account::ResetReason::Initial,
+                    actor: "test".into(),
+                },
+                &bazaar_paper::account::RefuseAll,
+            )
+            .await
+            .unwrap();
     }
     let ports = Ports {
         executor: Broker {

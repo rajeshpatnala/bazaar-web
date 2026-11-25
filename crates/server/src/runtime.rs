@@ -29,7 +29,9 @@ use bazaar_execution::executor::{ApprovedOrder, ExecAck, ExecError, Executor};
 use bazaar_execution::gate_adapter::{GateContext, GateInputsOwned};
 use bazaar_execution::pipeline::{PipelineHandle, ReloadReport};
 use bazaar_execution::types::OrderIntent;
-use bazaar_paper::account::{ChargeSource, LedgerKind, PaperAccount};
+use bazaar_paper::account::{
+    ChargeSource, LedgerKind, PaperAccount, RefuseAll, ResetReason, ResetRequest,
+};
 use bazaar_paper::executor::PaperExecutor;
 use bazaar_paper::fill::SimConfig;
 use bazaar_paper::squareoff::ValidatedSquareOffTime;
@@ -434,8 +436,14 @@ async fn build<Q: QuoteSource + 'static, B: GateContext + 'static>(
         .await
         .map_err(|e| StartError::Paper(e.to_string()))?;
     if opened.epoch.is_none() {
+        // First open only: the guard is never consulted for `Initial`; any later reset needs a
+        // real guard (slice 9d), so the fail-closed `RefuseAll` stands in here.
+        let req = ResetRequest {
+            reason: ResetReason::Initial,
+            actor: "system.startup".to_owned(),
+        };
         account
-            .reset()
+            .reset(&req, &RefuseAll)
             .await
             .map_err(|e| StartError::Paper(e.to_string()))?;
     }
@@ -822,6 +830,34 @@ mod tests {
         ));
         let rt = start(&dir.path().join("x.db"), RISK, &cfg(), sat, calendar()).await;
         assert!(rt.is_ok(), "{:?}", rt.err());
+    }
+
+    /// TS-176-4: the only production reset. Its audit row is pinned field by field, and a
+    /// restart adds neither a second row nor a second opening line.
+    #[tokio::test]
+    async fn first_open_is_audited_once_and_a_restart_adds_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("x.db");
+        for run in ["first open", "restart"] {
+            let rt = start(&db, RISK, &cfg(), clock(), calendar()).await.unwrap();
+            let rows = AuditRepo::read_all(&rt.store).await.unwrap();
+            assert_eq!(rows[0].draft.kind, "paper_reset", "{run}");
+            let resets = rows.iter().filter(|r| r.draft.kind == "paper_reset");
+            assert_eq!(resets.count(), 1, "{run}");
+            assert_eq!(rows[0].draft.actor, "system.startup", "{run}");
+            assert_eq!(
+                rows[0].draft.payload,
+                r#"{"actor":"system.startup","epoch":1,"opening":"250000","reason":"initial"}"#,
+                "{run}"
+            );
+            let lines = PaperLedgerRepo::current_epoch(&rt.store).await.unwrap();
+            assert_eq!(lines.len(), 1, "{run}");
+            assert_eq!(
+                (lines[0].epoch, lines[0].kind.as_str(), lines[0].amount),
+                (1, "opening", Decimal::from(250_000)),
+                "{run}"
+            );
+        }
     }
 
     /// RISK-136-4: a ledger with fills cannot restore the position book, so startup refuses.
@@ -1645,6 +1681,7 @@ mod tests {
         assert_eq!(
             ks,
             [
+                "paper_reset",
                 "proposed",
                 "gate_passed",
                 "kill_switch_engaged",
@@ -1752,7 +1789,7 @@ mod tests {
         assert_eq!(row.state, "blocked");
         assert_eq!(
             ks,
-            ["proposed", "gate_passed", "gate_blocked"],
+            ["paper_reset", "proposed", "gate_passed", "gate_blocked"],
             "refused by the drift re-gate"
         );
         let mut conn = sqlx::sqlite::SqliteConnectOptions::new()
@@ -1787,7 +1824,7 @@ mod tests {
         assert_eq!(row.state, "sent");
         assert_eq!(
             ks,
-            ["proposed", "gate_passed", "approve", "send"],
+            ["paper_reset", "proposed", "gate_passed", "approve", "send"],
             "one send row"
         );
         assert_eq!(kinds, ["opening"], "a working order moves no cash");
