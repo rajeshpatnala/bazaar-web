@@ -1,0 +1,1 @@
+- [Fix round in a worktree](project_fix_round_in_worktree.md) — fix-list may falsely say "nothing to fix": tell the manager; push from own worktree
