@@ -469,6 +469,12 @@ mod tests {
         async fn current_epoch(&self) -> Result<Vec<LedgerEntry>, RepoError> {
             Ok(lock(&self.0).last().cloned().unwrap_or_default())
         }
+        async fn lines_since(
+            &self,
+            _: chrono::NaiveDate,
+        ) -> Result<bazaar_core::ports::LedgerSince, RepoError> {
+            Err(RepoError::Other)
+        }
         async fn new_epoch(
             &self,
             o: LedgerEntry,

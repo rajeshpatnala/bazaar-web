@@ -407,6 +407,7 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use bazaar_core::ports::LedgerSince;
     use bazaar_core::testutil::FakeClock;
     use chrono::TimeZone;
     use chrono_tz::Asia::Kolkata;
@@ -461,6 +462,9 @@ mod tests {
             // Like a real store: other tasks may run between this read and the caller's write.
             tokio::task::yield_now().await;
             Ok(snapshot)
+        }
+        async fn lines_since(&self, _: chrono::NaiveDate) -> Result<LedgerSince, RepoError> {
+            Err(RepoError::Other) // the account never reads across epochs
         }
         async fn new_epoch(
             &self,

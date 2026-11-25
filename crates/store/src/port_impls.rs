@@ -7,7 +7,7 @@
 
 use bazaar_core::ports::{
     ApprovalDecision, ApprovalRepo, AuditDraft, AuditRepo, AuditRow, ChainFn, KillSwitchRepo,
-    LedgerEntry, OrderRecord, OrderRepo, PaperLedgerRepo, RepoError,
+    LedgerEntry, LedgerSince, OrderRecord, OrderRepo, PaperLedgerRepo, RepoError,
 };
 use chrono::DateTime;
 
@@ -191,6 +191,10 @@ impl PaperLedgerRepo for SqliteStore {
 
     async fn current_epoch(&self) -> Result<Vec<LedgerEntry>, RepoError> {
         self.ledger_current_epoch().await
+    }
+
+    async fn lines_since(&self, day: chrono::NaiveDate) -> Result<LedgerSince, RepoError> {
+        self.ledger_lines_since(day).await
     }
 
     async fn new_epoch(
@@ -391,6 +395,10 @@ mod tests {
         );
         let cur = PaperLedgerRepo::current_epoch(&s).await.unwrap();
         assert_eq!((cur.len(), cur[0].epoch), (1, 2));
+        let all = PaperLedgerRepo::lines_since(&s, chrono::NaiveDate::MIN)
+            .await
+            .unwrap();
+        assert_eq!((all.lines.len(), all.tail), (3, 3));
         // The audit row landed in the same transaction and the chain verifies.
         let rows = AuditRepo::read_all(&s).await.unwrap();
         assert_eq!(rows.len(), 2);

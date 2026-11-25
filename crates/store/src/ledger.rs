@@ -4,10 +4,13 @@
 use std::str::FromStr;
 
 use bazaar_core::ports::{
-    AuditDraft, ChainFn, LEDGER_OPENING_KIND, LedgerEntry, PAPER_RESET_AUDIT_KIND, RepoError,
+    AuditDraft, ChainFn, LEDGER_OPENING_KIND, LedgerEntry, LedgerSince, PAPER_RESET_AUDIT_KIND,
+    RepoError,
 };
+use chrono::{DateTime, NaiveDate};
 use rust_decimal::Decimal;
 use sqlx::Row;
+use sqlx::sqlite::SqliteRow;
 
 use crate::audit::append_in_tx;
 use crate::sqlite::{SqliteStore, map_err};
@@ -15,6 +18,8 @@ use crate::sqlite::{SqliteStore, map_err};
 const MAX_BATCH: usize = 1_000;
 const MAX_KIND: usize = 64;
 const MAX_TS: usize = 64;
+const MAX_SINCE: usize = 10_000;
+const SINCE_PAGE: i64 = 1_000;
 
 const INSERT: &str =
     "INSERT INTO paper_ledger (epoch, kind, amount, ref_id, ts_ist) VALUES (?, ?, ?, ?, ?)";
@@ -47,6 +52,27 @@ async fn ledger_tail(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<u64
         .await
         .map_err(|e| map_err(&e))?;
     u64::try_from(id).map_err(|_| RepoError::Corrupt)
+}
+
+fn decode(r: &SqliteRow) -> Result<LedgerEntry, RepoError> {
+    let g = |e: sqlx::Error| map_err(&e);
+    let epoch: i64 = r.try_get("epoch").map_err(g)?;
+    let amount: String = r.try_get("amount").map_err(g)?;
+    let ref_id: Option<String> = r.try_get("ref_id").map_err(g)?;
+    Ok(LedgerEntry {
+        epoch: u32::try_from(epoch).map_err(|_| RepoError::Corrupt)?,
+        kind: r.try_get("kind").map_err(g)?,
+        amount: Decimal::from_str(&amount).map_err(|_| RepoError::Corrupt)?,
+        ref_id: ref_id
+            .map(|s| s.parse::<u128>().map_err(|_| RepoError::Corrupt))
+            .transpose()?,
+        ts_ist_rfc3339: r.try_get("ts_ist").map_err(g)?,
+    })
+}
+
+/// True only for a well-formed `+05:30` timestamp dated before `day`. Anything else is kept.
+fn dated_before(ts: &str, day: NaiveDate) -> bool {
+    ts.ends_with("+05:30") && DateTime::parse_from_rfc3339(ts).is_ok_and(|t| t.date_naive() < day)
 }
 
 impl SqliteStore {
@@ -92,23 +118,43 @@ impl SqliteStore {
         .fetch_all(&self.pool)
         .await
         .map_err(|e| map_err(&e))?;
-        let g = |e: sqlx::Error| map_err(&e);
-        rows.iter()
-            .map(|r| {
-                let epoch: i64 = r.try_get("epoch").map_err(g)?;
-                let amount: String = r.try_get("amount").map_err(g)?;
-                let ref_id: Option<String> = r.try_get("ref_id").map_err(g)?;
-                Ok(LedgerEntry {
-                    epoch: u32::try_from(epoch).map_err(|_| RepoError::Corrupt)?,
-                    kind: r.try_get("kind").map_err(g)?,
-                    amount: Decimal::from_str(&amount).map_err(|_| RepoError::Corrupt)?,
-                    ref_id: ref_id
-                        .map(|s| s.parse::<u128>().map_err(|_| RepoError::Corrupt))
-                        .transpose()?,
-                    ts_ist_rfc3339: r.try_get("ts_ist").map_err(g)?,
-                })
-            })
-            .collect()
+        rows.iter().map(decode).collect()
+    }
+
+    /// See `PaperLedgerRepo::lines_since`. The tail and every row come from one read
+    /// transaction. Rows are filtered here, not in SQL, so only a timestamp that really parses
+    /// can be dropped; every row is decoded, so a corrupt one of any date fails the read.
+    pub async fn ledger_lines_since(&self, day: NaiveDate) -> Result<LedgerSince, RepoError> {
+        let mut tx = self.pool.begin().await.map_err(|e| map_err(&e))?;
+        let tail = ledger_tail(&mut tx).await?;
+        let mut lines = Vec::new();
+        let mut from = i64::MIN;
+        loop {
+            let rows = sqlx::query(
+                "SELECT id, epoch, kind, amount, ref_id, ts_ist FROM paper_ledger \
+                 WHERE id >= ? ORDER BY id LIMIT ?",
+            )
+            .bind(from)
+            .bind(SINCE_PAGE)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| map_err(&e))?;
+            for r in &rows {
+                let line = decode(r)?;
+                if !dated_before(&line.ts_ist_rfc3339, day) {
+                    if lines.len() == MAX_SINCE {
+                        return Err(RepoError::TooLarge);
+                    }
+                    lines.push(line);
+                }
+            }
+            let Some(last) = rows.last() else { break };
+            let id: i64 = last.try_get("id").map_err(|e| map_err(&e))?;
+            let Some(next) = id.checked_add(1) else { break };
+            from = next;
+        }
+        tx.commit().await.map_err(|e| map_err(&e))?;
+        Ok(LedgerSince { lines, tail })
     }
 
     /// Audited reset: the opening line of epoch `opening.epoch` and the audit row in ONE
@@ -495,12 +541,40 @@ mod tests {
         );
     }
 
+    async fn raw_ts(s: &SqliteStore, ts: &str) {
+        sqlx::query(
+            "INSERT INTO paper_ledger (epoch, kind, amount, ts_ist) VALUES (1, 'k', '1', ?)",
+        )
+        .bind(ts)
+        .execute(&s.pool)
+        .await
+        .unwrap();
+    }
+
+    /// `n` rows dated `ts`, ids appended after the existing ones.
+    async fn bulk(s: &SqliteStore, n: usize, ts: &str) {
+        sqlx::query(
+            "WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < ?) \
+             INSERT INTO paper_ledger (epoch, kind, amount, ts_ist) \
+             SELECT 1, 'k', '1', ? FROM c",
+        )
+        .bind(i64::try_from(n).unwrap())
+        .bind(ts)
+        .execute(&s.pool)
+        .await
+        .unwrap();
+    }
+
+    fn day() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 11, 25).unwrap()
+    }
+
     /// RISK-176-2: the tail is rechecked inside the write transaction. The epoch number is
     /// right in every refused call, so only the tail check can refuse it.
     #[tokio::test]
     async fn new_epoch_refuses_a_tail_that_is_not_the_ledger_tail() {
         let s = opened().await;
-        let judged = 1; // the opening line
+        let judged = s.ledger_lines_since(day()).await.unwrap().tail;
         s.ledger_append(&entry(1, "charge", "-1", None))
             .await
             .unwrap();
@@ -534,5 +608,131 @@ mod tests {
             Err(RepoError::Corrupt)
         );
         assert_eq!((line_count(&s).await, audit_count(&s).await), (1, 0));
+        assert_eq!(s.ledger_lines_since(day()).await, Err(RepoError::Corrupt));
+    }
+
+    #[tokio::test]
+    async fn lines_since_spans_epochs_in_id_order_with_openings_and_the_tail() {
+        let s = store().await;
+        let empty = s.ledger_lines_since(day()).await.unwrap();
+        assert_eq!((empty.lines, empty.tail), (Vec::new(), 0));
+        let s = opened().await;
+        s.ledger_append(&entry(1, "charge", "-1.25", Some(7)))
+            .await
+            .unwrap();
+        s.ledger_new_epoch(
+            &entry(2, "opening", "9", None),
+            2,
+            &test_draft("paper_reset"),
+            test_chain,
+        )
+        .await
+        .unwrap();
+        let all = s.ledger_lines_since(NaiveDate::MIN).await.unwrap();
+        assert_eq!(
+            all.lines,
+            [
+                entry(1, "opening", "5", None),
+                entry(1, "charge", "-1.25", Some(7)),
+                entry(2, "opening", "9", None),
+            ]
+        );
+        assert_eq!(all.tail, 3);
+        // A day after every row: nothing matches, but the tail is still the ledger's.
+        let none = s.ledger_lines_since(NaiveDate::MAX).await.unwrap();
+        assert_eq!((none.lines, none.tail), (Vec::new(), 3));
+    }
+
+    #[tokio::test]
+    async fn lines_since_drops_only_well_formed_ist_rows_dated_before_the_day() {
+        let dropped = [
+            "2026-11-24T23:59:59+05:30",
+            "2026-11-24T23:59:59.999999999+05:30",
+            "2020-01-01T09:15:00+05:30",
+        ];
+        let kept = [
+            "2026-11-25T00:00:00+05:30",
+            "2026-11-26T09:15:00.5+05:30",
+            "2020-01-01T09:15:00Z",
+            "2020-01-01T09:15:00+00:00",
+            "2020-01-01T09:15:00+0530",
+            "2020-02-30T09:15:00+05:30",
+            "2020-13-01T09:15:00+05:30",
+            "2020-01-01T29:15:00+05:30",
+            "2020-01-01+05:30",
+            "2020-01-01T09:15:00+05:30 ",
+            "garbage",
+            "",
+        ];
+        let s = store().await;
+        for ts in dropped.iter().chain(&kept) {
+            raw_ts(&s, ts).await;
+        }
+        let got = s.ledger_lines_since(day()).await.unwrap();
+        let ts: Vec<_> = got.lines.iter().map(|l| &l.ts_ist_rfc3339).collect();
+        assert_eq!(ts, kept);
+        assert_eq!(got.tail, (dropped.len() + kept.len()) as u64);
+    }
+
+    #[tokio::test]
+    async fn lines_since_over_the_cap_is_too_large_never_truncated() {
+        let s = store().await;
+        // Rows before the day do not count towards the cap; the read spans many pages.
+        bulk(&s, 1_500, "2020-01-01T09:15:00+05:30").await;
+        bulk(&s, MAX_SINCE, "2026-11-25T09:15:00+05:30").await;
+        let got = s.ledger_lines_since(day()).await.unwrap();
+        assert_eq!((got.lines.len(), got.tail), (MAX_SINCE, 11_500));
+        raw_ts(&s, "2026-11-25T09:16:00+05:30").await;
+        assert_eq!(s.ledger_lines_since(day()).await, Err(RepoError::TooLarge));
+    }
+
+    #[tokio::test]
+    async fn lines_since_read_errors_are_errors_never_an_empty_list() {
+        // A corrupt row fails the read even when its date would have dropped it.
+        let s = store().await;
+        sqlx::query(
+            "INSERT INTO paper_ledger (epoch, kind, amount, ts_ist) \
+             VALUES (1, 'k', 'x', '2020-01-01T09:15:00+05:30')",
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        assert_eq!(s.ledger_lines_since(day()).await, Err(RepoError::Corrupt));
+        let gone = opened().await;
+        sqlx::query("DROP TABLE paper_ledger")
+            .execute(&gone.pool)
+            .await
+            .unwrap();
+        assert_eq!(gone.ledger_lines_since(day()).await, Err(RepoError::Other));
+        // TS-178-1: the tail read still works here, so only the row-page fetch can fail.
+        let renamed = opened().await;
+        sqlx::query("ALTER TABLE paper_ledger RENAME COLUMN ts_ist TO gone")
+            .execute(&renamed.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            renamed.ledger_lines_since(day()).await,
+            Err(RepoError::Other)
+        );
+        let closed = opened().await;
+        closed.pool.close().await;
+        assert_eq!(
+            closed.ledger_lines_since(day()).await,
+            Err(RepoError::Unavailable)
+        );
+    }
+
+    /// The tail and the rows are one snapshot: appends racing the read never split them.
+    #[tokio::test]
+    async fn lines_since_tail_matches_its_rows_while_appends_race() {
+        let s = opened().await;
+        let line = entry(1, "charge", "-1", None);
+        for _ in 0..25 {
+            let (read, wrote) =
+                tokio::join!(s.ledger_lines_since(NaiveDate::MIN), s.ledger_append(&line));
+            wrote.unwrap();
+            let read = read.unwrap();
+            assert_eq!(read.tail, read.lines.len() as u64);
+        }
     }
 }
