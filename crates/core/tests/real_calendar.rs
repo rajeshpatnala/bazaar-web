@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use bazaar_core::calendar::{CalendarError, MarketCalendar, Session};
-use bazaar_core::config::{CalendarConfig, load};
+use bazaar_core::config::{CalendarConfig, load, parse_str};
 use bazaar_core::segment::{InstrumentKind, Segment};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use chrono_tz::Asia::Kolkata;
@@ -150,4 +150,13 @@ fn other_years_are_out_of_range() {
         cal.is_trading_day(d(2027, 1, 4), Segment::Equity),
         Err(CalendarError::OutOfRange(d(2027, 1, 4)))
     );
+}
+
+/// Edits a copy of the real file text, so the refusal is shown against what the owner runs.
+#[test]
+fn shipped_calendar_unknown_key_is_refused() {
+    let shipped = include_str!("../../../config/calendar.toml");
+    let bad = shipped.replacen("schema_version = 1", "schema_version = 1\nbogus = 1", 1);
+    let e = parse_str::<CalendarConfig>(&bad).unwrap_err().to_string();
+    assert!(e.contains("unknown field") && e.contains("bogus"), "{e}");
 }
