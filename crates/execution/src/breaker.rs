@@ -17,7 +17,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use bazaar_core::calendar::MarketCalendar;
-use bazaar_core::ports::{AuditDraft, AuditRepo, SourceError};
+use bazaar_core::ports::{AuditDraft, AuditRepo, AuditRow, SourceError};
 use bazaar_core::segment::Segment;
 use chrono::{DateTime, NaiveDate};
 use chrono_tz::Tz;
@@ -66,6 +66,57 @@ fn parse_until(s: &str) -> Option<NaiveDate> {
     s.parse().ok()
 }
 
+/// The latch as the audit log records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RestoredLatch {
+    /// First clear date when still latched on the asked day; `None` when clear.
+    pub until: Option<NaiveDate>,
+    /// `breaker_tripped` rows that could not be read. The breaker ignores them; a caller that
+    /// must fail closed (the paper reset guard) treats any as unknown.
+    pub unparsable: usize,
+}
+
+/// Restores the latch on `today` from the `breaker_tripped` rows (RISK-105-1). Pure; the one
+/// reading of those rows, shared by [`DailyLossBreaker::new`] and the paper reset guard.
+#[must_use]
+pub fn restore_latch(
+    rows: &[AuditRow],
+    calendar: &MarketCalendar,
+    today: NaiveDate,
+) -> RestoredLatch {
+    let mut out = RestoredLatch {
+        until: None,
+        unparsable: 0,
+    };
+    for r in rows.iter().filter(|r| r.draft.kind == TRIP_KIND) {
+        match trip_until(&r.draft.payload, calendar) {
+            Some(d) if today < d => out.until = out.until.max(Some(d)),
+            Some(_) => {}
+            None => out.unparsable += 1,
+        }
+    }
+    out
+}
+
+/// The first clear date of one trip row; `None` when the row is unreadable.
+fn trip_until(payload: &str, calendar: &MarketCalendar) -> Option<NaiveDate> {
+    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let until = parse_until(v.get("until")?.as_str()?)?;
+    if until != NaiveDate::MAX {
+        return Some(until);
+    }
+    // A calendar-error trip: re-derive from the trip day now that the calendar may be
+    // fixed; if it still errors, hold one calendar day (RISK-105-10).
+    let day: NaiveDate = v.get("day")?.as_str()?.parse().ok()?;
+    Some(
+        calendar
+            .next_trading_day(day, Segment::Equity)
+            .ok()
+            .or_else(|| day.succ_opt())
+            .unwrap_or(NaiveDate::MAX),
+    )
+}
+
 impl<P: PnlSource, A: AuditRepo> DailyLossBreaker<P, A> {
     /// `max_loss_pct` is `limits.max_daily_loss_pct`; `hard_max_pct` is
     /// `hard_limits.max_daily_loss_pct`. Restores the latch from the audit log as of `now`.
@@ -90,29 +141,7 @@ impl<P: PnlSource, A: AuditRepo> DailyLossBreaker<P, A> {
             tracing::warn!(category = e.safe_reason(), "breaker latch not restorable");
             ExecError::Storage
         })?;
-        let today = now.date_naive();
-        let restored = rows
-            .iter()
-            .filter(|r| r.draft.kind == TRIP_KIND)
-            .filter_map(|r| {
-                let v: serde_json::Value = serde_json::from_str(&r.draft.payload).ok()?;
-                let until = parse_until(v.get("until")?.as_str()?)?;
-                if until != NaiveDate::MAX {
-                    return Some(until);
-                }
-                // A calendar-error trip: re-derive from the trip day now that the calendar may be
-                // fixed; if it still errors, hold one calendar day (RISK-105-10).
-                let day: NaiveDate = v.get("day")?.as_str()?.parse().ok()?;
-                Some(
-                    calendar
-                        .next_trading_day(day, Segment::Equity)
-                        .ok()
-                        .or_else(|| day.succ_opt())
-                        .unwrap_or(NaiveDate::MAX),
-                )
-            })
-            .filter(|d| today < *d)
-            .max();
+        let restored = restore_latch(&rows, &calendar, now.date_naive()).until;
         Ok(Self {
             src,
             audit,
@@ -418,6 +447,42 @@ mod tests {
         assert_eq!(b.tripped(day(19, 15)).await, Some(false));
         let b = breaker_on(FakePnl::set(0, false), &r, day(20, 10)).await;
         assert_eq!(b.tripped(day(20, 10)).await, None);
+    }
+
+    #[test]
+    fn restore_latch_takes_the_latest_open_trip_and_counts_unreadable_rows() {
+        let row = |kind: &str, payload: &str| AuditRow {
+            seq: 1,
+            draft: AuditDraft {
+                ts_ist_rfc3339: day(19, 10).to_rfc3339(),
+                actor: "breaker".into(),
+                kind: kind.into(),
+                payload: payload.into(),
+            },
+            prev_hash: [0; 32],
+            hash: [0; 32],
+        };
+        let rows = vec![
+            row(TRIP_KIND, r#"{"until":"2026-11-23"}"#),
+            row(TRIP_KIND, r#"{"until":"2026-11-20"}"#),
+            row("other", "garbage"),
+        ];
+        let today = day(19, 10).date_naive();
+        let monday = day(23, 0).date_naive();
+        let got = restore_latch(&rows, &cal(), today);
+        assert_eq!((got.until, got.unparsable), (Some(monday), 0));
+        assert_eq!(restore_latch(&rows, &cal(), monday).until, None);
+        for bad in [
+            "garbage",
+            "{}",
+            r#"{"until":7}"#,
+            r#"{"until":"soon"}"#,
+            r#"{"until":"max"}"#,
+            r#"{"until":"max","day":"x"}"#,
+        ] {
+            let got = restore_latch(&[row(TRIP_KIND, bad)], &cal(), today);
+            assert_eq!((got.until, got.unparsable), (None, 1), "{bad}");
+        }
     }
 
     #[tokio::test]
