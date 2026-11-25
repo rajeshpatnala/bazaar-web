@@ -203,6 +203,22 @@ impl Rig {
         assert_eq!(s.2, 1, "engage wrote its event");
         s
     }
+
+    /// The snapshot a refusal phase must leave unchanged.
+    async fn phase_snapshot(&self, engaged: bool) -> (String, i64, i64, i64) {
+        if engaged {
+            self.engaged_snapshot().await
+        } else {
+            self.snapshot().await
+        }
+    }
+}
+
+/// The refusal tests' two phases, as (engage the switch first, routes). Engage is tried while
+/// un-engaged: engaging an engaged switch writes nothing, so "nothing moved" could not fail.
+fn phases() -> [(bool, Vec<(String, String)>); 2] {
+    let [decision, engage, release] = routes();
+    [(false, vec![engage]), (true, vec![decision, release])]
 }
 
 /// Decision, engage, release.
@@ -231,81 +247,89 @@ async fn code(res: Response<Body>, status: u16, what: &str) -> String {
 #[tokio::test]
 async fn wrong_csrf_token_is_403_csrf_invalid_and_nothing_moves() {
     let r = rig().await;
-    let before = r.engaged_snapshot().await;
     assert_eq!(r.csrf.len(), 64);
-    for (path, body) in routes() {
-        // Right length but wrong value; the real token truncated; empty.
-        for bad in ["0".repeat(64), r.csrf[..32].to_owned(), String::new()] {
-            let res = r
-                .app
-                .send(
-                    r.req(&path)
-                        .header(header::HOST, HOST)
-                        .header(header::ORIGIN, ORIGIN)
-                        .header("x-csrf-token", bad)
-                        .body(Body::from(body.clone()))
-                        .unwrap(),
-                )
-                .await;
-            assert_eq!(code(res, 403, &path).await, "csrf_invalid", "{path}");
+    for (engaged, group) in phases() {
+        let before = r.phase_snapshot(engaged).await;
+        for (path, body) in group {
+            // Right length but wrong value; the real token truncated; empty.
+            for bad in ["0".repeat(64), r.csrf[..32].to_owned(), String::new()] {
+                let res = r
+                    .app
+                    .send(
+                        r.req(&path)
+                            .header(header::HOST, HOST)
+                            .header(header::ORIGIN, ORIGIN)
+                            .header("x-csrf-token", bad)
+                            .body(Body::from(body.clone()))
+                            .unwrap(),
+                    )
+                    .await;
+                assert_eq!(code(res, 403, &path).await, "csrf_invalid", "{path}");
+            }
         }
+        assert_eq!(r.snapshot().await, before, "engaged: {engaged}");
     }
-    assert_eq!(r.snapshot().await, before);
     assert_eq!(r.rec.placed(), Vec::<IntentId>::new());
 }
 
 #[tokio::test]
 async fn foreign_origin_is_403_forbidden_origin_and_nothing_moves() {
     let r = rig().await;
-    let before = r.engaged_snapshot().await;
-    for (path, body) in routes() {
-        for origin in [
-            "http://evil.example",
-            "http://127.0.0.1:9999",
-            "https://127.0.0.1:8787",
-            "null",
-        ] {
-            let res = r
-                .app
-                .send(
-                    r.req(&path)
-                        .header(header::HOST, HOST)
-                        .header(header::ORIGIN, origin)
-                        // A valid token must not rescue a foreign Origin.
-                        .header("x-csrf-token", &r.csrf)
-                        .body(Body::from(body.clone()))
-                        .unwrap(),
-                )
-                .await;
-            assert_eq!(
-                code(res, 403, &format!("{path} {origin}")).await,
-                "forbidden_origin",
-                "{path} {origin}"
-            );
+    for (engaged, group) in phases() {
+        let before = r.phase_snapshot(engaged).await;
+        for (path, body) in group {
+            for origin in [
+                "http://evil.example",
+                "http://127.0.0.1:9999",
+                "https://127.0.0.1:8787",
+                "null",
+            ] {
+                let res = r
+                    .app
+                    .send(
+                        r.req(&path)
+                            .header(header::HOST, HOST)
+                            .header(header::ORIGIN, origin)
+                            // A valid token must not rescue a foreign Origin.
+                            .header("x-csrf-token", &r.csrf)
+                            .body(Body::from(body.clone()))
+                            .unwrap(),
+                    )
+                    .await;
+                assert_eq!(
+                    code(res, 403, &format!("{path} {origin}")).await,
+                    "forbidden_origin",
+                    "{path} {origin}"
+                );
+            }
         }
+        assert_eq!(r.snapshot().await, before, "engaged: {engaged}");
     }
-    assert_eq!(r.snapshot().await, before);
     assert_eq!(r.rec.placed(), Vec::<IntentId>::new());
 }
 
 #[tokio::test]
 async fn foreign_host_is_403_forbidden_host_on_writes_and_reads() {
     let r = rig().await;
-    let before = r.engaged_snapshot().await;
-    for (path, body) in routes() {
-        let res = r
-            .app
-            .send(
-                r.req(&path)
-                    .header(header::HOST, "evil.example")
-                    .header(header::ORIGIN, ORIGIN)
-                    .header("x-csrf-token", &r.csrf)
-                    .body(Body::from(body.clone()))
-                    .unwrap(),
-            )
-            .await;
-        assert_eq!(code(res, 403, &path).await, "forbidden_host", "{path}");
+    for (engaged, group) in phases() {
+        let before = r.phase_snapshot(engaged).await;
+        for (path, body) in group {
+            let res = r
+                .app
+                .send(
+                    r.req(&path)
+                        .header(header::HOST, "evil.example")
+                        .header(header::ORIGIN, ORIGIN)
+                        .header("x-csrf-token", &r.csrf)
+                        .body(Body::from(body.clone()))
+                        .unwrap(),
+                )
+                .await;
+            assert_eq!(code(res, 403, &path).await, "forbidden_host", "{path}");
+        }
+        assert_eq!(r.snapshot().await, before, "engaged: {engaged}");
     }
+    let before_reads = r.snapshot().await;
     for path in ["/api/v1/approvals", "/api/v1/killswitch", "/api/v1/alarms"] {
         let res = r
             .app
@@ -319,7 +343,7 @@ async fn foreign_host_is_403_forbidden_host_on_writes_and_reads() {
             .await;
         assert_eq!(code(res, 403, path).await, "forbidden_host", "{path}");
     }
-    assert_eq!(r.snapshot().await, before);
+    assert_eq!(r.snapshot().await, before_reads);
     assert_eq!(r.rec.placed(), Vec::<IntentId>::new());
 }
 
@@ -327,6 +351,7 @@ async fn foreign_host_is_403_forbidden_host_on_writes_and_reads() {
 async fn control_the_same_request_with_right_headers_is_accepted() {
     // The refusals above came from the headers, not from a broken rig.
     let r = rig().await;
+    let before = r.snapshot().await;
     let res = r
         .app
         .send(
@@ -341,6 +366,7 @@ async fn control_the_same_request_with_right_headers_is_accepted() {
     assert_eq!(res.status(), 200);
     let s = r.snapshot().await;
     assert_eq!((s.0.as_str(), s.1, s.2), ("pending_approval", 0, 1));
+    assert_eq!(s.3, before.3 + 1);
 }
 
 /// A mistyped decision path would still be refused by the guards above, so show that the very
