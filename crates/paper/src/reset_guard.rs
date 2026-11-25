@@ -600,6 +600,11 @@ mod tests {
         let r = Rig::new();
         r.fake.trip_row("not json");
         r.refuses(ResetRule::GuardUnavailable).await;
+        // Any unreadable trip row refuses, also beside a readable open one (not BreakerLatched).
+        let r = Rig::new();
+        r.fake.trip_row(r#"{"until":"2026-11-25"}"#);
+        r.fake.trip_row(r#"{"until":"max"}"#);
+        r.refuses(ResetRule::GuardUnavailable).await;
         let r = Rig::new();
         *r.fake.book.lock().unwrap() = Some(BookState::Unknown);
         r.refuses(ResetRule::GuardUnavailable).await;
