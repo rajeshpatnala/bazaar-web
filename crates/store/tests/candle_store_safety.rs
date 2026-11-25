@@ -1,4 +1,5 @@
-//! F12 T2 acceptance gap-fillers, run on BOTH adapters. Temp dirs only.
+//! Candle store safety: failed and interrupted Parquet writes, hostile symbols, raw/adjusted
+//! separation, SQLite/Parquet agreement and storage-free core ports. Temp dirs only.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
 
 mod common;

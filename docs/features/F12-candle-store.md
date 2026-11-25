@@ -34,4 +34,4 @@ Plan: `.agents/plans/F12-candle-store.md`. Status: in progress.
 - Corrupt-value and leftover `*.tmp` cases are adapter-specific: done in slices 1-3 (`candles_sqlite.rs`, `candles_parquet.rs`).
 - Parquet/DuckDB dependency approval: done (owner-approved, slice 2).
 - SEC-104-1 done (slices 2-3): symbol never formatted into SQL; allowlisted before any Parquet path.
-- CR-115-1 defer: F13 - a core `Symbol` type parsed at the edge so every adapter refuses the same inputs. Until then SQLite stores any symbol (<= 64 bytes) as data while Parquet/DuckDB refuse symbols outside `[A-Z0-9_&-]` (path safety); pinned by `candles_t2.rs`.
+- CR-115-1 defer: F13 - a core `Symbol` type parsed at the edge so every adapter refuses the same inputs. Until then SQLite stores any symbol (<= 64 bytes) as data while Parquet/DuckDB refuse symbols outside `[A-Z0-9_&-]` (path safety); pinned by `candle_store_safety.rs`.
