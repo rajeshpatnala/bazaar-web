@@ -127,7 +127,6 @@ Fix round (PR 133): `reload` is idempotent (ids already queued or finished are s
 - SEC-176-2: guard and bounded reads done (9d, 9e); lock BZ-F10-S10.
 - RISK-176-4 (a refused reset leaves no audit row or log line): BZ-F10-S10.
 - BZ-F10-S10 (RISK-179-1): decide and test whether DailyLossBreaker::new fails closed on an unreadable trip row, and how that latch clears.
-- BZ-F10-S10: ledger lots, realised P&L, paper-reset.
 - CR-175-4, CR-175-5 (nits from the PR 175 review): deferred.
 - Adopt audit row (SEC-175-2): slice 9c follow-up; today only the printed report is the trail.
 - RISK-152-1 / CR-152-1: the Rs 60 sizing floor rejected every equity order once real costs are wired (`BufferBelowFloor`). Fixed in BZ-522: allowance is `max(cost, floor)` in sizing, no `risk.toml` change (floor now means "assume at least Rs 60 cost"; owner confirmed 2026-11-23). BZ-519 depends on BZ-522.
