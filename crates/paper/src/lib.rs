@@ -11,6 +11,7 @@
 )]
 
 pub mod account;
+pub mod cost_pool;
 pub mod executor;
 pub mod fill;
 pub mod reset_guard;
