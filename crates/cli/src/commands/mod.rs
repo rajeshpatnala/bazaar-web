@@ -46,6 +46,12 @@ pub enum CommandError {
     /// The store failed; the label is the `RepoError` category.
     #[error("store error")]
     Store(&'static str),
+    /// `accept-current` on an empty history with a checkpoint file: nothing is written.
+    #[error("empty history with a history checkpoint")]
+    EmptyHistory,
+    /// The store failed after the adopt step, so the checkpoint may already be written.
+    #[error("store error after writing")]
+    AfterAdopt(&'static str),
 }
 
 /// Make sure `dir` exists. A directory this call creates (with its new parents) is owner-only

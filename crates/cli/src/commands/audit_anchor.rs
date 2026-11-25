@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use bazaar_core::ports::AuditRepo;
+use bazaar_core::ports::{AuditRepo, RepoError};
 use bazaar_execution::audit::chain_hash;
 use bazaar_store::{AdoptReport, SqliteStore};
 
@@ -49,6 +49,11 @@ fn db_path(data_dir: &Path) -> Result<PathBuf, CommandError> {
     }
 }
 
+/// A store failure once the adopt step has returned: the label never reads as a refusal.
+fn after_adopt(e: RepoError) -> CommandError {
+    CommandError::AfterAdopt(e.safe_reason())
+}
+
 /// Verify the chain and write the anchor for the tail. `accept_rollback` allows replacing an
 /// existing anchor (ahead of the log, different hash, unparsable, or consistent). A MISSING
 /// anchor adopts without it and trusts the current tail: check the printed tail seq and time
@@ -56,7 +61,9 @@ fn db_path(data_dir: &Path) -> Result<PathBuf, CommandError> {
 ///
 /// # Errors
 /// `NoDatabase`; `Store("corrupt")` on a broken chain (nothing written); `Store("conflict")` when
-/// an anchor exists and `accept_rollback` is false (nothing written).
+/// an anchor exists and `accept_rollback` is false (nothing written); `EmptyHistory` when the
+/// history is empty and an anchor file exists (nothing written); `AfterAdopt` for a failure after
+/// the adopt step.
 pub async fn audit_anchor_adopt(
     data_dir: &Path,
     accept_rollback: bool,
@@ -65,10 +72,15 @@ pub async fn audit_anchor_adopt(
     let report = SqliteStore::anchor_adopt(&db, chain_hash, accept_rollback)
         .await
         .map_err(repo_label)?;
+    // The store writes nothing for an empty history, so an existing file would stay and fail the
+    // open below. A missing file gives neither an old seq nor a fault.
+    if report.new_seq == 0 && (report.old_seq.is_some() || report.old_fault.is_some()) {
+        return Err(CommandError::EmptyHistory);
+    }
     // The adopt verified the chain and wrote the anchor, so this open passes; it only reads the
     // tail time for the report.
-    let store = crate::compose::open_store(&db).await.map_err(repo_label)?;
-    let rows = AuditRepo::read_all(&store).await.map_err(repo_label)?;
+    let store = crate::compose::open_store(&db).await.map_err(after_adopt)?;
+    let rows = AuditRepo::read_all(&store).await.map_err(after_adopt)?;
     let tail_ts = rows.last().map(|r| r.draft.ts_ist_rfc3339.clone());
     Ok(AdoptOutcome { report, tail_ts })
 }
@@ -249,6 +261,28 @@ mod tests {
             (None, Some(AnchorFault::Unparsable), 2)
         );
         assert_eq!(audit_anchor_status(dir.path()).await.unwrap().seq, 2);
+    }
+
+    /// The store writes nothing for an empty history, so this gets its own refusal (CR-182-2).
+    #[tokio::test]
+    async fn adopt_on_an_empty_history_with_a_checkpoint_is_refused_and_keeps_the_file() {
+        let dir = seeded(0).await;
+        std::fs::write(anchor_file(dir.path()), "garbage").unwrap();
+        let e = audit_anchor_adopt(dir.path(), true).await.unwrap_err();
+        assert_eq!(e, CommandError::EmptyHistory);
+        assert_eq!(std::fs::read(anchor_file(dir.path())).unwrap(), b"garbage");
+        std::fs::remove_file(anchor_file(dir.path())).unwrap();
+        let r = audit_anchor_adopt(dir.path(), false).await.unwrap();
+        assert_eq!(r.report.new_seq, 0);
+    }
+
+    /// After the adopt step a `Corrupt` must not read as a refusal made before any write.
+    #[test]
+    fn a_failure_after_the_adopt_step_keeps_its_label_in_its_own_category() {
+        assert_eq!(
+            after_adopt(RepoError::Corrupt),
+            CommandError::AfterAdopt("corrupt")
+        );
     }
 
     /// An anchor naming a different hash at a real seq: needs the flag, fault is `HashMismatch`.

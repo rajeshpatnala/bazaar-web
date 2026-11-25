@@ -117,7 +117,8 @@ Fix round (PR 133): `reload` is idempotent (ids already queued or finished are s
 - Terms (ADR 0003 table): "audit log" is "activity history" and "anchor" is "history checkpoint" in owner-facing text; `audit-anchor status|adopt [--accept-rollback]` is now `history-checkpoint verify|accept-current [--accept-missing-entries]`, no aliases. Older entries in this record keep the old names. Later UI wording: use these terms. Alarm code, log category, file name and file format are unchanged.
 - `accept-current` is HUMAN-ONLY, as `adopt` was. OWNER ACTION after merge: update the HUMAN-ONLY lists and deny rules (plan, "Owner inputs needed"); this replaces the pending `audit-anchor adopt` action.
 - A start that fails on `RepoError::Corrupt` from the store now prints a hint to run `history-checkpoint verify`.
-- Only refusals raised before any write say "Not changed". An unavailable or other store error from `accept-current` can follow a stored checkpoint (late write, or the read for the report), so it says to run `verify`.
+- Only refusals raised before any write say "The activity history and the history checkpoint were not changed" (opening the store may still migrate the database). An unavailable or other store error from `accept-current`, and any error after its adopt step, can follow a stored checkpoint, so it says to run `verify`.
+- `accept-current` on an empty history with a checkpoint file refuses with its own message; there is no way yet to replace that checkpoint (restore a backup).
 
 ## Deferred
 - BZ-F10-S10 (ledger lots, realised P&L, human-only `paper-reset`). Hard conditions: no paper day counts and no first production fill before it.

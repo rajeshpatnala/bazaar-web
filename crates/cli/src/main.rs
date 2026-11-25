@@ -75,6 +75,9 @@ async fn main() -> ExitCode {
     }
 }
 
+/// Claims only what a refusal guarantees: opening the store may still migrate the database.
+const NOT_CHANGED: &str = "The activity history and the history checkpoint were not changed";
+
 /// Next step when the database cannot be found or used.
 const CHECK_AND_RERUN: &str =
     "Check --data-dir, permissions, and that the server is stopped, then run again.";
@@ -118,17 +121,24 @@ fn accept_success_lines(o: &AdoptOutcome) -> [String; 5] {
 /// error can arrive after the checkpoint was written (late write, or the read for the report).
 fn accept_failure_text(e: CommandError) -> String {
     match e {
-        CommandError::Store("conflict") => "Not changed: a history checkpoint already exists. \
-             Replacing it can hide missing history entries. Compare the entry number and time with \
-             your own records, then run again with --accept-missing-entries."
-            .to_owned(),
-        CommandError::Store("corrupt") => "Not changed: the activity history does not pass its \
-             check. Do not trade on this data; restore a backup, then run verify."
-            .to_owned(),
+        CommandError::Store("conflict") => format!(
+            "{NOT_CHANGED}: a history checkpoint already exists. Replacing it can hide missing \
+             history entries. Compare the entry number and time with your own records, then run \
+             again with --accept-missing-entries."
+        ),
+        CommandError::Store("corrupt") => format!(
+            "{NOT_CHANGED}: the activity history does not pass its check. Do not trade on this \
+             data; restore a backup, then run verify."
+        ),
+        CommandError::EmptyHistory => format!(
+            "{NOT_CHANGED}: the activity history is empty but a history checkpoint exists, which \
+             accept-current cannot replace (entries may be missing). Do not trade on this data; \
+             restore a backup, then run verify."
+        ),
         CommandError::NoDatabase => {
-            format!("Not changed: no database in the data directory. {CHECK_AND_RERUN}")
+            format!("{NOT_CHANGED}: no database in the data directory. {CHECK_AND_RERUN}")
         }
-        CommandError::Store(label) => format!(
+        CommandError::Store(label) | CommandError::AfterAdopt(label) => format!(
             "accept-current did not finish: store error ({label}). Run verify to see what is \
              stored. {CHECK_AND_RERUN}"
         ),
@@ -153,10 +163,11 @@ fn verify_success_text(r: AnchorReport) -> String {
 
 fn verify_failure_text(e: CommandError) -> String {
     match e {
-        CommandError::Store("corrupt") => "History check failed: the activity history and the \
-             history checkpoint do not agree. Nothing was changed. Compare with your own records \
-             or restore a backup before you consider accept-current."
-            .to_owned(),
+        CommandError::Store("corrupt") => format!(
+            "History check failed: the activity history and the history checkpoint do not agree. \
+             {NOT_CHANGED}. Compare with your own records or restore a backup before you consider \
+             accept-current."
+        ),
         CommandError::NoDatabase => {
             format!("History check not run: no database in the data directory. {CHECK_AND_RERUN}")
         }
@@ -241,18 +252,29 @@ mod tests {
     fn accept_refusals_say_not_changed_and_the_next_step() {
         assert_eq!(
             accept_failure_text(CommandError::Store("conflict")),
-            "Not changed: a history checkpoint already exists. Replacing it can hide missing \
-             history entries. Compare the entry number and time with your own records, then run \
-             again with --accept-missing-entries."
+            "The activity history and the history checkpoint were not changed: a history \
+             checkpoint already exists. Replacing it can hide missing history entries. Compare the \
+             entry number and time with your own records, then run again with \
+             --accept-missing-entries."
         );
         assert_eq!(
             accept_failure_text(CommandError::Store("corrupt")),
-            "Not changed: the activity history does not pass its check. Do not trade on this \
-             data; restore a backup, then run verify."
+            "The activity history and the history checkpoint were not changed: the activity \
+             history does not pass its check. Do not trade on this data; restore a backup, then \
+             run verify."
+        );
+        assert_eq!(
+            accept_failure_text(CommandError::EmptyHistory),
+            "The activity history and the history checkpoint were not changed: the activity \
+             history is empty but a history checkpoint exists, which accept-current cannot \
+             replace (entries may be missing). Do not trade on this data; restore a backup, then \
+             run verify."
         );
         let none = accept_failure_text(CommandError::NoDatabase);
         assert!(
-            none.starts_with("Not changed: no database in the data directory."),
+            none.starts_with(&format!(
+                "{NOT_CHANGED}: no database in the data directory."
+            )),
             "{none}"
         );
         assert!(none.ends_with(CHECK_AND_RERUN), "{none}");
@@ -261,10 +283,15 @@ mod tests {
     /// The write may have landed, so these never claim that nothing changed.
     #[test]
     fn accept_store_errors_name_the_category_without_claiming_no_change() {
-        for label in ["unavailable", "schema", "too_large", "other"] {
-            let t = accept_failure_text(CommandError::Store(label));
+        use CommandError::{AfterAdopt, Store};
+        let errors = ["unavailable", "schema", "too_large", "other"]
+            .map(|l| (Store(l), l))
+            .into_iter()
+            .chain(["corrupt", "conflict"].map(|l| (AfterAdopt(l), l)));
+        for (e, label) in errors {
+            let t = accept_failure_text(e);
             assert!(t.contains(label), "{t}");
-            assert!(!t.contains("Not changed"), "{t}");
+            assert!(!t.contains("not changed"), "{t}");
             assert!(t.contains("Run verify to see what is stored."), "{t}");
             assert!(t.ends_with(CHECK_AND_RERUN), "{t}");
         }
@@ -275,8 +302,8 @@ mod tests {
         assert_eq!(
             verify_failure_text(CommandError::Store("corrupt")),
             "History check failed: the activity history and the history checkpoint do not agree. \
-             Nothing was changed. Compare with your own records or restore a backup before you \
-             consider accept-current."
+             The activity history and the history checkpoint were not changed. Compare with your \
+             own records or restore a backup before you consider accept-current."
         );
         let none = verify_failure_text(CommandError::NoDatabase);
         assert!(none.contains("no database"), "{none}");

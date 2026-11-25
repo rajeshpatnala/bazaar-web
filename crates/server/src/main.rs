@@ -108,7 +108,8 @@ async fn shutdown_signal() {
 fn startup_hint(e: &runtime::StartError) -> Option<&'static str> {
     matches!(e, runtime::StartError::Store(RepoError::Corrupt)).then_some(
         "Saved data or activity history failed a check; nothing was served. \
-         Run `bazaar-cli history-checkpoint verify`.",
+         Run `bazaar-cli history-checkpoint verify` with --data-dir set to the server's data \
+         folder, if you changed it.",
     )
 }
 
@@ -290,7 +291,8 @@ mod tests {
     }
 
     const HINT: &str = "Saved data or activity history failed a check; nothing was served. \
-                        Run `bazaar-cli history-checkpoint verify`.";
+                        Run `bazaar-cli history-checkpoint verify` with --data-dir set to the \
+                        server's data folder, if you changed it.";
 
     #[test]
     fn a_corrupt_store_at_start_gets_the_verify_hint_only() {
