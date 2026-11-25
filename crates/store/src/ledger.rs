@@ -704,6 +704,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(gone.ledger_lines_since(day()).await, Err(RepoError::Other));
+        // TS-178-1: the tail read still works here, so only the row-page fetch can fail.
+        let renamed = opened().await;
+        sqlx::query("ALTER TABLE paper_ledger RENAME COLUMN ts_ist TO gone")
+            .execute(&renamed.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            renamed.ledger_lines_since(day()).await,
+            Err(RepoError::Other)
+        );
         let closed = opened().await;
         closed.pool.close().await;
         assert_eq!(

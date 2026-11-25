@@ -101,9 +101,10 @@ Fix round (PR 133): `reload` is idempotent (ids already queued or finished are s
 ## Slice 9d, part 2 (cross-epoch ledger read)
 - CR-176-3 closed: `PaperLedgerRepo::lines_since(day)` returns `LedgerSince{lines, tail}`: all epochs, openings included, id order, tail and rows from one read transaction.
 - Only a well-formed `+05:30` timestamp dated before `day` is dropped (filtered in Rust, so an impossible date is kept); every row is decoded, so a corrupt row of any date is `Corrupt`. Over 10,000 kept rows is `TooLarge`, never truncated.
-- The read pages through the whole ledger (memory bounded by page and cap, time is not): the 9e guard must bound it with its timeout.
+- The read pages through the whole ledger (memory bounded by page and cap, time is not): the 9e guard must bound it with its timeout. Its transaction also holds the store's only connection (`max_connections(1)`) across every page, so other store calls wait until the scan ends (RISK-178-1, CR-178-1).
 
 ## Deferred
+- 9e condition (SEC-178-1, CR-178-1, RISK-178-1): `lines_since` holds the store's only connection for the whole scan, so other store calls, including a kill-switch engage, wait. The guard's deadline must bound this; a real-store test must show a dropped read changes no ledger line and a later engage persists. BZ-F10-S10 (RISK-178-1): stopped-server command, or a test that an engage persists after an in-process guard timeout.
 - 9e condition (RISK-177-2): the book provider must not wait on the executor `driver` lock without a timeout (busy = `Unknown`). `reset` holds the account write lock during `check()`, while `PaperExecutor::accept` holds `driver` and waits for that account lock, so an unbounded wait deadlocks.
 - 9e condition (PR 177 security check): verify that the real guard reads the ledger tail before anything else it judges; types do not enforce it.
 - BZ-F10-S10 condition (RISK-177-2): an in-process caller must block new orders from the book check through the commit, with a test. Today `accept` releases the account lock after `check_funds` and pushes to the book later, so a guard could see a flat book while a buy is in flight.
