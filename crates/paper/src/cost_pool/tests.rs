@@ -49,6 +49,50 @@ fn owner_worked_case() {
     assert_eq!(p.open_loss(d("90")), Ok(d("-10")));
     // A gain is not credited, so it cannot cancel the -16.
     assert_eq!(p.open_loss(d("100")), Ok(Decimal::ZERO));
+    // At a mark of 90 the day figure is realised plus open loss.
+    assert_eq!(
+        p.open_loss(d("90")).map(|open| d("-16") + open),
+        Ok(d("-26"))
+    );
+    // Break-even: the rest at 93.2 with a further 6 of sale charge.
+    let exit = p.sell(10, d("932"), d("6")).expect("full exit");
+    assert_eq!(exit, split("900", "10", "16"));
+    assert_eq!(d("-16") + exit.result, Decimal::ZERO);
+    assert_eq!(p, pool(0, "0", "0"));
+}
+
+/// The rest stops losing after the sale: the figure ends under 2 paise lower, never higher.
+#[test]
+fn a_partial_sale_that_ends_the_loss_never_raises_the_figure() {
+    for (cost, charges, mark, sale, figures) in [
+        (
+            "100.01",
+            "10.01",
+            "36.67",
+            split("66.68", "6.68", "-0.02"),
+            ("-0.01", "-0.02"),
+        ),
+        // Amounts finer than a paisa.
+        (
+            "100.001",
+            "10.001",
+            "36.667",
+            split("66.67", "6.67", "-0.006"),
+            ("-0.001", "-0.006"),
+        ),
+    ] {
+        let mut p = pool(3, cost, charges);
+        let before = p.open_loss(d(mark)).expect("open loss");
+        let s = p
+            .sell(2, d(mark) * Decimal::from(2u32), Decimal::ZERO)
+            .expect("sell");
+        assert_eq!(s, sale);
+        assert!(d(mark) >= p.cost() + p.unsold_charges(), "rest not losing");
+        assert_eq!(p.open_loss(d(mark)), Ok(Decimal::ZERO));
+        let after = s.result;
+        assert_eq!((before, after), (d(figures.0), d(figures.1)));
+        assert!(before >= after && before - after < paise(2));
+    }
 }
 
 #[test]
@@ -85,6 +129,9 @@ fn a_refused_trade_names_why_and_leaves_the_pool_unchanged() {
         (0, "1", "1", PoolError::MissingQty),
         (1, "-1", "1", PoolError::WrongSign),
         (1, "1", "-1", PoolError::WrongSign),
+        // A zero buy cost or zero sale proceeds is a missing figure.
+        (1, "0", "1", PoolError::ZeroAmount),
+        (1, "0", "0", PoolError::ZeroAmount),
     ] {
         let mut p = start;
         assert_eq!(p.buy(qty, d(amount), d(charge)), Err(expected));
@@ -128,8 +175,8 @@ fn overflow_is_a_typed_error_and_leaves_the_pool_unchanged() {
     assert_eq!(p.sell(2, d("1"), d("1")), Err(PoolError::Overflow));
     assert_eq!(p, two);
     let mut p = full;
-    // No proceeds, the largest charge and the largest cost: the result cannot be held.
-    assert_eq!(p.sell(1, d("0"), Decimal::MAX), Err(PoolError::Overflow));
+    // Tiny proceeds, the largest charge and the largest cost: the result cannot be held.
+    assert_eq!(p.sell(1, d("1"), Decimal::MAX), Err(PoolError::Overflow));
     assert_eq!(p, full);
 }
 

@@ -46,6 +46,8 @@ pub enum PoolError {
     SellAboveHeld,
     #[error("negative amount or charge")]
     WrongSign,
+    #[error("buy cost or sale proceeds of zero")]
+    ZeroAmount,
     #[error("overflow in pool arithmetic")]
     Overflow,
     #[error("mark price is not positive")]
@@ -78,7 +80,9 @@ fn sub(a: Decimal, b: Decimal) -> Result<Decimal, PoolError> {
 }
 
 /// The part of `total` that goes with `sold` of `held` shares, rounded up to a paisa and never
-/// above `total`. The only rounding here; rounding up never overstates a sale result.
+/// above `total`. The only rounding here. A partial sale never overstates its result against what
+/// the pool holds then; later results and open loss can read better by the paise taken early. A
+/// full exit makes totals exact.
 fn share_of(total: Decimal, sold: u32, held: u32) -> Result<Decimal, PoolError> {
     let part = total
         .checked_mul(Decimal::from(sold))
@@ -89,13 +93,16 @@ fn share_of(total: Decimal, sold: u32, held: u32) -> Result<Decimal, PoolError> 
         .min(total))
 }
 
-/// A trade needs a quantity and no negative figure.
+/// A trade needs a quantity, no negative figure and an amount above zero. A charge may be zero.
 fn check(qty: u32, amount: Decimal, charge: Decimal) -> Result<(), PoolError> {
     if qty == 0 {
         return Err(PoolError::MissingQty);
     }
     if amount < Decimal::ZERO || charge < Decimal::ZERO {
         return Err(PoolError::WrongSign);
+    }
+    if amount.is_zero() {
+        return Err(PoolError::ZeroAmount);
     }
     Ok(())
 }
@@ -134,11 +141,12 @@ impl Pool {
         Ok(sub(value, add(self.cost, self.charges)?)?.min(Decimal::ZERO))
     }
 
-    /// Adds a buy of `qty` shares; `cost` (without charges) and `charge` are positive
-    /// magnitudes. The pool is unchanged on error.
+    /// Adds a buy of `qty` shares; `cost` (without charges) is a positive magnitude and
+    /// `charge` is zero or more. The pool is unchanged on error.
     ///
     /// # Errors
-    /// `MissingQty` for 0 shares; `WrongSign` for a negative figure; `Overflow`.
+    /// `MissingQty` for 0 shares; `WrongSign` for a negative figure; `ZeroAmount` for a zero
+    /// cost; `Overflow`.
     pub fn buy(&mut self, qty: u32, cost: Decimal, charge: Decimal) -> Result<(), PoolError> {
         check(qty, cost, charge)?;
         *self = Self {
@@ -149,12 +157,13 @@ impl Pool {
         Ok(())
     }
 
-    /// Takes a sale of `qty` shares out; `proceeds` and `charge` are positive magnitudes.
-    /// A full exit takes everything left without dividing. The pool is unchanged on error.
+    /// Takes a sale of `qty` shares out; `proceeds` is a positive magnitude and `charge` is
+    /// zero or more. A full exit takes everything left without dividing. The pool is unchanged
+    /// on error.
     ///
     /// # Errors
-    /// `MissingQty` for 0 shares; `WrongSign` for a negative figure; `SellAboveHeld`;
-    /// `Overflow`.
+    /// `MissingQty` for 0 shares; `WrongSign` for a negative figure; `ZeroAmount` for zero
+    /// proceeds; `SellAboveHeld`; `Overflow`.
     pub fn sell(
         &mut self,
         qty: u32,
