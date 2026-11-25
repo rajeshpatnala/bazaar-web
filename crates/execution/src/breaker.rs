@@ -478,6 +478,10 @@ mod tests {
         let monday = day(23, 0).date_naive();
         let got = restore_latch(&rows, &cal(), today);
         assert_eq!((got.until, got.unparsable), (Some(monday), 0));
+        // The latest wins, not the first read: the same rows oldest first (TS-179-1).
+        let reversed: Vec<_> = rows.iter().rev().cloned().collect();
+        let got = restore_latch(&reversed, &cal(), today);
+        assert_eq!((got.until, got.unparsable), (Some(monday), 0));
         let expired = restore_latch(&rows, &cal(), monday);
         assert_eq!((expired.until, expired.unparsable), (None, 0));
         // An unreadable row does not stop the scan: a later open trip still latches.
