@@ -145,11 +145,24 @@ async fn kill_switch_engages(store: &SqliteStore) {
     assert_eq!(verify_chain(&after), Ok(()));
 }
 
+/// A SECOND store on the same file sees the engaged switch and the same audit rows: they are
+/// committed, not just visible inside a transaction on the writer's one connection.
+async fn persisted(dir: &TempDir, store: &SqliteStore) {
+    let rows = store.read_all().await.unwrap();
+    let path = dir.path().join("paper.db");
+    let open = tokio::time::timeout(Duration::from_secs(5), SqliteStore::open(&path));
+    let other = open.await.expect("second open blocked").unwrap();
+    assert_eq!(other.is_engaged().await, Ok(true));
+    assert_eq!(other.read_all().await.unwrap(), rows);
+    let last = rows.last().unwrap();
+    assert_eq!(last.draft.kind, "kill_switch_engaged");
+}
+
 /// Drops `ledger_lines_since` while pending after 1, 2, 4, ... suspensions, until it finishes
 /// first: the drops fall before and after its transaction begins and mid-scan.
 #[tokio::test]
 async fn dropping_a_pending_ledger_read_frees_the_only_connection() {
-    let (store, _dir) = opened(2).await;
+    let (store, dir) = opened(2).await;
     let before = contents(&store).await;
     let (mut stop_after, mut deepest) = (1_u32, 0);
     loop {
@@ -183,20 +196,43 @@ async fn dropping_a_pending_ledger_read_frees_the_only_connection() {
         deepest = stop_after;
         stop_after *= 2;
     }
+    persisted(&dir, &store).await;
     // Begin, tail and three pages: the deepest drop was inside the open transaction.
     assert!(deepest >= 4, "only reached {deepest} suspensions");
 }
 
 #[tokio::test]
-async fn a_guard_deadline_mid_scan_refuses_and_leaves_the_store_usable() {
-    let (store, _dir) = opened(9).await;
+async fn a_guard_deadline_refuses_and_leaves_the_store_usable() {
+    let (store, dir) = opened(9).await;
     let before = contents(&store).await;
+    // Every input is readable and passes, so only the deadline can refuse below.
+    let long = guard(&store, Duration::from_secs(5));
+    assert_eq!(long.check().await, Ok(9_001));
     let short = guard(&store, Duration::from_nanos(1));
     let got = tokio::time::timeout(Duration::from_secs(5), short.check()).await;
     assert_eq!(got, Ok(Err(ResetRule::GuardUnavailable)));
     kill_switch_engages(&store).await;
     let now = contents(&store).await;
     assert_eq!((now.0, now.1), (before.0, before.1));
+    persisted(&dir, &store).await;
+}
+
+/// Pins the day the guard asks the store for: Monday's loss counts on Tuesday.
+#[tokio::test]
+async fn a_monday_loss_with_a_tuesday_gain_is_weekly_loss_on_the_real_store() {
+    let (store, _dir) = opened(0).await;
+    let mut loss = line("charge", -5_000);
+    loss.ts_ist_rfc3339 = "2026-11-23T10:00:00+05:30".into();
+    let lines = vec![loss, line("charge", 3_000)];
+    PaperLedgerRepo::append_many(&store, lines).await.unwrap();
+    let before = contents(&store).await;
+    assert_eq!((before.1, before.2), (3, 1));
+    let guard = guard(&store, Duration::from_secs(5));
+    assert_eq!(guard.check().await, Err(ResetRule::WeeklyLoss));
+    let refused = AccountError::ResetRefused(ResetRule::WeeklyLoss);
+    let owner = ResetReason::OwnerRequested;
+    assert_eq!(reset(&store, owner, &guard).await, Err(refused));
+    assert_eq!(contents(&store).await, before);
 }
 
 #[tokio::test]

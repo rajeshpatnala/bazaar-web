@@ -23,3 +23,5 @@ tracing.workspace = true
 [dev-dependencies]
 bazaar-core = { path = "../core", features = ["test-util"] }
 proptest.workspace = true
+# `test-util`: paused-clock deadline tests.
+tokio = { workspace = true, features = ["test-util"] }

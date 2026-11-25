@@ -81,7 +81,8 @@ fn kind_of(line: &LedgerEntry) -> Result<LedgerKind, ResetRule> {
     LedgerKind::parse(&line.kind).ok_or_else(|| unavailable("line kind"))
 }
 
-/// Net (today, this week) cash flow of the trade and charge lines. Every line must be readable.
+/// Net (today, this week) cash flow of the trade and charge lines. Every line must be readable
+/// and none may be dated after `today` (a clock that stepped back, or foreign data).
 fn net_pnl(
     lines: &[LedgerEntry],
     today: NaiveDate,
@@ -96,6 +97,9 @@ fn net_pnl(
             .filter(|_| ts.ends_with("+05:30"))
             .ok_or_else(|| unavailable("line timestamp"))?
             .date_naive();
+        if date > today {
+            return Err(unavailable("line timestamp"));
+        }
         if kind == LedgerKind::Opening {
             continue;
         }
@@ -124,7 +128,8 @@ fn has_trade_line(lines: &[LedgerEntry]) -> Result<bool, ResetRule> {
 
 impl<L: PaperLedgerRepo, A: AuditRepo, B: BookProvider> LedgerResetGuard<L, A, B> {
     /// `ledger` and `audit` must be the stores the account and the breaker write to; `timeout`
-    /// is `[execution] io_timeout_secs` and bounds the whole check.
+    /// is `[execution] io_timeout_secs` and bounds the whole check. The audit chain is not
+    /// verified here: the caller opens the store with `open_anchored`, as the server does.
     pub fn new(
         ledger: L,
         audit: A,
@@ -231,6 +236,7 @@ mod tests {
         calls: Mutex<Vec<&'static str>>,
         fail: Mutex<Option<&'static str>>,
         hang: Mutex<Option<&'static str>>,
+        slow: Mutex<Vec<(&'static str, Duration)>>,
         append_during: Mutex<Option<&'static str>>,
         book: Mutex<Option<BookState>>,
     }
@@ -240,6 +246,16 @@ mod tests {
             self.calls.lock().unwrap().push(call);
             if *self.append_during.lock().unwrap() == Some(call) {
                 self.push(1, "charge", "1", TUE);
+            }
+            let slow = self
+                .slow
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|s| s.0 == call)
+                .copied();
+            if let Some((_, delay)) = slow {
+                tokio::time::sleep(delay).await;
             }
             let hangs = *self.hang.lock().unwrap() == Some(call);
             if hangs {
@@ -282,6 +298,9 @@ mod tests {
         }
     }
 
+    /// The guard's deadline in these tests.
+    const TIMEOUT: Duration = Duration::from_millis(100);
+
     #[derive(Clone)]
     struct Shared(Arc<Fake>);
 
@@ -308,11 +327,17 @@ mod tests {
                 .cloned()
                 .collect())
         }
-        async fn lines_since(&self, _: NaiveDate) -> Result<LedgerSince, RepoError> {
+        async fn lines_since(&self, day: NaiveDate) -> Result<LedgerSince, RepoError> {
             // Rows and tail are one snapshot, taken before anything lands "during" the read.
-            let lines = self.0.lines.lock().unwrap().clone();
+            let mut lines = self.0.lines.lock().unwrap().clone();
             self.0.read("lines_since").await?;
             let tail = lines.len() as u64;
+            // As the store: only a well-formed `+05:30` row dated before `day` is dropped.
+            lines.retain(|l| {
+                let ts = &l.ts_ist_rfc3339;
+                !(ts.ends_with("+05:30")
+                    && DateTime::parse_from_rfc3339(ts).is_ok_and(|t| t.date_naive() < day))
+            });
             Ok(LedgerSince { lines, tail })
         }
         async fn new_epoch(
@@ -406,7 +431,7 @@ mod tests {
                 s.clone(),
                 calendar(),
                 self.clock.clone(),
-                Duration::from_millis(100),
+                TIMEOUT,
                 s,
             )
         }
@@ -551,16 +576,56 @@ mod tests {
     }
 
     /// Includes a hung ledger read and a book provider that never answers.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn every_hung_read_is_guard_unavailable_within_the_deadline() {
         for call in ["lines_since", "audit", "book", "current_epoch"] {
             let r = Rig::new();
             r.passes().await;
             *r.fake.hang.lock().unwrap() = Some(call);
+            let started = tokio::time::Instant::now();
             let got = tokio::time::timeout(Duration::from_secs(5), r.guard().check()).await;
             assert_eq!(got, Ok(Err(ResetRule::GuardUnavailable)), "{call}");
+            assert_eq!(started.elapsed(), TIMEOUT, "{call}");
             r.refuses(ResetRule::GuardUnavailable).await;
         }
+    }
+
+    /// No single read is over the deadline; two together are.
+    #[tokio::test(start_paused = true)]
+    async fn one_deadline_covers_all_reads_together() {
+        let calls = ["lines_since", "audit", "book", "current_epoch"];
+        let delay = TIMEOUT * 6 / 10;
+        for pair in calls.windows(2) {
+            let r = Rig::new();
+            *r.fake.slow.lock().unwrap() = vec![(pair[0], delay)];
+            r.passes().await;
+            r.fake.slow.lock().unwrap().push((pair[1], delay));
+            let started = tokio::time::Instant::now();
+            r.refuses(ResetRule::GuardUnavailable).await;
+            // `refuses` runs the guard twice: alone, then inside the reset.
+            assert_eq!(started.elapsed(), TIMEOUT * 2, "{pair:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_line_dated_after_today_is_guard_unavailable() {
+        // A profit dated tomorrow would offset today's loss.
+        let r = Rig::new();
+        r.fake.push(1, "charge", "-10", TUE);
+        r.fake.push(1, "charge", "20", "2026-11-25");
+        r.refuses(ResetRule::GuardUnavailable).await;
+        // Any kind, in an older epoch too, from the first instant of the next IST day.
+        for kind in ["opening", "charge", "buy", "sell"] {
+            let r = Rig::new();
+            r.fake.push_at(1, kind, "1", "2026-11-25T00:00:00+05:30");
+            r.fake.push(2, "opening", "100000", FRI);
+            r.refuses(ResetRule::GuardUnavailable).await;
+        }
+        // The last second of today is not in the future, even though the clock reads 15:00.
+        let r = Rig::new();
+        r.fake
+            .push_at(1, "charge", "1", "2026-11-24T23:59:59+05:30");
+        r.passes().await;
     }
 
     #[tokio::test]
