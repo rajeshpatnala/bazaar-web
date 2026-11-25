@@ -1,1 +1,1 @@
-- [Fix round in a worktree](project_fix_round_in_worktree.md) — fix-list may falsely say "nothing to fix": tell the manager; push from own worktree
+- [Fix round in a worktree](project_fix_round_in_worktree.md) — fix-list may falsely say "nothing to fix": stop and report to the manager; push only your assigned PR branch
