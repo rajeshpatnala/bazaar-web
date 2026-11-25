@@ -436,8 +436,9 @@ async fn build<Q: QuoteSource + 'static, B: GateContext + 'static>(
         .await
         .map_err(|e| StartError::Paper(e.to_string()))?;
     if opened.epoch.is_none() {
-        // First open only: the guard is never consulted for `Initial`; any later reset needs a
-        // real guard (slice 9d), so the fail-closed `RefuseAll` stands in here.
+        // First open only: the guard is never consulted for `Initial`. `RefuseAll` stays the
+        // only production guard through slice 9: the real guard is built in slice 9e and wired
+        // in BZ-F10-S10. Do not replace it before then.
         let req = ResetRequest {
             reason: ResetReason::Initial,
             actor: "system.startup".to_owned(),

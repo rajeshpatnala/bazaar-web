@@ -109,6 +109,10 @@ pub trait ResetGuard: Send + Sync {
     /// based on. The tail must be read no later than anything else judged: the store refuses
     /// the new epoch if the ledger moved past it.
     ///
+    /// The tail covers ledger lines only. A new working order or a breaker latch writes no
+    /// ledger line, so the commit check does not catch a book or latch change made after the
+    /// guard looked.
+    ///
     /// # Errors
     /// The [`ResetRule`] that refuses.
     fn check(&self) -> impl Future<Output = Result<u64, ResetRule>> + Send;

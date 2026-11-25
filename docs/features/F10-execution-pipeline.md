@@ -96,8 +96,14 @@ Fix round (PR 133): `reload` is idempotent (ids already queued or finished are s
 - TS-176-5 closed: balances, new line, both audit rows, `BadActor` writes nothing, 64-char actor accepted.
 - CR-176-4 closed: `first_open_is_audited_once_and_a_restart_adds_nothing` pins actor `system.startup` and the full payload with reason `initial`.
 - Split at the 400-line limit: `lines_since(day)` is part 2.
+- Review round 1 (PR 177): the tail covers ledger lines only, not book or latch state (a new working order or a breaker latch writes no line); now stated on `ResetGuard::check` (RISK-177-2). "The guard reads the tail no later than anything else it judges" is a documented contract that types do not enforce (security review): check it when the real guard lands in 9e. The `runtime.rs` first-open comment now says `RefuseAll` stays the only production guard through slice 9 (RISK-177-1).
 
 ## Deferred
+- 9e condition (RISK-177-2): the book provider must not wait on the executor `driver` lock without a timeout (busy = `Unknown`). `reset` holds the account write lock during `check()`, while `PaperExecutor::accept` holds `driver` and waits for that account lock, so an unbounded wait deadlocks.
+- 9e condition (PR 177 security check): verify that the real guard reads the ledger tail before anything else it judges; types do not enforce it.
+- BZ-F10-S10 condition (RISK-177-2): an in-process caller must block new orders from the book check through the commit, with a test. Today `accept` releases the account lock after `check_funds` and pushes to the book later, so a guard could see a flat book while a buy is in flight.
+- BZ-F10-S10 (SEC-177-1, no code change in PR 177): the reset transaction is deferred (WAL). From code reading, not run: if a second process commits after the tail read, nothing is stored but the error is `Other`, not `Conflict`. With the stopped-server lock, add a two-pool test on one DB file asserting no line and no audit row.
+- TS-177-1 (the "Slice 9c" paragraph still shows the old `new_epoch` signature): 9d part 2.
 - RISK-176-1 (refuse a reset on a losing day, `DailyLoss`, all epochs): 9e.
 - RISK-176-2: tail check done in 9d; guard 9e, lock BZ-F10-S10.
 - CR-176-3 (`lines_since(day)` with the tail from the same read transaction): 9d part 2, needed before 9e.
