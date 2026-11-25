@@ -32,7 +32,8 @@ pub const ALARM_SQUARE_OFF: &str = "square_off_blocked";
 /// Alarm code while the audit anchor write is failing (ADR 0003): rows after the last good anchor
 /// write could be truncated undetected until it is repaired.
 const ALARM_AUDIT_ANCHOR: &str = "audit_anchor_lag";
-const ANCHOR_TEXT: &str = "audit anchor write failing; the audit tail is not protected";
+const ANCHOR_TEXT: &str = "History checkpoint is out of date: the latest activity history is not \
+protected yet. The app retries; if this stays, check free disk space and data folder permissions.";
 const ALARM_TEXT: &str = "MIS square-off blocked; a position stays open until it fills";
 /// While an alarm is up, the driver's own error log repeats every this many passes.
 const LOG_EVERY: u32 = 30;
@@ -167,7 +168,10 @@ impl Driver {
         let mut st = store.anchor_status().await;
         if st.is_some_and(|s| s.lag) {
             if store.anchor_flush().await.is_err() {
-                tracing::warn!(category = "anchor_write", "audit anchor still failing");
+                tracing::warn!(
+                    category = "anchor_write",
+                    "history checkpoint write still failing"
+                );
             }
             st = store.anchor_status().await;
         }
@@ -494,9 +498,15 @@ mod tests {
         d.on_timer().await;
         let a = alarms.snapshot();
         assert_eq!(a.len(), 1, "{a:?}");
+        // Literals: the code is the stable machine key (API contract), the text owner wording.
         assert_eq!(
             (a[0].code.as_str(), a[0].message.as_str()),
-            (ALARM_AUDIT_ANCHOR, ANCHOR_TEXT)
+            (
+                "audit_anchor_lag",
+                "History checkpoint is out of date: the latest activity history is not protected \
+                 yet. The app retries; if this stays, check free disk space and data folder \
+                 permissions."
+            )
         );
         // Repair: the next pass retries the write, finds it good and clears the alarm.
         std::fs::remove_dir(&ap).unwrap();

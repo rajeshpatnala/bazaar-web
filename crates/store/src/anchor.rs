@@ -276,10 +276,10 @@ impl AnchorState {
             Err(e) => {
                 tracing::warn!(
                     category = e.safe_reason(),
-                    "audit anchor write failed; lagging"
+                    "history checkpoint write failed; lagging"
                 );
             }
-            Ok(()) if g.lag => tracing::info!("audit anchor caught up"),
+            Ok(()) if g.lag => tracing::info!("history checkpoint caught up"),
             Ok(()) => {}
         }
         g.lag = res.is_err();
@@ -375,9 +375,10 @@ impl SqliteStore {
         }
     }
 
-    /// Human-only recovery (`audit-anchor adopt`): verify the chain, then write the anchor for
-    /// the current tail. If an existing anchor is ahead of the log or disagrees with it (older
-    /// copy restored, edited log) this refuses with `Conflict` unless `accept_rollback`.
+    /// Human-only recovery (`history-checkpoint accept-current`): verify the chain, then write
+    /// the anchor for the current tail. If an existing anchor is ahead of the log or disagrees
+    /// with it (older copy restored, edited log) this refuses with `Conflict` unless
+    /// `accept_rollback`.
     ///
     /// # Errors
     /// `Corrupt` on a broken chain (nothing written), `Conflict` as above, store errors.

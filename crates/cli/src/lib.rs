@@ -43,29 +43,34 @@ pub enum Command {
         #[arg(long)]
         file: PathBuf,
     },
-    /// The audit anchor beside the database (ADR 0003).
-    #[command(subcommand)]
+    /// The history checkpoint that protects the activity history (ADR 0003).
+    #[command(name = "history-checkpoint", subcommand)]
     AuditAnchor(AuditAnchorCommand),
 }
 
-/// `audit-anchor` subcommands.
+/// `history-checkpoint` subcommands.
 #[derive(Debug, Subcommand)]
 pub enum AuditAnchorCommand {
-    /// HUMAN-ONLY: verify the audit chain and write the anchor for its tail (new database,
-    /// restored backup). Replacing an existing anchor needs `--accept-rollback`.
+    /// HUMAN-ONLY: check the activity history and write the history checkpoint for its last
+    /// entry (new database, restored backup). Any existing history checkpoint, even a matching
+    /// one, is replaced only with `--accept-missing-entries`.
     ///
-    /// Stop the server first: no lock is taken. A missing anchor adopts the current tail on
-    /// trust, so check the printed tail seq and time against your own records. No audit row is
-    /// written; the printed report is the only trail.
+    /// Stop the server first: no lock is taken. With no history checkpoint the current last
+    /// entry is accepted on trust, so check the printed entry number and time against your own
+    /// records. No audit row is written; the printed report is the only trail.
+    #[command(name = "accept-current")]
     Adopt {
-        /// Replace an existing anchor file (it may be ahead of the log: rows would be lost).
-        #[arg(long)]
+        /// Replace any existing history checkpoint, even a matching one (it may show that
+        /// history entries are missing).
+        #[arg(long = "accept-missing-entries")]
         accept_rollback: bool,
     },
-    /// Verify the chain and the anchor and print the anchored seq.
+    /// Check the activity history against the history checkpoint and print the checkpointed
+    /// entry number.
     ///
     /// It opens the store like the app does, so it may run a migration or write the
     /// crash-window catch-up: it is not strictly read-only.
+    #[command(name = "verify")]
     Status,
 }
 
@@ -105,37 +110,82 @@ mod tests {
     }
 
     #[test]
-    fn adopt_help_says_stop_the_server_and_check_the_tail() {
+    fn help_uses_the_new_names_and_keeps_the_warnings() {
         use clap::CommandFactory;
         let cmd = Cli::command();
-        let anchor = cmd.find_subcommand("audit-anchor").unwrap();
-        let adopt = anchor.find_subcommand("adopt").unwrap();
-        let help = adopt.get_long_about().unwrap().to_string();
-        assert!(help.contains("Stop the server first"), "{help}");
-        assert!(help.contains("check the printed tail seq"), "{help}");
-        let status = anchor.find_subcommand("status").unwrap();
-        let help = status.get_long_about().unwrap().to_string();
+        let group = cmd.find_subcommand("history-checkpoint").unwrap();
+        let accept = group.find_subcommand("accept-current").unwrap();
+        let help = accept.get_long_about().unwrap().to_string();
+        for want in [
+            "HUMAN-ONLY",
+            "Stop the server first",
+            "No audit row is written",
+            "check the printed entry number and time",
+            "even a matching",
+            "activity history",
+        ] {
+            assert!(help.contains(want), "{want}: {help}");
+        }
+        let flag = accept
+            .get_arguments()
+            .find(|a| a.get_long() == Some("accept-missing-entries"))
+            .unwrap();
+        let flag = flag.get_help().unwrap().to_string();
+        assert!(flag.contains("even a matching one"), "{flag}");
+        let verify = group.find_subcommand("verify").unwrap();
+        let help = verify.get_long_about().unwrap().to_string();
         assert!(help.contains("not strictly read-only"), "{help}");
+        assert!(help.contains("activity history"), "{help}");
+        for mut c in [cmd.clone(), group.clone(), accept.clone(), verify.clone()] {
+            let text = c.render_long_help().to_string();
+            assert!(!text.contains("anchor"), "{text}");
+        }
     }
 
     #[test]
-    fn audit_anchor_adopt_defaults_to_no_rollback() {
-        let c = Cli::try_parse_from(["bazaar-cli", "audit-anchor", "adopt"]).unwrap();
+    fn accept_current_defaults_to_keeping_an_existing_checkpoint() {
+        let parse = |extra: &[&str]| {
+            let args = ["bazaar-cli", "history-checkpoint", "accept-current"];
+            Cli::try_parse_from(args.iter().chain(extra))
+                .unwrap()
+                .command
+        };
         assert!(matches!(
-            c.command,
+            parse(&[]),
             Some(Command::AuditAnchor(AuditAnchorCommand::Adopt {
                 accept_rollback: false
             }))
         ));
-        let c = Cli::try_parse_from(["bazaar-cli", "audit-anchor", "adopt", "--accept-rollback"])
-            .unwrap();
         assert!(matches!(
-            c.command,
+            parse(&["--accept-missing-entries"]),
             Some(Command::AuditAnchor(AuditAnchorCommand::Adopt {
                 accept_rollback: true
             }))
         ));
-        assert!(Cli::try_parse_from(["bazaar-cli", "audit-anchor"]).is_err());
+        let c = Cli::try_parse_from(["bazaar-cli", "history-checkpoint", "verify"]).unwrap();
+        assert!(matches!(
+            c.command,
+            Some(Command::AuditAnchor(AuditAnchorCommand::Status))
+        ));
+        assert!(Cli::try_parse_from(["bazaar-cli", "history-checkpoint"]).is_err());
+    }
+
+    /// No aliases: every old command and flag fails to parse, alone or mixed with new names.
+    #[test]
+    fn old_commands_and_flags_no_longer_parse() {
+        for old in [
+            &["audit-anchor", "status"][..],
+            &["audit-anchor", "adopt"],
+            &["audit-anchor", "adopt", "--accept-rollback"],
+            &["audit-anchor", "verify"],
+            &["audit-anchor", "accept-current"],
+            &["history-checkpoint", "status"],
+            &["history-checkpoint", "adopt"],
+            &["history-checkpoint", "accept-current", "--accept-rollback"],
+        ] {
+            let args = std::iter::once(&"bazaar-cli").chain(old);
+            assert!(Cli::try_parse_from(args).is_err(), "{old:?}");
+        }
     }
 
     #[test]

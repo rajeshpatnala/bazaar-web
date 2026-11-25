@@ -4,7 +4,7 @@ use std::{future::IntoFuture as _, io::Write as _, net::SocketAddr, path::PathBu
 
 use anyhow::Context as _;
 use bazaar_cli::commands::DB_FILE;
-use bazaar_core::{calendar::MarketCalendar, clock::SystemClock, config::Config};
+use bazaar_core::{calendar::MarketCalendar, clock::SystemClock, config::Config, ports::RepoError};
 use bazaar_server::{
     app, runtime,
     security::{Security, ensure_loopback, loopback_addr},
@@ -103,6 +103,26 @@ async fn shutdown_signal() {
     tracing::info!("shutdown signal received");
 }
 
+/// What the owner should do after a failed start, where there is a known next step. It points at
+/// the check only, never at accepting the current history.
+fn startup_hint(e: &runtime::StartError) -> Option<&'static str> {
+    matches!(e, runtime::StartError::Store(RepoError::Corrupt)).then_some(
+        "Saved data or activity history failed a check; nothing was served. \
+         Run `bazaar-cli history-checkpoint verify` with --data-dir set to the server's data \
+         folder, if you changed it.",
+    )
+}
+
+/// A failed start as the process error: the cause, any hint, then what was being done.
+fn startup_error(e: runtime::StartError) -> anyhow::Error {
+    let hint = startup_hint(&e);
+    let mut err = anyhow::Error::new(e);
+    if let Some(h) = hint {
+        err = err.context(h);
+    }
+    err.context("starting the order pipeline")
+}
+
 #[allow(clippy::too_many_lines)] // one linear startup sequence; each step must fail before the bind
 async fn serve(port_flag: Option<u16>) -> anyhow::Result<()> {
     // Dev fallback file: absent is fine, malformed is an error.
@@ -174,7 +194,7 @@ async fn serve(port_flag: Option<u16>) -> anyhow::Result<()> {
         calendar,
     )
     .await
-    .context("starting the order pipeline")?;
+    .map_err(startup_error)?;
     tracing::info!(report = ?rt.report, "pipeline reloaded");
     let state = AppState::new(
         security.clone(),
@@ -211,13 +231,14 @@ async fn serve(port_flag: Option<u16>) -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .into_future();
     // RISK-142-1: if the driver ends or panics first, serving stops (fail closed), loudly.
-    // The result is kept, not `?`-returned, so stop and the anchor flush below always run.
+    // The result is kept, not `?`-returned, so stop and the checkpoint flush below always run.
     let served = runtime::serve_while_driven(serve, &mut driver_task)
         .await
         .inspect_err(|e| tracing::error!(error = %e, "stopping the server"));
     // `shutdown` stops the driver only if serving ended on its own (a dead driver's handle must
-    // not be polled again, RISK-175-1) and always flushes the audit anchor: the detached write
-    // may still be queued (bounded by the store's own timeout). Flush failure is loud, not fatal.
+    // not be polled again, RISK-175-1) and always flushes the history checkpoint: the detached
+    // write may still be queued (bounded by the store's own timeout). Flush failure is loud, not
+    // fatal.
     let served = runtime::shutdown(
         served,
         &cancel,
@@ -225,7 +246,7 @@ async fn serve(port_flag: Option<u16>) -> anyhow::Result<()> {
         runtime::STOP_WAIT,
         async {
             if let Err(e) = rt.store.anchor_flush().await {
-                tracing::error!(error = %e, "audit anchor not flushed at shutdown");
+                tracing::error!(error = %e, "history checkpoint not written at shutdown; check free disk space and data folder permissions");
             }
         },
     )
@@ -267,6 +288,47 @@ mod tests {
         assert!(resolve_port(None, Some("70000")).is_err());
         assert!(resolve_port(None, Some("0")).is_err());
         assert!(resolve_port(Some(0), None).is_err());
+    }
+
+    const HINT: &str = "Saved data or activity history failed a check; nothing was served. \
+                        Run `bazaar-cli history-checkpoint verify` with --data-dir set to the \
+                        server's data folder, if you changed it.";
+
+    #[test]
+    fn a_corrupt_store_at_start_gets_the_verify_hint_only() {
+        let e = runtime::StartError::Store(RepoError::Corrupt);
+        assert_eq!(startup_hint(&e), Some(HINT));
+        assert!(!HINT.contains("accept"));
+        let chain: Vec<String> = startup_error(e).chain().map(ToString::to_string).collect();
+        assert_eq!(
+            chain,
+            [
+                "starting the order pipeline",
+                HINT,
+                "store: stored data is corrupt",
+                "stored data is corrupt"
+            ]
+        );
+    }
+
+    #[test]
+    fn other_start_errors_get_no_hint() {
+        use runtime::StartError;
+        for e in [
+            StartError::Store(RepoError::Unavailable),
+            StartError::Store(RepoError::Schema),
+            StartError::Store(RepoError::Conflict),
+            StartError::Store(RepoError::TooLarge),
+            StartError::Store(RepoError::Other),
+            StartError::Config("x".into()),
+            StartError::Paper("x".into()),
+        ] {
+            assert_eq!(startup_hint(&e), None, "{e:?}");
+        }
+        let chain = startup_error(StartError::Config("x".into()))
+            .chain()
+            .count();
+        assert_eq!(chain, 2, "context and cause, no hint");
     }
 
     #[test]

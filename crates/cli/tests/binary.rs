@@ -60,3 +60,47 @@ fn no_subcommand_exits_zero() {
     let tmp = tempfile::tempdir().unwrap();
     assert!(run(tmp.path(), &[]).status.success());
 }
+
+/// The binary prints the new wording and keeps its exit codes (`verify` only; temp dirs).
+#[test]
+fn history_checkpoint_verify_without_a_database_fails_with_the_next_step() {
+    let tmp = tempfile::tempdir().unwrap();
+    let o = run(tmp.path(), &["history-checkpoint", "verify"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&o.stderr),
+        "History check not run: no database in the data directory. Check --data-dir, \
+         permissions, and that the server is stopped, then run again.\n"
+    );
+    assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn history_checkpoint_verify_passes_then_names_a_disagreement() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Creates an empty database (it fails only on the missing instruments).
+    run(tmp.path(), &["check-connections"]);
+    let o = run(tmp.path(), &["history-checkpoint", "verify"]);
+    assert_eq!(o.status.code(), Some(0));
+    assert_eq!(
+        out(&o),
+        "History check passed: history checkpoint at entry number 0.\n"
+    );
+    let anchor = tmp.path().join("bazaar.sqlite.anchor");
+    std::fs::write(&anchor, "garbage").unwrap();
+    let o = run(tmp.path(), &["history-checkpoint", "verify"]);
+    assert_eq!(o.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.starts_with("History check failed: the activity history and the history checkpoint"),
+        "{err}"
+    );
+    assert_eq!(std::fs::read(&anchor).unwrap(), b"garbage");
+}
+
+#[test]
+fn the_old_command_name_is_a_usage_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let o = run(tmp.path(), &["audit-anchor", "status"]);
+    assert_eq!(o.status.code(), Some(2));
+}

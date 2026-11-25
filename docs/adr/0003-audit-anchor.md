@@ -33,19 +33,35 @@ hash=<64 lowercase hex>
   write failure there only sets `lag` and logs; startup continues, because refusing to start
   would block exits at a restart with open positions.
 
-## Recovery
-Human-only `bazaar-cli audit-anchor adopt` (built in slice 9b) verifies the chain and writes
-the anchor for the current tail (`SqliteStore::anchor_adopt`). Needed once for an existing
-database and after restoring a backup. Any existing anchor file (ahead, different hash, garbage,
-oversized, or even consistent) is replaced only with the explicit acceptance (`accept_rollback`);
-only a missing file adopts freely. `AdoptReport` names the old seq and the fault found; the CLI also prints the new tail seq and the
-last row's timestamp so the owner can check them against their own records.
+## Terms
+Renamed 2026-11-25 (BZ-F10-S10 slice 1, no aliases). Owner-facing text uses the new words. Rust
+names, the alarm code `audit_anchor_lag`, the log category `anchor_write`, the file
+`bazaar.sqlite.anchor` and the `v1` file format are unchanged. Elsewhere in this ADR, "anchor" is
+the technical name of the history checkpoint.
 
-Stop the server first: adopt takes no lock, and a running server's anchor writer could race it
-(single writer per database). A missing-file adopt trusts the current tail: an attacker who also
-deleted the anchor and cut rows is not detected. Adopt writes no audit row; the printed report
-(old seq, fault, new seq, tail time on stdout) is the only trail. An audit row for adopt is a
-slice 9c follow-up.
+| old | new |
+|---|---|
+| audit log (owner text) | activity history |
+| anchor (owner text) | history checkpoint |
+| `audit-anchor status` | `history-checkpoint verify` |
+| `audit-anchor adopt` | `history-checkpoint accept-current` |
+| `--accept-rollback` | `--accept-missing-entries` |
+
+## Recovery
+Human-only `bazaar-cli history-checkpoint accept-current` (built in slice 9b) verifies the chain
+and writes the anchor for the current tail (`SqliteStore::anchor_adopt`). Needed once for an
+existing database and after restoring a backup. Any existing anchor file (ahead, different hash,
+garbage, oversized, or even consistent) is replaced only with `--accept-missing-entries`; only a
+missing file is accepted without it. The CLI prints the old entry number, the old checkpoint state
+in plain words, the new entry number and the last entry's time so the owner can check them against
+their own records. `bazaar-cli history-checkpoint verify` opens the store like the app does (so
+it is not strictly read-only). A start that fails on corrupt stored data points the owner at
+`verify`, never at `accept-current`.
+
+Stop the server first: `accept-current` takes no lock, and a running server's anchor writer could
+race it (single writer per database). With no checkpoint file it trusts the current tail: an
+attacker who also deleted the anchor and cut rows is not detected. It writes no audit row; the
+printed report on stdout is the only trail. An audit row for it is a slice 9c follow-up.
 
 ## Limits (say so, never claim more)
 - Single writer: the high-water mark is per process; a second process on the same database, or
