@@ -151,6 +151,12 @@ describe("release", () => {
     server.use(http.get(KS, later));
     await vi.advanceTimersByTimeAsync(5_100);
     await waitFor(() => expect(confirm).toBeDisabled());
+    // Latched: the same reading as before comes back, and the open dialog stays disabled.
+    read(killSwitchOn);
+    await vi.advanceTimersByTimeAsync(5_100);
+    await waitFor(() => expect(screen.getByRole("region", { name: "Kill switch", hidden: true })).toHaveTextContent("manual stop"));
+    expect(confirm).toBeDisabled();
+    expect(d).toHaveTextContent("state changed or is no longer confirmed");
     expect(count.posts).toBe(0);
   });
 

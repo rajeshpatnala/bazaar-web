@@ -53,7 +53,7 @@ function useKillSwitchWrite<T>(send: (input: T) => Promise<unknown>) {
 
 /**
  * The server runs the writes in the order they arrive, and two requests can arrive either way round. So an engage
- * clicked while a release is on the wire is sent at once, and again when that release request ends: the stop wins.
+ * clicked during a release is sent at once and again when it ends: this beats a release queued before the second engage.
  */
 export function useKillSwitchWrites() {
   // Settles when the release request in flight ends, however it ends.

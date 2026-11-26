@@ -20,6 +20,8 @@ export function ReleaseDialog({
   const [phrase, setPhrase] = useState("");
   const id = useId();
   const long = tooLong(phrase);
+  const [stale, setStale] = useState(false); // latched: once unconfirmable, only a newly opened dialog can confirm
+  if (!confirmable && !stale) setStale(true);
   return (
     <Modal title="Release the kill switch" onClose={onCancel}>
       <p>
@@ -46,14 +48,14 @@ export function ReleaseDialog({
         Type it exactly as set in config/risk.toml (kill_switch_release_phrase).
       </p>
       {long && <p role="alert">That is too long to be the phrase.</p>}
-      {!confirmable && (
+      {stale && (
         <p role="alert">The kill switch state changed or is no longer confirmed. Close this and check it again.</p>
       )}
       <div className="dialog-actions">
         <Button variant="ghost" onClick={onCancel}>
           Cancel
         </Button>
-        <Button disabled={!confirmable || long || phrase.trim() === ""} onClick={() => onConfirm(phrase)}>
+        <Button disabled={stale || long || phrase.trim() === ""} onClick={() => onConfirm(phrase)}>
           Confirm release
         </Button>
       </div>
