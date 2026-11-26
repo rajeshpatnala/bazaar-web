@@ -118,6 +118,18 @@ then there is no fixed cap on developers - the budget is the governor.
 | efficiency_review | yes |
 | reuse_max_steps | 60 |
 | min_slice_lines | 150 |
+| heavy_builds_at_once | 1 |
+| build_jobs | - |
+| build_wait_minutes | 30 |
+| rustc_wrapper | auto |
+- `heavy_builds_at_once`: compiling commands (cargo build/clippy/test, or a step marked `"heavy"`) that may run at the
+  same time across the checkout and every worktree; the rest wait for a free slot. `1` keeps parallel agents from
+  running the machine out of memory; `0` = no limit.
+- `build_jobs`: cap on cargo's parallel jobs (and test threads) for kit-run builds; `-` = cargo's default (one per
+  CPU). A lower number uses less memory per build.
+- `build_wait_minutes`: how long a gate waits for a build slot before it stops and says another build is running.
+- `rustc_wrapper`: `auto` = use sccache when it is installed (crates compiled once, shared by every worktree);
+  `none` = never; anything else is used as RUSTC_WRAPPER.
 - `work_mode`: `worktrees` (developers in parallel, each in its own git worktree) or `in-place` (one developer at a
   time in this checkout, for repos where worktrees fail). `just preflight` recommends one; `just work-mode <mode>` switches.
 - `small_max_files`: work touching at most this many files in one area is size S (no plan, one developer, gate only).

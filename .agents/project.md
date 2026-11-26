@@ -1,7 +1,7 @@
 # Project profile
 
 The manager fills this in with the user at the start (keep it under 60 lines). Every agent reads it.
-Filled 2026-11-18 with the owner; updated 2026-11-21 (live mode, UI direction). Stack and layering: `bz-repo-structure`, `bz-architecture`.
+Filled 2026-11-18 with the owner; updated 2026-11-21 (live mode, UI direction), 2026-11-27 (reviewed: scope and targets kept; position tracking, DuckDB). Stack and layering: `bz-repo-structure`, `bz-architecture`.
 
 ## Purpose
 Bazaar is a personal, single-user trading assistant for Indian equities and F&O, running on the owner's Mac.
@@ -9,7 +9,8 @@ Scope: NSE/BSE cash equity now (intraday and swing trading); F&O is a later phas
 It scans the market, produces rule-based recommendations with plain-English "Why?" panels, backtests strategies
 (Indian cost model), runs a paper account by default (paper and live are both supported, switched in the UI; live is selected server-side),
 and routes any order through the DecisionGate and an explicit
-user approval. There is no "place order" endpoint. Not investment advice; the disclaimer stays visible.
+user approval. There is no "place order" endpoint. Required, not yet in the build (owner, 2026-11-23): track each open position daily, watching price behaviour and events,
+and give rule-based hold / sell / reduce / add suggestions over the trade's life (every order still gated and approved). Not investment advice; the disclaimer stays visible.
 
 ## Consumers / API style
 One user, in a browser on the same Mac. axum 0.8 server bound to 127.0.0.1 only: REST `/api/v1` (JSON, problem+json
@@ -29,6 +30,7 @@ errors, utoipa OpenAPI -> generated TS types) plus a WebSocket feed. Auth: launc
 - TradingView: charting only - TradingView widgets/chart links in the UI alongside our own lightweight-charts. No scraping
   and no data extraction from TradingView; any inbound alert/webhook idea needs the owner's approval first.
   Zerodha (Kite) stays the only data and broker source.
+- DuckDB links the system library, not the bundled build (BZ-106, 2026-11-21): the version must match the crate (`just --list` has the check); paths in `.cargo/config.toml`. A Dockerfile install step comes later.
 - NSE/BSE official bhavcopy downloads. No scraping. Live broker crate only behind the `live-trading` feature (never default); paper stays the default mode.
 
 ## Input data / parsing
