@@ -10,6 +10,9 @@ Size: M | L   Estimate: <tokens>   Status: draft | approved | in progress | done
 
 ## Acceptance criteria
 - Given ..., when ..., then ...
+<!-- plan review: add every case from `just docs "plan checklist"` that applies, as its own criterion here (e.g. "Given
+     the network is offline, when an approval is pending, then Approve stays disabled"). These criteria are the
+     developer's requirements and what the final reviewers check. -->
 
 ## Out of scope
 -

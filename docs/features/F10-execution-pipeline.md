@@ -148,6 +148,7 @@ Fix round (PR 133): `reload` is idempotent (ids already queued or finished are s
 - RISK-176-4 (a refused reset leaves no audit row or log line): BZ-F10-S10.
 - BZ-F10-S10 (RISK-179-1): decide and test whether DailyLossBreaker::new fails closed on an unreadable trip row, and how that latch clears.
 - CR-175-4, CR-175-5 (nits from the PR 175 review): deferred.
+- RG-174-8 (nit, PR 174, accepted residual, optional): `anchored` is set only after a successful write, so on a new database whose checkpoint folder stays unwritable every commit writes inline (a stalled disk costs up to 5 s per commit). defer: the next PR that changes `anchor_after_commit` in `crates/store/src/anchor.rs`.
 - Adopt audit row (SEC-175-2): slice 9c follow-up; today only the printed report is the trail.
 - RISK-152-1 / CR-152-1: the Rs 60 sizing floor rejected every equity order once real costs are wired (`BufferBelowFloor`). Fixed in BZ-522: allowance is `max(cost, floor)` in sizing, no `risk.toml` change (floor now means "assume at least Rs 60 cost"; owner confirmed 2026-11-23). BZ-519 depends on BZ-522.
 - RISK-144-4: `GET /killswitch` must show the pipeline latch (pipeline accessor), not only the stored state. Kept on the T2/BZ-206 list.

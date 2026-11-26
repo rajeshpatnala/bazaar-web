@@ -28,6 +28,8 @@ rounds and the next step in your area: keep what you know instead of re-reading 
 
 1. Read your slice with `just plan <id> --slice <n>` (or the brief in your prompt) - not the whole plan - then only the files you change (`.agents/codemap.md` before searching).
    Look up rules and patterns with `just docs "<topic>"`; never read whole handbooks.
+   The acceptance criteria are your requirements: build and test to them. A case they don't cover that you think
+   matters is a question back (step 3), not a guess.
 1b. Read `.agents/known-pitfalls.md` and the checklists in your slice row (the Top 10 in your brief first, the full
    checklists for anything it does not cover); write the tests for the slice's `reject if`
    lines and failure modes first.
@@ -36,12 +38,14 @@ rounds and the next step in your area: keep what you know instead of re-reading 
 3. Ambiguous or conflicting with the rules? **Stop and return a question.** Don't guess contracts, data meaning or security.
 4. Implement within scope with **unit tests for every new behaviour and error path** (fakes only). A stop hook blocks you if
    production code changed without tests (`No-Tests: <reason>` trailer only for genuinely untestable changes).
+   **Safety tests prove their guard:** for each test that guards a refusal, limit, auth check or fail-closed path,
+   remove or invert the guard once, see the test fail, put the guard back, and name it under `Guard proof`.
 4b. A check you may not run (dev server, live service, human-only recipe)? Use your stack's substitute (T1 text in
    `just docs verify`), or the nearest automated check plus a `not verified:` line in the handoff. Never stop to ask.
 5. Records the plan asks for (feature record, bug record, regression test first on `fix/B<n>`): `just docs "records and bugs"`.
 6. Verify **T0 + T1, never T2**: `just dev-gate` until it passes; T1 only when the change is visible to a user or caller:
      Quant/backtest/data/execution: run the changed unit once on a fixture (one targeted
-     `cargo nextest run -p bazaar-<crate> <test>` or one `just cli-fixture <subcommand>`) and state the value you saw vs
+     `just cargo nextest run -p bazaar-<crate> <test>` or one `just cli-fixture <subcommand>`) and state the value you saw vs
      the reference. UI: one screenshot of the changed screen with `just ui-shot <route>` (mocked API; it starts and stops its own
      dev server - never `ui-dev`), and if Playwright browsers are missing, a render test of that screen instead; API: one in-process router test (`oneshot`) for the changed route. Never call the live broker
      API and never run the HUMAN-ONLY recipes (`run`, `ui-dev`, `set-secret`, `refresh-instruments`, `import-bhavcopy`, `backtest`).
@@ -68,6 +72,7 @@ Changed: <modules/files, 3-6 bullets>     Tests: <added (count, files)>
 Map: <new modules / routes / migrations / config keys>     Record: <added/updated, or n/a>
 Where to look: <one line the owner can follow: page/route/command + what to do>
 Failure modes: <mode> -> <how handled> -> <test name>; one per plan failure mode and reject-if line (gap = say so)
+Guard proof: <safety test> fails without <guard> (one per safety test; n/a when none)
 Checklists: <sections>; self-check: <gaps fixed / none>; same pattern searched in whole diff: yes
 Notes for reviewers: <risks, decisions, new config keys (names only), new deps>     Questions: <if any>
 ```

@@ -1,7 +1,7 @@
 ---
 name: risk-guardian
 description: Capital-protection reviewer with veto. Launch on every PR touching crates risk, execution, paper, broker or scanner, config/risk.toml, the order-intent/approval/kill-switch endpoints, or the recommendation or approval UI. Blocks anything that weakens the DecisionGate, risk limits, approvals, kill switch, audit log or automation safety, so decisions stay rule-based rather than emotional.
-model: claude-sonnet-5-5
+model: opus
 effort: high
 maxTurns: 40
 tools: Read, Glob, Grep, Bash, Write, Edit

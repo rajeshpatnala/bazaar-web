@@ -19,6 +19,28 @@ AGENTS = ROOT / ".claude" / "agents"
 SETTINGS = ROOT / ".claude" / "settings.json"
 
 
+def split_row(line: str) -> list:
+    """Cells of one markdown table row, split only on unescaped pipes (`a \\| b` stays one cell). A copy of
+    kit.py split_row: keep them identical (kit-test checks)."""
+    s = line.strip()
+    if not s.startswith("|"):
+        return []
+    cells, cur, i = [], "", 1
+    while i < len(s):
+        if s[i] == "\\" and i + 1 < len(s):
+            cur, i = cur + s[i:i + 2], i + 2
+            continue
+        if s[i] == "|":
+            cells.append(cur)
+            cur = ""
+        else:
+            cur += s[i]
+        i += 1
+    if cur.strip():  # a row without its closing pipe
+        cells.append(cur)
+    return cells
+
+
 def is_int(lo=1, hi=None):
     def check(v):
         if not v.replace(",", "").replace("_", "").isdigit():
@@ -93,7 +115,7 @@ def tables(text: str, first: str) -> list:
                 out.append((header, rows))
             header, rows = None, []
             continue
-        cells = [c.strip().strip("`") for c in s.strip("|").split("|")]
+        cells = [c.strip().strip("`") for c in split_row(s)]
         if header is None:
             if cells and cells[0].lower() == first:
                 header = [c.lower() for c in cells]

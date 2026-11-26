@@ -263,12 +263,14 @@
       {
         "name": "deny",
         "cmd": "cargo deny check",
+        "cache": false,
         "needs": "cargo deny --version",
         "optional": true
       },
       {
         "name": "ui-audit",
         "cmd": "pnpm -C web audit --prod",
+        "cache": false,
         "needs": "test -f web/package.json",
         "optional": true
       }

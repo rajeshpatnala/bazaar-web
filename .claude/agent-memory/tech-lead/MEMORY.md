@@ -1,1 +1,0 @@
-- [Findings table pipes](feedback_findings_table_pipes.md) - bare `||` in a findings cell breaks status parsing; use words or `\|\|`

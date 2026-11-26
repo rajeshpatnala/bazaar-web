@@ -11,8 +11,8 @@ New agents you hire get their rows here automatically.
 | agent | model | effort | max_turns | max_tokens_per_run |
 |---|---|---|---|---|
 | manager | claude-sonnet-5-5 | medium | - | - |
-| tech-lead | claude-sonnet-5-5 | high | 40 | 200,000 |
-| architect | claude-sonnet-5-5 | high | 30 | 200,000 |
+| tech-lead | opus | high | 40 | 200,000 |
+| architect | opus | high | 30 | 200,000 |
 | dev-data | claude-sonnet-5-5 | medium | 80 | 400,000 |
 | dev-quant | claude-sonnet-5-5 | medium | 80 | 400,000 |
 | dev-backtest | claude-sonnet-5-5 | medium | 80 | 400,000 |
@@ -25,9 +25,9 @@ New agents you hire get their rows here automatically.
 | security-reviewer | claude-sonnet-5-5 | medium | 15 | 150,000 |
 | cicd | claude-sonnet-5-5 | medium | 40 | 300,000 |
 | build-runner | claude-sonnet-5-5 | medium | 10 | 100,000 |
-| market-strategist | claude-sonnet-5-5 | high | 40 | 250,000 |
-| risk-guardian | claude-sonnet-5-5 | high | 40 | 200,000 |
-| quant-reviewer | claude-sonnet-5-5 | high | 40 | 200,000 |
+| market-strategist | opus | high | 40 | 250,000 |
+| risk-guardian | opus | high | 40 | 200,000 |
+| quant-reviewer | opus | high | 40 | 200,000 |
 | prototyper | claude-sonnet-5-5 | medium | 30 | 150,000 |
 | combined-reviewer | claude-sonnet-5-5 | medium | 6 | 80,000 |
 
@@ -118,6 +118,18 @@ then there is no fixed cap on developers - the budget is the governor.
 | efficiency_review | yes |
 | reuse_max_steps | 60 |
 | min_slice_lines | 150 |
+| heavy_builds_at_once | 1 |
+| build_jobs | - |
+| build_wait_minutes | 30 |
+| rustc_wrapper | auto |
+- `heavy_builds_at_once`: compiling commands (cargo build/clippy/test, or a step marked `"heavy"`) that may run at the
+  same time across the checkout and every worktree; the rest wait for a free slot. `1` keeps parallel agents from
+  running the machine out of memory; `0` = no limit.
+- `build_jobs`: cap on cargo's parallel jobs (and test threads) for kit-run builds; `-` = cargo's default (one per
+  CPU). A lower number uses less memory per build.
+- `build_wait_minutes`: how long a gate waits for a build slot before it stops and says another build is running.
+- `rustc_wrapper`: `auto` = use sccache when it is installed (crates compiled once, shared by every worktree);
+  `sccache` = always; `none` = never. Any other wrapper comes only from your own `RUSTC_WRAPPER` environment variable.
 - `work_mode`: `worktrees` (developers in parallel, each in its own git worktree) or `in-place` (one developer at a
   time in this checkout, for repos where worktrees fail). `just preflight` recommends one; `just work-mode <mode>` switches.
 - `small_max_files`: work touching at most this many files in one area is size S (no plan, one developer, gate only).

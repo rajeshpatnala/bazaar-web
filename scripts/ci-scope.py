@@ -22,6 +22,10 @@ DOCS_PREFIX = ("docs/", ".agents/", ".claude/")
 DOCS_FILES = {"CHANGELOG.md", "README.md", "AGENT-GUIDE.md", "AGENT-KIT.md", "AGENT-SETTINGS.md", "CLAUDE.md",
               "version.txt", ".release-please-manifest.json"}
 TEST_DIRS = ("tests/", "benches/", "examples/")
+# Web files that Rust tests read -> crates/<dir> whose tests read it, so a change runs them. A kit test
+# (`just kit-test`) fails when a Rust source names a web/ file that is missing here.
+WEB_READ_BY_RUST = {"web/package.json": "cli", "web/src/shared/disclaimer.ts": "cli",
+                    "web/src/api/schema.d.ts": "server"}
 
 
 def why(msg):
@@ -63,8 +67,9 @@ def main():
         why(f"full run: shared or unknown paths changed: {' '.join(other[:5])}")
         return emit(True, True, True, [])
 
+    readers = {WEB_READ_BY_RUST[f] for f in files if f in WEB_READ_BY_RUST}
     pkgs = set()
-    if crate_files:
+    if crate_files or readers:
         try:
             meta = json.loads(run("cargo", "metadata", "--format-version", "1", "--no-deps", "--locked"))
         except Exception as e:
@@ -95,7 +100,12 @@ def main():
                 if r not in pkgs:
                     pkgs.add(r)
                     todo.append(r)
-    emit(False, bool(crate_files), web, pkgs)
+        for d in readers:
+            if d not in by_dir:
+                why(f"full run: unknown crate dir {d}")
+                return emit(True, True, True, [])
+            pkgs.add(by_dir[d])  # only its own tests read the web file: no dependents
+    emit(False, bool(pkgs), web, pkgs)  # rust=yes never comes with an empty package list
 
 
 try:

@@ -5,9 +5,11 @@
 
 Each test builds a throwaway git repo with the kit's scripts, a small stack.json and team.md, then runs kit.py the
 way agents do (`--branch` mode, which needs no PR). Run after any change to .claude/kit/*.py."""
+import ast
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -42,7 +44,7 @@ class KitRepo:
     def __init__(self):
         self.dir = pathlib.Path(tempfile.mkdtemp(prefix="kit-test-"))
         (self.dir / ".claude").mkdir()
-        shutil.copytree(KIT, self.dir / ".claude" / "kit", ignore=shutil.ignore_patterns("tests", "__pycache__"))
+        shutil.copytree(KIT, self.dir / ".claude" / "kit", ignore=shutil.ignore_patterns("tests", "__pycache__", "installer"))
         (self.dir / ".agents" / "reviews").mkdir(parents=True)
         (self.dir / ".agents" / "plans").mkdir(parents=True)
         (self.dir / ".agents" / "stack.json").write_text(json.dumps(STACK))
@@ -274,7 +276,7 @@ class TriageTests(Base):
         text = (self.r.dir / f".agents/reviews/F1/{ref}/{name}").read_text()
         for line in text.splitlines():
             if line.startswith(f"| {rid} |"):
-                return line.strip().strip("|").split("|")[-1].strip()
+                return re.split(r"(?<!\\)\|", line.strip().strip("|"))[-1].strip()
         return None
 
     def test_reviewer_deferral_is_respected_for_minor_and_escalated_for_blocker(self):
@@ -345,6 +347,97 @@ class RoundTwoTests(Base):
         self.assertIn("Fix-round rules", out)
 
 
+class TableSafetyTests(Base):
+    """P0 (kit recommendations 2026-11-26): an escaped pipe or a malformed row can never hide an open finding."""
+    PIPE_ISSUE = r"`a \| b` is parsed as two cells"
+    PIPE_FIX = r"split on `(?<!\\)\|` only"
+
+    def approval(self, ref):
+        return self.r.dir / f".agents/reviews/F1/{ref}/approval.md"
+
+    def test_escaped_pipe_major_stays_open_in_save_review_triage_fix_list_and_merge_check(self):
+        b, ref = "feat/F1-pipe", "feat-F1-pipe"
+        self.r.branch(b, {"src/lib.rs": "pub fn a() -> i32 { 2 }\n"})
+        rc, out = self.r.review(b, "code-review.md", "REQUEST CHANGES",
+                                [row("CR-1-1", "major", issue=self.PIPE_ISSUE, fix=self.PIPE_FIX)])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("1 finding(s)", out)
+        rc, out = self.r.kit("triage", "F1", "--ref", ref)
+        self.assertIn("1 decided by the defaults", out)
+        self.assertIn("waiting for fix round", out)
+        self.assertNotIn("approved to merge", out)
+        self.assertFalse(self.approval(ref).exists())
+        text = (self.r.dir / f".agents/reviews/F1/{ref}/code-review.md").read_text()
+        self.assertIn(r"a \| b", text)  # triage rewrote the row and kept the escape
+        rc, out = self.r.kit("fix-list", "--branch", b, "--feature", "F1")
+        self.assertIn("CR-1-1", out)
+        self.r.approve(b)
+        self.r.gate_pass(b)
+        rc, out = self.r.kit("merge-check", "--branch", b, "--feature", "F1")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAIL code review approved", out)
+
+    def test_hidden_major_under_an_approving_verdict_fails_merge_check(self):
+        b = "feat/F1-hidden"
+        self.r.branch(b, {"src/lib.rs": "pub fn a() -> i32 { 2 }\n"})
+        rc, out = self.r.review(b, "code-review.md", "APPROVE",
+                                [row("CR-1-1", "major", issue=self.PIPE_ISSUE, fix=self.PIPE_FIX, dec="fix now (auto)")])
+        self.r.approve(b)
+        self.r.gate_pass(b)
+        rc, out = self.r.kit("merge-check", "--branch", b, "--feature", "F1")
+        self.assertEqual(rc, 1, out)
+        self.assertRegex(out, r"FAIL code review approved \(verdict APPROVE; open: CR-1-1")
+
+    def test_malformed_row_is_refused_by_save_review_and_blocks_triage_and_merge(self):
+        b, ref = "feat/F1-bad", "feat-F1-bad"
+        self.r.branch(b, {"src/lib.rs": "pub fn a() -> i32 { 2 }\n"})
+        bad = row("CR-1-1", "major", issue="a | b unescaped", status="open")
+        rc, out = self.r.review(b, "code-review.md", "APPROVE", [bad])
+        self.assertEqual(rc, 1, out)
+        self.assertIn("wrong number of cells in CR-1-1", out)
+        # a file that bypassed save-review (hand edit) still can't be approved or merged
+        rc, out = self.r.kit("triage", "F1", "--ref", ref)
+        self.assertIn("malformed row: CR-1-1", out)
+        self.assertFalse(self.approval(ref).exists())
+        self.r.approve(b)
+        self.r.gate_pass(b)
+        rc, out = self.r.kit("merge-check", "--branch", b, "--feature", "F1")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("CR-1-1 (malformed row)", out)
+
+    def test_empty_or_unknown_status_is_refused(self):
+        b = "feat/F1-st"
+        self.r.branch(b, {"src/lib.rs": "pub fn a() -> i32 { 2 }\n"})
+        for status, msg in (("", "empty status on CR-1-1"), ("fxied", "unknown status on CR-1-1")):
+            rc, out = self.r.review(b, "code-review.md", "REQUEST CHANGES", [row("CR-1-1", "major", status=status)])
+            self.assertEqual(rc, 1, out)
+            self.assertIn(msg, out)
+
+    def test_triage_writes_no_approval_while_a_review_requests_changes(self):
+        b, ref = "feat/F1-rc", "feat-F1-rc"
+        self.r.branch(b, {"src/lib.rs": "pub fn a() -> i32 { 2 }\n"})
+        self.r.review(b, "code-review.md", "REQUEST CHANGES", [row("CR-1-1", "minor", status="fixed", dec="fix now (auto)")])
+        rc, out = self.r.kit("triage", "F1", "--ref", ref)
+        self.assertIn("waiting for fix round", out)
+        self.assertIn("Verdict REQUEST CHANGES", out)
+        self.assertFalse(self.approval(ref).exists())
+        self.r.review(b, "code-review.md", "APPROVE", [row("CR-1-1", "minor", status="fixed", dec="fix now (auto)")])
+        rc, out = self.r.kit("triage", "F1", "--ref", ref)
+        self.assertIn("approved to merge", out)
+        self.assertTrue(self.approval(ref).exists())
+
+
+    def test_fix_list_prints_decided_findings_and_lists_undecided_apart(self):
+        b = "feat/F1-u"
+        self.r.branch(b, {"src/lib.rs": "pub fn a() -> i32 { 2 }\n"})
+        self.r.review(b, "code-review.md", "REQUEST CHANGES", [row("CR-1-1", "major", dec="fix now (auto)"),
+                                                             row("CR-1-2", "question", issue="should we keep it?")])
+        rc, out = self.r.kit("fix-list", "--branch", b, "--feature", "F1")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Fix exactly these 1 finding(s)", out)
+        self.assertIn("Not in this brief: 1 finding(s) not decided yet (CR-1-2)", out)
+
+
 class ToolingTests(Base):
     def test_help_never_runs_a_command_and_unknown_flags_are_refused(self):
         rc, out = self.r.kit("records-pr", "--help")
@@ -370,6 +463,27 @@ class ToolingTests(Base):
         files = self.r.git("show", "--name-only", "--format=", self.r.git("branch", "--list", "docs/agents-records-*").strip(" *"))
         self.assertIn(".agents/owner-input/F2-charges.md", files)
         self.assertIn(".agents/handoff-2026-11-20.md", files)
+
+    def test_export_kit_includes_installer_and_engine(self):
+        rc, out = self.r.kit("export-kit", "--list")
+        self.assertIn(".claude/kit/kit.py", out.split())
+        self.assertIn("not found", out)
+        self.assertIn("install.py, install.sh", out)
+        self.r.write(".claude/kit/installer/install.py", "# kit installer\n")
+        self.r.write(".claude/kit/installer/install.sh", "#!/bin/sh\n")
+        self.r.write("install.py", "# an older hand-copied installer\n")
+        rc, out = self.r.kit("export-kit", "--list")
+        listed = out.split()
+        self.assertEqual(listed.count("install.py"), 1)
+        self.assertIn("install.sh", listed)
+        self.assertNotIn(".claude/kit/installer/install.py", listed)
+        self.assertNotIn("not found", out)
+        z = self.r.dir.parent / f"{self.r.dir.name}-test.zip"
+        self.r.kit("export-kit", "--out", str(z))
+        import zipfile
+        with zipfile.ZipFile(z) as f:
+            self.assertEqual(f.read("install.py").decode(), "# kit installer\n")  # the installed kit's copy wins
+        z.unlink()
 
 
 class ReportTests(Base):
@@ -405,6 +519,23 @@ class ReportTests(Base):
         self.assertIn("Spend by role", report)
         self.assertNotIn("code-reviewer relaunched", report)
 
+    def test_efficiency_takes_any_task_id_and_session_mode_counts_only_its_reviews(self):
+        led = self.r.dir / ".agents" / "budget.csv"
+        led.write_text("date,time,task,agent,tokens,note,source,processed,start,session,start_cached,cost_eq\n"
+                       "2026-11-20,10:00,LIVE,dev-core,100000,\"50 steps, id a1\",auto,1,10000,s1,0,500000\n"
+                       "2026-11-20,11:00,F1,dev-core,100000,\"50 steps, id a3\",auto,1,10000,s2,0,500000\n")
+        rc, out = self.r.kit("efficiency", "LIVE")
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(list((self.r.dir / ".agents" / "reports").glob("efficiency-LIVE-*.md")))
+        for i in (1, 2, 3):  # an older feature's review rounds must not count for session s1
+            self.r.write(f".agents/reviews/F9/pr-{i}/code-review.md", "Verdict: APPROVE\nRound: 3\n")
+        rc, out = subprocess.run([sys.executable, str(self.r.dir / ".claude/kit/kit.py"), "efficiency", "--session"],
+                                 cwd=self.r.dir, capture_output=True, text=True,
+                                 env=dict(os.environ, KIT_ROOT=str(self.r.dir), CLAUDE_CODE_SESSION_ID="s1")).returncode, ""
+        self.assertEqual(rc, 0)
+        report = max((self.r.dir / ".agents" / "reports").glob("efficiency-*.md"), key=lambda f: f.stat().st_mtime).read_text()
+        self.assertIn("| PR review folders | 0;", report)
+
 
 class NitCostTests(Base):
     LIB = "".join(f"pub fn f{i}() -> i32 {{ {i} }}\n" for i in range(30))
@@ -413,7 +544,7 @@ class NitCostTests(Base):
         text = (self.r.dir / f".agents/reviews/F1/{ref}/{fname}").read_text()
         for line in text.splitlines():
             if line.startswith(f"| {rid} "):
-                return line.strip().strip("|").split("|")[-1].strip()
+                return re.split(r"(?<!\\)\|", line.strip().strip("|"))[-1].strip()
         return None
 
     def edit(self, b, files):
@@ -429,7 +560,12 @@ class NitCostTests(Base):
         self.r.review(name, "code-review.md", "APPROVE", rows)
         ref = name.replace("/", "-")
         rc, out = self.r.kit("triage", "F1", "--ref", ref)
-        self.assertIn("approved to merge", out)
+        if any(r[7].lower().startswith("fix now") for r in rows):
+            # P0 (2026-11-26): no approval while a fix-now finding is unconfirmed; triage approves after the fix push
+            self.assertIn("waiting for fix round", out)
+            self.assertFalse((self.r.dir / f".agents/reviews/F1/{ref}/approval.md").exists())
+        else:
+            self.assertIn("approved to merge", out)
         return name, ref
 
     def test_nit_is_deferred_by_default_minor_and_security_nit_are_not(self):
@@ -636,6 +772,93 @@ class NitCostTests(Base):
         self.assertEqual(old, self.approval_text(ref))
 
 
+
+class BuildEconomyTests(Base):
+    """Builds run only when something they read changed, never twice on the same inputs, and one at a time."""
+
+    def use_steps(self, steps):
+        st = json.loads((self.r.dir / ".agents/stack.json").read_text())
+        st["gate"] = {"steps": steps}
+        (self.r.dir / ".agents/stack.json").write_text(json.dumps(st))
+        self.r.commit("chore: gate steps")
+
+    def runs(self):
+        f = self.r.dir / "ran.txt"
+        return f.read_text().count("x") if f.exists() else 0
+
+    STEP = {"name": "build", "cmd": "printf x >> ran.txt", "paths": ["src/**"], "heavy": True}
+
+    def test_steps_skip_when_nothing_they_read_changed_and_reuse_a_pass(self):
+        self.use_steps([self.STEP])
+        (self.r.dir / ".gitignore").write_text((self.r.dir / ".gitignore").read_text() + "ran.txt\n")
+        self.r.commit("chore: ignore")
+        self.r.git("switch", "-q", "-c", "feat/F1-docs")
+        self.r.write("docs/note.md", "only docs\n")
+        rc, out = self.r.kit("gate")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("skip build (no change to its inputs", out)
+        self.assertEqual(self.runs(), 0)
+        self.r.write("src/lib.rs", "pub fn a() -> i32 { 9 }\n")
+        rc, out = self.r.kit("gate")
+        self.assertEqual((rc, self.runs()), (0, 1), out)
+        rc, out = self.r.kit("gate")
+        self.assertIn("skip build (passed before on exactly these inputs", out)
+        self.assertEqual(self.runs(), 1)
+        rc, out = self.r.kit("gate", "--fresh")
+        self.assertEqual(self.runs(), 2)
+        self.r.write("src/lib.rs", "pub fn a() -> i32 { 10 }\n")  # new inputs: runs again
+        self.r.kit("gate")
+        self.assertEqual(self.runs(), 3)
+
+    def test_a_failed_step_is_not_remembered(self):
+        self.use_steps([{"name": "build", "cmd": "false", "paths": ["src/**"]}])
+        self.r.git("switch", "-q", "-c", "feat/F1-fail")
+        self.r.write("src/lib.rs", "broken\n")
+        for _ in range(2):
+            rc, out = self.r.kit("gate")
+            self.assertEqual(rc, 1, out)
+            self.assertIn("FAIL build", out)
+
+    def test_heavy_step_waits_for_the_build_slot_and_gets_the_job_cap(self):
+        import fcntl
+        self.r.set("build_jobs", "2")
+        self.use_steps([{"name": "build", "cmd": "echo jobs=$CARGO_BUILD_JOBS > jobs.txt", "paths": ["src/**"], "heavy": True}])
+        self.r.git("switch", "-q", "-c", "feat/F1-lock")
+        self.r.write("src/lib.rs", "pub fn a() -> i32 { 3 }\n")
+        lock = open(self.r.dir / ".git" / "kit-build-0.lock", "a+")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            r = subprocess.run([sys.executable, str(self.r.dir / ".claude/kit/kit.py"), "gate"], cwd=self.r.dir,
+                               capture_output=True, text=True, env=dict(os.environ, KIT_ROOT=str(self.r.dir), KIT_BUILD_WAIT="2"))
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("waiting for a build slot", r.stdout + r.stderr)
+            self.assertIn("no build slot", r.stdout + r.stderr)
+        finally:
+            lock.close()
+        rc, out = self.r.kit("gate")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual((self.r.dir / "jobs.txt").read_text().strip(), "jobs=2")
+
+    def test_cargo_steps_ignore_docs_but_not_config(self):
+        st = {"name": "lint", "cmd": "cargo clippy"}
+        paths = self.k_paths(st)
+        reads = lambda x: self.k.reads(x, paths)
+        self.assertFalse(reads("docs/guide.md"))
+        self.assertFalse(reads(".agents/board.md"))
+        self.assertTrue(reads("crates/core/src/lib.rs"))
+        self.assertTrue(reads("config/limits.toml"))  # tests may read it
+        self.assertTrue(self.k.is_heavy(st))
+        self.assertFalse(self.k.is_heavy({"name": "fmt", "cmd": "cargo fmt --all -- --check"}))
+
+    def k_paths(self, st):
+        import importlib.util
+        os.environ["KIT_ROOT"] = str(self.r.dir)
+        spec = importlib.util.spec_from_file_location("kit_be", self.r.dir / ".claude" / "kit" / "kit.py")
+        self.k = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.k)
+        return self.k.step_paths(st)
+
+
 class FunctionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -777,6 +1000,304 @@ class FunctionTests(unittest.TestCase):
         _, rows = self.k.findings_text("Verdict: APPROVE\n\n| id | sev | where | check | status |\n|---|---|---|---|---|\n| Q-1 | must-fix | a.rs:3 | x | open |\n")
         self.assertEqual(rows[0]["severity"], "major")
         self.assertEqual(rows[0]["file:line"], "a.rs:3")
+
+    def test_split_row_keeps_escaped_pipes_in_one_cell(self):
+        self.assertEqual(self.k.split_row(r"| a \| b | c |"), [r" a \| b ", " c "])
+        self.assertEqual(self.k.split_row(r"| a \\| b |"), [r" a \\", " b "])  # an escaped backslash, then a real pipe
+        self.assertEqual(self.k.split_row("| a | b"), [" a ", " b"])
+        self.assertEqual(self.k.split_row("not a row | x"), [])
+        _, rows = self.k.findings_text("Verdict: APPROVE\n\n| id | severity | issue | status |\n|---|---|---|---|\n"
+                                       r"| X-1 | major | `a \| b` | open |" "\n| X-2 | major | a | b | fixed |\n")
+        self.assertEqual(rows[0]["status"], "open")
+        self.assertNotIn("_malformed", rows[0])
+        self.assertIn("_malformed", rows[1])
+        self.assertEqual(self.k.open_blockers(rows, {"major"}), ["X-1", "X-2 (malformed row)"])
+
+    def test_status_states_fail_closed(self):
+        st = self.k.status_state
+        for s in ("open", "", "not fixed (accepted)", "partly fixed", "disputed", "Open (non-blocking)", "fix now"):
+            self.assertEqual(st(s), "open", s)
+        for s in ("fixed", "fixed (round 2)", "Fixed in abc123", "accepted risk", "deferred to s5", "verified", "closed"):
+            self.assertEqual(st(s), "closed", s)
+        for s in ("fxied", "done-ish", "rounding fixed"):
+            self.assertEqual(st(s), "unknown", s)
+            self.assertTrue(self.k.is_open({"status": s}))
+
+    def test_every_table_parser_copy_matches_kit_py(self):
+        import inspect
+        want = inspect.getsource(self.k.split_row).split('"""')[2].strip()  # the body, after the docstring
+        copies = [KIT / n for n in ("budget.py", "agents_sync.py", "new_agent.py")] + \
+            [p for p in (REPO / "install.py", KIT / "installer" / "install.py") if p.exists()]
+        for f in copies:
+            text = f.read_text()
+            self.assertTrue("def split_row(" in text, f"{f.name}: no split_row copy")
+            body = text.split("def split_row(", 1)[1].split('"""')[2].split("\n\n\n")[0].strip()
+            self.assertTrue(body == want, f"{f.name}: split_row differs from kit.py")
+            naive = [l.strip() for l in text.splitlines() if '.split("|")' in l and '["matcher"]' not in l]
+            self.assertFalse(naive, f"{f.name}: naive table split: {naive[:2]}")
+
+    def test_same_spot_escalates_only_when_fixes_differ(self):
+        c = self.k.fixes_conflict
+        self.assertFalse(c({"assert the error message", "Assert the error message."}))
+        self.assertFalse(c({"use `checked_add` here;", "Use  checked_add here, "}))  # formatting only
+        self.assertFalse(c({"add a check", ""}))
+        self.assertTrue(c({"assert the refusal reason", "also assert the refusal reason in the test"}))
+        self.assertTrue(c({"cache the result", "do not cache the result"}))
+        self.assertTrue(c({"add a timeout", "remove the timeout"}))
+        self.assertTrue(c({"return early when the list is empty", "make the field optional in the schema"}))
+
+    def test_a_disputed_status_with_a_reason_goes_to_the_tech_lead(self):
+        for status in ("disputed", "disputed: the check already exists", "**Disputed**: not a bug"):
+            r = {"id": "CR-9", "severity": "major", "status": status, "suggested fix": "add a check", "file:line": "a:1"}
+            self.assertEqual(self.k.triage_decision("code-review.md", r, {}, False, set()),
+                             ("", "disputed by the developer"), status)
+
+
+def load_module(name: str, path: pathlib.Path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class BuildGuardTests(Base):
+    """What `just cargo` may run, which gate steps may be skipped, and what team.md may make a build execute."""
+
+    use_steps = BuildEconomyTests.use_steps
+    k_paths = BuildEconomyTests.k_paths
+
+    def setUp(self):
+        super().setUp()
+        # fake cargo and pnpm first on PATH: they only log their arguments, nothing is built or fetched
+        self.bin = pathlib.Path(tempfile.mkdtemp(prefix="kit-bin-"))
+        for tool in ("cargo", "pnpm"):
+            f = self.bin / tool
+            f.write_text(f'#!/bin/sh\necho "{tool} $*" >> "{self.bin}/calls.log"\n')
+            f.chmod(0o755)
+        self.old_env = dict(os.environ)
+        os.environ["PATH"] = f"{self.bin}{os.pathsep}{os.environ['PATH']}"
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.old_env)
+        shutil.rmtree(self.bin, ignore_errors=True)
+        super().tearDown()
+
+    def calls(self) -> list:
+        f = self.bin / "calls.log"
+        return f.read_text().splitlines() if f.exists() else []
+
+    def test_cargo_refuses_everything_off_the_list_without_taking_a_build_slot(self):
+        import fcntl
+        os.environ["KIT_BUILD_WAIT"] = "1"
+        lock = open(self.r.dir / ".git" / "kit-build-0.lock", "a+")
+        fcntl.flock(lock, fcntl.LOCK_EX)  # a refused command must not even wait for the slot
+        first, nextest, conf = "the first argument must be one of", "nextest must be followed by", "--config and -Z"
+        try:
+            for args, rule in ((["run", "-p", "x"], first), (["publish"], first), (["install", "evil"], first),
+                               (["--config", "x", "build"], first), (["+nightly", "build"], first),
+                               (["llvm-cov"], first), (["deny", "check"], first), (["-Zunstable", "build"], first),
+                               (["nextest", "self", "update"], nextest), (["nextest"], nextest),
+                               (["build", "--config", "x"], conf), (["test", "--config=a=1"], conf),
+                               (["build", "-Z", "x"], conf), (["nextest", "run", "--config-file", "x"], conf)):
+                rc, out = self.r.kit("cargo", *args)
+                self.assertNotEqual(rc, 0, args)
+                self.assertIn("cargo refused: " + rule, out, args)
+                self.assertNotIn("build slot", out, args)
+        finally:
+            lock.close()
+        self.assertEqual(self.calls(), [])
+
+    def test_cargo_runs_the_listed_commands(self):
+        for args in (["nextest", "run", "-p", "core"], ["nextest", "list"], ["tree"],
+                     ["test", "--", "--config", "-Z"]):
+            rc, out = self.r.kit("cargo", *args)
+            self.assertEqual(rc, 0, out)
+        self.assertEqual(self.calls(), ["cargo nextest run -p core", "cargo nextest list", "cargo tree",
+                                        "cargo test -- --config -Z"])
+
+    def test_cargo_test_runs_for_every_non_rust_file_the_rust_tests_read(self):
+        real = REPO / ".agents" / "stack.json"
+        if not real.exists():
+            real = KIT / "stack.kit.json"
+        gate = json.loads(real.read_text())["gate"]
+        steps = [s for s in gate["steps"] if s["cmd"].startswith(("cargo nextest", "cargo test"))]
+        self.assertTrue(steps, "no cargo test step")
+        st = json.loads((self.r.dir / ".agents/stack.json").read_text())
+        st["gate"] = gate
+        (self.r.dir / ".agents/stack.json").write_text(json.dumps(st))
+        paths = self.k_paths(steps[0])
+        for f in ("web/src/shared/disclaimer.ts", "web/package.json", "web/src/api/schema.d.ts", "justfile",
+                  ".github/workflows/ci.yml", "scripts/check.sh", ".env.example"):
+            self.assertTrue(self.k.reads(f, paths), f)
+        self.use_steps([{"name": "test", "cmd": steps[0]["cmd"]}])
+        self.r.git("switch", "-q", "-c", "feat/F1-web")
+        self.r.write("web/src/shared/disclaimer.ts", "export const D = 'x'\n")
+        rc, out = self.r.kit("gate")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ok   test", out)
+        self.assertEqual(len(self.calls()), 1, out)
+
+    def test_a_rust_file_renamed_to_markdown_still_runs_the_cargo_step(self):
+        self.use_steps([{"name": "test", "cmd": "cargo test"}])
+        self.r.git("switch", "-q", "-c", "feat/F1-mv")
+        (self.r.dir / "docs").mkdir(exist_ok=True)
+        self.r.git("mv", "src/lib.rs", "docs/lib.md")
+        for committed in (False, True):
+            if committed:
+                self.r.commit("refactor: move")
+            rc, out = self.r.kit("gate")
+            self.assertEqual(rc, 0, out)
+            self.assertNotIn("no change to its inputs", out)
+        self.assertGreaterEqual(len(self.calls()), 1)
+
+    def test_an_untracked_file_with_a_space_in_its_name_runs_the_step(self):
+        self.use_steps([{"name": "ui", "cmd": "printf x >> ran.txt", "paths": ["web/**"]}])
+        self.r.git("switch", "-q", "-c", "feat/F1-space")
+        self.r.write("web/new dir/a b.ts", "export {}\n")
+        rc, out = self.r.kit("gate")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ok   ui", out)
+
+    def test_audits_are_never_skipped_or_served_from_the_cache(self):
+        st = json.loads((self.r.dir / ".agents/stack.json").read_text())
+        st["gate"] = {"steps": [], "check_steps": [
+            {"name": "deny", "cmd": "cargo deny check"},
+            {"name": "ui-audit", "cmd": "pnpm -C web audit --prod", "cache": False, "paths": ["web/**"]}]}
+        (self.r.dir / ".agents/stack.json").write_text(json.dumps(st))
+        self.r.commit("chore: audits")
+        self.r.git("switch", "-q", "-c", "feat/F1-audit")
+        self.r.write("docs/note.md", "only docs\n")
+        for _ in range(2):
+            rc, out = self.r.kit("check")
+            self.assertEqual(rc, 0, out)
+        self.assertEqual(self.calls(), ["cargo deny check", "pnpm -C web audit --prod"] * 2)
+        for name in ("stack.json", "stack.kit.json"):
+            f = REPO / ".agents" / name if name == "stack.json" else KIT / name
+            if f.exists():
+                for s in json.loads(f.read_text())["gate"].get("check_steps", []):
+                    if s["name"] in ("deny", "ui-audit"):
+                        self.assertIs(s.get("cache"), False, f"{name}: {s['name']}")
+
+    def test_a_fallback_pass_is_not_remembered(self):
+        self.use_steps([{"name": "test", "cmd": "printf x >> ran.txt", "needs": "false",
+                         "fallback": "printf y >> ran.txt", "paths": ["src/**"]}])
+        self.r.git("switch", "-q", "-c", "feat/F1-fallback")
+        self.r.write("src/lib.rs", "pub fn a() -> i32 { 5 }\n")
+        for _ in range(2):
+            rc, out = self.r.kit("gate")
+            self.assertEqual(rc, 0, out)
+        self.assertEqual((self.r.dir / "ran.txt").read_text(), "yy")
+
+    def test_team_md_cannot_name_a_program_as_the_rustc_wrapper(self):
+        ref = REPO / "AGENT-SETTINGS.md"
+        if ref.exists():
+            shutil.copy2(ref, self.r.dir / "AGENT-SETTINGS.md")
+            self.r.commit("chore: settings reference")
+            rc, out = self.r.kit("set", "rustc_wrapper", "/tmp/x")
+            self.assertNotEqual(rc, 0, out)
+            self.assertIn("rustc_wrapper must be one of: auto, none, sccache", out)
+        self.r.set("rustc_wrapper", "/tmp/x")  # a hand edit of team.md
+        os.environ.pop("RUSTC_WRAPPER", None)
+        self.k_paths({"name": "t", "cmd": "cargo test"})  # loads kit.py of the fake repo
+        self.assertNotIn("RUSTC_WRAPPER", self.k.build_env())
+        os.environ["RUSTC_WRAPPER"] = "mine"  # the owner's own environment wins
+        self.assertEqual(self.k.build_env()["RUSTC_WRAPPER"], "mine")
+
+    @unittest.skipUnless(shutil.which("jq"), "the hook does nothing without jq")
+    def test_dev_gate_hook_fails_closed_well_inside_its_time_limit(self):
+        hook = KIT.parent / "hooks" / "dev-gate.sh"
+        self.r.git("switch", "-q", "-c", "feat/F1-hook")
+        self.r.write("src/lib.rs", "pub fn a() -> i32 { 7 }\n")
+
+        def run_hook(**extra):
+            env = dict(os.environ, CLAUDE_PROJECT_DIR=str(self.r.dir), **extra)
+            return subprocess.run(["bash", str(hook)], cwd=self.r.dir, input=json.dumps({"cwd": str(self.r.dir)}),
+                                  capture_output=True, text=True, env=env, timeout=60)
+        import fcntl
+        self.use_steps([{"name": "build", "cmd": "true", "heavy": True}])
+        self.r.write("src/lib.rs", "pub fn a() -> i32 { 8 }\n")
+        lock = open(self.r.dir / ".git" / "kit-build-0.lock", "a+")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            res = run_hook(KIT_BUILD_WAIT="1")
+        finally:
+            lock.close()
+        self.assertEqual(res.returncode, 2, res.stderr)
+        self.assertIn("no build slot", res.stderr)
+        # the defaults the hook hands the gate
+        self.r.write(".claude/kit/kit.py", "import os, sys\nif sys.argv[1] == 'base-ref':\n    print('develop')\n"
+                     "else:\n    sys.exit(f\"wait={os.environ.get('KIT_BUILD_WAIT')} lines={os.environ.get('GATE_MAX_LINES')}\")\n")
+        os.environ.pop("KIT_BUILD_WAIT", None)
+        res = run_hook()
+        self.assertEqual(res.returncode, 2, res.stderr)
+        self.assertIn("wait=180 lines=15", res.stderr)
+
+
+class ExportAndInstallSecretTests(Base):
+    DUMMIES = (".claude/.envrc", ".claude/.env", ".claude/a.p8", ".agents/b.pfx", ".claude/c.jks",
+               ".claude/secrets/token.txt", ".agents/d.key", ".claude/id_rsa")
+
+    def test_export_kit_lists_no_secret_files(self):
+        for f in self.DUMMIES:
+            self.r.write(f, "dummy\n")
+        rc, out = self.r.kit("export-kit", "--list")
+        self.assertEqual(rc, 0, out)
+        self.assertIn(".claude/kit/kit.py", out)
+        listed = out.splitlines()
+        for f in self.DUMMIES:
+            self.assertNotIn(f, listed)
+
+    def installer(self):
+        path = KIT / "installer" / "install.py"
+        if not path.exists():
+            path = REPO / "install.py"
+        if not path.exists():
+            self.skipTest("no installer here")
+        return path
+
+    def test_installer_treats_env_and_key_files_as_secrets(self):
+        mod = load_module("kit_installer_s", self.installer())
+        for f in self.DUMMIES + (".env.local", "config/.env.production", "a/server.pem"):
+            self.assertTrue(mod.is_secret(f), f)
+        for f in (".env.example", ".claude/kit/kit.py", "docs/secrets.md", ".claude/hooks/guard-secrets.sh"):
+            self.assertFalse(mod.is_secret(f), f)
+
+    def test_installer_does_not_copy_secret_files(self):
+        src = pathlib.Path(tempfile.mkdtemp(prefix="kit-src-"))
+        self.addCleanup(shutil.rmtree, src, True)
+        shutil.copy2(self.installer(), src / "install.py")
+        (src / ".claude" / "kit").mkdir(parents=True)
+        (src / ".claude" / "kit" / "doctor.py").write_text("")
+        for f in self.DUMMIES + ("notes.md",):
+            (src / f).parent.mkdir(parents=True, exist_ok=True)
+            (src / f).write_text("dummy\n")
+        res = subprocess.run([sys.executable, str(src / "install.py"), str(self.r.dir), "--force"],
+                             capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertTrue((self.r.dir / "notes.md").exists())
+        for f in self.DUMMIES:
+            self.assertFalse((self.r.dir / f).exists(), f)
+
+    def test_installer_backs_up_settings_and_lists_what_it_adds(self):
+        mod = load_module("kit_installer_m", self.installer())
+        mine = {"env": {"A": "old"}, "permissions": {"allow": ["Bash(ls:*)"]}}
+        kit = {"env": {"A": "new-value", "B": "2"}, "permissions": {"allow": ["Bash(ls:*)", "Bash(just:*)"]},
+               "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "stop.sh"}]}]}, "newKey": "hidden-value"}
+        dst, src = self.r.dir / ".claude" / "settings.json", self.r.dir / "kit-settings.json"
+        dst.write_text(json.dumps(mine))
+        src.write_text(json.dumps(kit))
+        backup = self.r.dir / ".agents" / "backup-x"
+        mod.merge_settings(dst, src, backup)
+        self.assertEqual(json.loads((backup / ".claude" / "settings.json").read_text()), mine)
+        self.assertEqual(sorted(mod.report["settings"]),
+                         ["allow rule added: Bash(just:*)", "env key added: B", "env key changed: A",
+                          "hook added: Stop: stop.sh", "top-level key added: agent", "top-level key added: hooks",
+                          "top-level key added: newKey"])
+        for value in ("new-value", "hidden-value"):
+            self.assertNotIn(value, " ".join(mod.report["settings"]))
+        self.assertIn("Bash(just:*)", json.loads(dst.read_text())["permissions"]["allow"])
 
 
 PLAN_L = ("# F1: thing\n\n## Goal\ng\n\n## Slices\n| slice | developer type | scope (modules/files owned) | est. lines | live path | reject if |\n"
@@ -923,6 +1444,61 @@ class DevBriefTests(Base):
         self.assertTrue(self.k.in_scope("crates/core/x.rs", p))
         self.assertFalse(self.k.in_scope("crates/core2/x.rs", p))
         self.assertFalse(self.k.in_scope("crates/cor", p))
+
+
+@unittest.skipUnless((REPO / "scripts" / "ci-scope.py").exists(), "project has no scripts/ci-scope.py")
+class CiScopeWebReadTests(unittest.TestCase):
+    """CI must run the Rust tests that read a web/ file when only that file changes (cargo metadata only, no build)."""
+
+    def scope(self, *files, path_first: str = "", script="scripts/ci-scope.py") -> dict:
+        env = {k: v for k, v in os.environ.items() if k != "CI_SCOPE_CRASH"}
+        env["CI_SCOPE_FILES"] = " ".join(files)
+        if path_first:
+            env["PATH"] = f"{path_first}{os.pathsep}{env['PATH']}"
+        p = subprocess.run([sys.executable, str(script), "origin/develop"], cwd=REPO, env=env,
+                           capture_output=True, text=True, check=True)
+        return dict(line.split("=", 1) for line in p.stdout.splitlines())
+
+    def scoped(self, rust: str, packages: str) -> dict:
+        return {"full": "no", "rust": rust, "web": "yes", "packages": packages}
+
+    def test_each_web_file_read_by_rust_runs_the_reading_crate(self):
+        for f, pkg in (("web/package.json", "cli"), ("web/src/shared/disclaimer.ts", "cli"),
+                       ("web/src/api/schema.d.ts", "server")):
+            self.assertEqual(self.scope(f), self.scoped("yes", f"-p bazaar-{pkg}"), f)
+
+    def test_a_mixed_change_runs_both_the_crate_and_the_reader(self):
+        self.assertEqual(self.scope("web/src/api/schema.d.ts", "crates/cli/tests/workspace.rs"),
+                         self.scoped("yes", "-p bazaar-cli -p bazaar-server"))
+
+    def test_an_unrelated_web_file_runs_no_rust_job(self):
+        self.assertEqual(self.scope("web/src/App.tsx"), self.scoped("no", ""))
+
+    def test_a_cargo_metadata_failure_on_a_web_read_means_a_full_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            fake = pathlib.Path(d) / "cargo"
+            fake.write_text("#!/bin/sh\nexit 1\n")
+            fake.chmod(0o755)
+            got = self.scope("web/package.json", path_first=d)
+        self.assertEqual(got, {"full": "yes", "rust": "yes", "web": "yes", "packages": ""})
+
+    def test_a_listed_reader_crate_that_no_longer_exists_means_a_full_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            moved = pathlib.Path(d) / "ci-scope.py"
+            moved.write_text((REPO / "scripts" / "ci-scope.py").read_text().replace('"server"}', '"gone"}'))
+            got = self.scope("web/src/api/schema.d.ts", script=moved)
+        self.assertEqual(got, {"full": "yes", "rust": "yes", "web": "yes", "packages": ""})
+
+    def test_the_scope_list_matches_the_web_files_rust_sources_name(self):
+        # string literals only: a path built from pieces (.join("web").join(..)) is not seen
+        named = set()
+        for f in (REPO / "crates").rglob("*.rs"):
+            for path in re.findall(r'"(?:\.\./)*(web/[^"\s{}]*)"', f.read_text()):
+                if path != "web/dist":  # build output the server serves at run time, not read by a test
+                    named.add((path, f.relative_to(REPO / "crates").parts[0]))
+        text = (REPO / "scripts" / "ci-scope.py").read_text()
+        listed = ast.literal_eval(text.split("WEB_READ_BY_RUST = ", 1)[1].split("}", 1)[0] + "}")
+        self.assertEqual(named, set(listed.items()), "update WEB_READ_BY_RUST in scripts/ci-scope.py")
 
 
 if __name__ == "__main__":

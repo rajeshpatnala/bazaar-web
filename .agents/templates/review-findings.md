@@ -10,6 +10,8 @@ Round: 1
 
 <!-- severity: blocker | major | minor | nit | question (a decision for a person: design, wording, policy, limits;
      `just triage` never auto-decides a question)
-     status: open | fixed | not fixed | disputed
+     status: open | fixed | not fixed | disputed (also: accepted risk | deferred | verified). An empty or unknown
+     status counts as open, and save-review refuses it.
+     A `|` inside a cell is written `\|`; save-review refuses a row whose cells don't match the header
      decision (tech lead): fix now | defer: <slice or feature, e.g. slice 4> | reject: <reason>
      Every finding goes in the table (bullets are not counted). Round 2+: update statuses in place. -->
