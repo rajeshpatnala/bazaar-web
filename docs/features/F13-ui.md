@@ -49,7 +49,7 @@ Owner area: `web/` (nothing in `crates/`). Plan: `.agents/plans/F13-ui-slice1.md
 - RISK-194-7: show UNKNOWN when the last read is older than about 15 s, or show its IST time (LIVE-s34 part 2).
 - RISK-194-10: unreachable alert clears once the server answers (LIVE-s34 part 2).
 - CR-194-5: split the two-value `const` in `features/safety/queries.ts` (next UI slice, nit).
-- RISK-194-8: server returns the stored kill reason (LIVE slice 42, before slice 34 part 2).
+- DONE (LIVE slice 42): RISK-194-8, server returns the stored kill reason, from one row read with the state; `null` when the stored switch is off (also if only the latch is set) or unreadable. A repeat engage writes no row, so the reason is the first engage's.
 - RISK-194-5 (server part): cancel open orders on kill engage (LIVE slice 41, before slice 33).
 
 ## History

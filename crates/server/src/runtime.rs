@@ -22,7 +22,7 @@ use bazaar_core::calendar::MarketCalendar;
 use bazaar_core::clock::Clock;
 use bazaar_core::config::{ChargesConfig, RiskConfig, parse_str};
 use bazaar_core::ports::{
-    KillSwitchRepo, OrderRepo, PaperLedgerRepo, QuoteSnapshot, QuoteSource, RepoError, SourceError,
+    OrderRepo, PaperLedgerRepo, QuoteSnapshot, QuoteSource, RepoError, SourceError,
 };
 use bazaar_core::segment::{InstrumentKind, Segment};
 use bazaar_execution::executor::{ApprovedOrder, ExecAck, ExecError, Executor};
@@ -41,7 +41,7 @@ use bazaar_risk::gate::CostModel;
 use bazaar_risk::rules::inputs::{DataInputs, EventFlags, EvidenceInputs, MarginInputs};
 use bazaar_risk::snapshot::PortfolioSnapshot;
 use bazaar_risk::types::Tri;
-use bazaar_store::SqliteStore;
+use bazaar_store::{KillSwitchRow, SqliteStore};
 use rust_decimal::Decimal;
 use thiserror::Error;
 
@@ -226,7 +226,7 @@ impl std::fmt::Debug for Runtime {
 }
 
 /// Kill switch, read-only: the persisted state OR the pipeline's in-process latch. Either one
-/// engaged means engaged; an unreadable store with the latch off is engaged and `readable: false`.
+/// engaged means engaged; an unreadable store is engaged and `readable: false`.
 struct StoreKillSwitch {
     store: SqliteStore,
     handle: PipelineHandle,
@@ -237,21 +237,28 @@ impl KillSwitchRead for StoreKillSwitch {
         Box::pin(async move {
             // Read the latch first: an engage that lands during the store read is not missed.
             let latched = self.handle.kill_switch_latched();
-            match self.store.is_engaged().await {
-                Ok(stored) => KillSwitchReading {
-                    engaged: stored || latched,
-                    reason: None,
-                    readable: true,
-                    latched,
-                },
-                Err(_) => KillSwitchReading {
-                    engaged: true,
-                    reason: None,
-                    readable: false,
-                    latched,
-                },
-            }
+            // One row for state and reason, so the two cannot disagree.
+            stored_reading(self.store.kill_switch_get().await, latched)
         })
+    }
+}
+
+/// The reason is given only when the stored switch is engaged: a released row holds the release
+/// text, which must not be shown as why a latched switch is engaged. Unreadable: no reason.
+fn stored_reading(row: Result<KillSwitchRow, RepoError>, latched: bool) -> KillSwitchReading {
+    match row {
+        Ok(row) => KillSwitchReading {
+            engaged: row.engaged || latched,
+            reason: row.engaged.then_some(row.reason),
+            readable: true,
+            latched,
+        },
+        Err(_) => KillSwitchReading {
+            engaged: true,
+            reason: None,
+            readable: false,
+            latched,
+        },
     }
 }
 
@@ -1616,7 +1623,9 @@ mod tests {
         assert_eq!(status, 503, "{v}");
         assert_eq!(v["code"], "kill_switch_not_saved", "{v}");
         assert!(rt.handle.kill_switch_latched());
-        assert_eq!(flags(&h.get_kill().await), (true, true, true));
+        let k = h.get_kill().await;
+        assert_eq!(flags(&k), (true, true, true));
+        assert!(k["reason"].is_null(), "latch only: no stored reason: {k}");
         let v = h.approve(1).await;
         assert_eq!(v["outcome"], "guard_blocked", "{v}");
         assert_eq!(v["detail"], "kill switch engaged", "{v}");
@@ -1636,8 +1645,11 @@ mod tests {
             .set_kill_switch(true, "owner", "stop")
             .await
             .unwrap();
+        assert_eq!(h.get_kill().await["reason"], "stop");
         sql(&e, "DROP TABLE kill_switch").await;
-        assert_eq!(flags(&h.get_kill().await), (true, false, true));
+        let k = h.get_kill().await;
+        assert_eq!(flags(&k), (true, false, true));
+        assert!(k["reason"].is_null(), "unreadable: {k}");
     }
 
     #[tokio::test]
@@ -1661,7 +1673,10 @@ mod tests {
         .await
         .unwrap();
         assert!(!KillSwitchRepo::is_engaged(&rt.store).await.unwrap());
-        assert_eq!(flags(&h.get_kill().await), (true, true, true));
+        let k = h.get_kill().await;
+        assert_eq!(flags(&k), (true, true, true));
+        // The stored row is off and says "forced": that is not why orders are refused.
+        assert!(k["reason"].is_null(), "old reason shown: {k}");
         // The approve is refused by the kill switch: guard_blocked, no placement, no ledger line.
         let v = h.approve(1).await;
         assert_eq!(v["outcome"], "guard_blocked", "{v}");
@@ -1720,7 +1735,84 @@ mod tests {
             .await
             .unwrap();
         assert!(!rt.handle.kill_switch_latched());
-        assert_eq!(flags(&h.get_kill().await), (true, false, false));
+        let k = h.get_kill().await;
+        assert_eq!(flags(&k), (true, false, false));
+        assert!(k["reason"].is_null(), "unreadable: {k}");
+    }
+
+    #[tokio::test]
+    async fn a_stored_engage_returns_its_reason_escaped_without_the_latch() {
+        let e = env(&["TESTEQ"]).await;
+        let rt = e.open().await;
+        let h = http(&rt, &e.clock).await;
+        assert!(h.get_kill().await["reason"].is_null(), "never engaged");
+        KillSwitchRepo::set(
+            &rt.store,
+            true,
+            "bad\u{1b}[31m\nfeed\u{202e}",
+            audit("kill_switch_engaged"),
+            chain_hash,
+        )
+        .await
+        .unwrap();
+        let k = h.get_kill().await;
+        assert_eq!(flags(&k), (true, true, false));
+        assert_eq!(k["reason"], "bad\\x1b[31m\\x0afeed\\u{202e}");
+    }
+
+    #[tokio::test]
+    async fn the_engage_reply_carries_the_reason_and_a_stored_release_clears_it() {
+        let e = env(&["TESTEQ"]).await;
+        let rt = e.open().await;
+        let h = http(&rt, &e.clock).await;
+        let (status, v) = h.post_engage().await;
+        assert_eq!(status, 200, "{v}");
+        assert_eq!(v["reason"], "stop", "{v}");
+        // Released in the store while this process stays latched.
+        KillSwitchRepo::set(
+            &rt.store,
+            false,
+            "released",
+            audit("kill_switch_released"),
+            chain_hash,
+        )
+        .await
+        .unwrap();
+        let k = h.get_kill().await;
+        assert_eq!(flags(&k), (true, true, true));
+        assert!(k["reason"].is_null(), "old release reason shown: {k}");
+    }
+
+    #[test]
+    fn stored_reading_gives_a_reason_only_for_a_readable_engaged_row() {
+        let row = |engaged| {
+            Ok(KillSwitchRow {
+                engaged,
+                version: 3,
+                actor: "owner".into(),
+                reason: "why".into(),
+                changed_ns: 0,
+            })
+        };
+        for latched in [false, true] {
+            let on = stored_reading(row(true), latched);
+            assert_eq!(
+                (on.engaged, on.readable, on.latched, on.reason.as_deref()),
+                (true, true, latched, Some("why"))
+            );
+            let off = stored_reading(row(false), latched);
+            assert_eq!(
+                (off.engaged, off.readable, off.latched, off.reason),
+                (latched, true, latched, None)
+            );
+            for err in [RepoError::Corrupt, RepoError::Other] {
+                let bad = stored_reading(Err(err), latched);
+                assert_eq!(
+                    (bad.engaged, bad.readable, bad.latched, bad.reason),
+                    (true, false, latched, None)
+                );
+            }
+        }
     }
 
     #[tokio::test]
