@@ -3,10 +3,10 @@ import { useState } from "react";
 import { ApiError } from "../../api/client";
 import { Button } from "../../shared/ui/Button";
 import { Disclosure } from "../../shared/ui/Disclosure";
-import { Modal } from "../../shared/ui/Modal";
 import { ErrorView } from "../../shared/ui/StateViews";
 import { Tag, type TagTone } from "../../shared/ui/Tag";
-import { killSwitchQuery, useEngage, type KillSwitch } from "./queries";
+import { EngageDialog, ReleaseDialog } from "./KillSwitchDialogs";
+import { killSwitchQuery, useEngage, useRelease, type KillSwitch } from "./queries";
 
 type State = "checking" | "sending" | "unknown" | "unreadable" | "engaged" | "off";
 
@@ -34,24 +34,27 @@ function stateOf(d: KillSwitch): State {
 }
 
 /** Only a problem+json refusal is definite. Silence, a timeout (408) or a server fault may follow a saved write. */
-function failureText(e: unknown): string {
+function failureText(e: unknown, action: "Engage" | "Release"): string {
   if (e instanceof ApiError && e.status > 0 && e.status !== 408 && !["unknown", "internal"].includes(e.code)) {
-    return `Engage failed. ${e.message}`;
+    return `${action} failed. ${e.message}`;
   }
-  return "Engage: no clear answer from the server, so the result is unknown. Check the state above.";
+  return `${action}: no clear answer from the server, so the result is unknown. Check the state above.`;
 }
 
 export function KillSwitchPanel() {
   const query = useQuery(killSwitchQuery);
   const engage = useEngage();
-  const [confirming, setConfirming] = useState(false);
+  const release = useRelease();
+  // "release" keeps the reason that was on screen when the dialog opened.
+  const [dialog, setDialog] = useState<null | { kind: "engage" } | { kind: "release"; reason: string | null }>(null);
   // A write in progress, then a failed read, win over cached data: old state is never shown as current.
   let state: State = "checking";
-  if (engage.isPending) state = "sending";
+  if (engage.isPending || release.isPending) state = "sending";
   else if (query.isError) state = "unknown";
   else if (query.data) state = stateOf(query.data);
   const view = VIEW[state];
-  const reason = state === "engaged" ? query.data?.reason : null;
+  const reason = state === "engaged" ? (query.data?.reason ?? null) : null;
+  const close = () => setDialog(null);
 
   return (
     <section className={`safety-panel safety-${state}`} aria-label="Kill switch">
@@ -60,8 +63,13 @@ export function KillSwitchPanel() {
           <strong>Kill switch</strong> <Tag tone={view.tone}>{view.tag}</Tag> {view.text}
         </p>
         <div className="safety-actions">
+          {state === "engaged" && (
+            <Button variant="ghost" onClick={() => setDialog({ kind: "release", reason })}>
+              Release...
+            </Button>
+          )}
           {/* Offered in every state: engaging is the safe direction and safe to repeat. */}
-          <Button className="safety-stop" disabled={engage.isPending} onClick={() => setConfirming(true)}>
+          <Button className="safety-stop" disabled={engage.isPending} onClick={() => setDialog({ kind: "engage" })}>
             Engage kill switch
           </Button>
         </div>
@@ -72,30 +80,34 @@ export function KillSwitchPanel() {
         </p>
       )}
       {query.error instanceof ApiError && query.error.status === 401 && <p>Your session has ended. Open Bazaar again from its login link.</p>}
-      {engage.isError && <ErrorView message={failureText(engage.error)} />}
+      {engage.isError && <ErrorView message={failureText(engage.error, "Engage")} />}
+      {release.isError && <ErrorView message={failureText(release.error, "Release")} />}
       <Disclosure summary="Why is there a kill switch?">
-        It is your emergency stop. Use it if prices, orders or the app look wrong. It stays on after a restart. This screen cannot
-        release it yet.
+        It is your emergency stop. Use it if prices, orders or the app look wrong. It stays on after a restart, and you
+        turn it off by typing the release phrase.
       </Disclosure>
-      {confirming && (
-        <Modal title="Engage the kill switch" onClose={() => setConfirming(false)}>
-          <p>This is the emergency stop: new orders are blocked. It never places an order.</p>
-          <p>This screen cannot release it yet.</p>
-          <div className="dialog-actions">
-            <Button variant="ghost" onClick={() => setConfirming(false)}>
-              Cancel
-            </Button>
-            <Button
-              className="safety-stop"
-              onClick={() => {
-                setConfirming(false);
-                engage.mutate();
-              }}
-            >
-              Engage now
-            </Button>
-          </div>
-        </Modal>
+      {dialog?.kind === "engage" && (
+        <EngageDialog
+          onCancel={close}
+          onConfirm={(text) => {
+            close();
+            // A write still in flight keeps its place: the state stays unconfirmed until it settles.
+            if (!release.isPending) release.reset();
+            engage.mutate(text);
+          }}
+        />
+      )}
+      {dialog?.kind === "release" && (
+        <ReleaseDialog
+          reason={dialog.reason}
+          confirmable={state === "engaged" && reason === dialog.reason}
+          onCancel={close}
+          onConfirm={(phrase) => {
+            close();
+            if (!engage.isPending) engage.reset();
+            release.mutate({ phrase });
+          }}
+        />
       )}
     </section>
   );

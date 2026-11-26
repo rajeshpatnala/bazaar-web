@@ -6,9 +6,11 @@ import { routes } from "../app/routes";
 
 export function renderApp(opts: { route?: string } = {}) {
   const router = createMemoryRouter(routes, { initialEntries: [opts.route ?? "/"] });
-  return render(
-    <Providers client={makeQueryClient()}>
+  const client = makeQueryClient();
+  const view = render(
+    <Providers client={client}>
       <RouterProvider router={router} />
     </Providers>,
   );
+  return { ...view, client };
 }

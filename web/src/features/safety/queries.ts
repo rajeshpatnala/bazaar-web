@@ -36,13 +36,10 @@ export const killSwitchQuery = queryOptions({
 });
 
 /** The POST reply is never shown as the state: success or failure, the cache is cleared and read again. */
-export function useEngage() {
+function useKillSwitchWrite<T>(send: (input: T) => Promise<unknown>) {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: async () => {
-      const body = { reason: "" }, signal = AbortSignal.timeout(TIMEOUT_MS); // blank is stored as "unspecified"
-      return unwrap(await api.POST("/api/v1/killswitch/engage", { body, signal }));
-    },
+    mutationFn: send,
     retry: false,
     networkMode: "always",
     onMutate: () => client.cancelQueries({ queryKey: keys.killSwitch }),
@@ -52,3 +49,18 @@ export function useEngage() {
     },
   });
 }
+
+export const useEngage = () =>
+  useKillSwitchWrite(async (reason: string) => {
+    const signal = AbortSignal.timeout(TIMEOUT_MS);
+    return unwrap(await api.POST("/api/v1/killswitch/engage", { body: { reason }, signal }));
+  });
+
+/** The phrase is taken out of its box as it is sent, so the mutation cache does not keep it. */
+export const useRelease = () =>
+  useKillSwitchWrite(async (box: { phrase: string }) => {
+    const body = { phrase: box.phrase };
+    box.phrase = "";
+    const signal = AbortSignal.timeout(TIMEOUT_MS);
+    return unwrap(await api.POST("/api/v1/killswitch/release", { body, signal }));
+  });
