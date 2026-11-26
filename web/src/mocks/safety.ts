@@ -10,4 +10,5 @@ export const killSwitchOn: S["KillSwitchDto"] = { ...killSwitchOff, engaged: tru
 export const safetyHandlers: RequestHandler[] = [
   http.get("/api/v1/killswitch", () => HttpResponse.json(killSwitchOff)),
   http.post("/api/v1/killswitch/engage", () => HttpResponse.json(killSwitchOn)),
+  http.post("/api/v1/killswitch/release", () => HttpResponse.json(killSwitchOff)),
 ];

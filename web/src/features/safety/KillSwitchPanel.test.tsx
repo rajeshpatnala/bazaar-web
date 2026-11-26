@@ -22,8 +22,9 @@ const shows = (p: HTMLElement, tag: string) => waitFor(() => expect(within(p).ge
 
 const clickInDialog = async (name: string) =>
   userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name }));
-async function engage(p: HTMLElement) {
+async function engage(p: HTMLElement, reason = "") {
   await userEvent.click(engageBtn(p));
+  if (reason) await userEvent.type(await screen.findByLabelText("Reason (optional)"), reason);
   await clickInDialog("Engage now");
 }
 
@@ -84,6 +85,7 @@ describe("kill switch state", () => {
     expect(within(p).getByText(tag)).toBeVisible();
     expect(within(p).queryByText("OFF")).toBeNull();
     expect(engageBtn(p)).toBeEnabled();
+    if (tag !== "ENGAGED") expect(within(p).queryByRole("button", { name: "Release..." })).toBeNull();
   });
 
   it("is unknown while loading, with Engage already there", async () => {
@@ -212,12 +214,12 @@ describe("engage", () => {
     await userEvent.click(engageBtn(p));
     await clickInDialog("Cancel");
     expect(screen.queryByRole("dialog")).toBeNull();
-    await engage(p);
+    await engage(p, "bad prices");
     await within(p).findByText(/Sending your request/);
     expect(within(p).queryByText("OFF")).toBeNull();
     finish();
     await shows(p, "ENGAGED");
-    expect(sent).toEqual({ reason: "" });
+    expect(sent).toEqual({ reason: "bad prices" });
     expect(posts).toBe(1);
     expect(csrf).toBe("test-csrf");
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -325,5 +327,15 @@ describe("engage", () => {
     await within(p).findByText(/Cannot confirm the state/);
     expect(within(p).queryByText("OFF")).toBeNull();
     expect(engageBtn(p)).toBeEnabled();
+  });
+
+  it("limits the reason by bytes, not characters", async () => {
+    renderApp();
+    await userEvent.click(engageBtn(await panel()));
+    const d = await screen.findByRole("dialog");
+    await userEvent.click(within(d).getByLabelText("Reason (optional)"));
+    await userEvent.paste("\u00e9".repeat(251));
+    expect(within(d).getByRole("button", { name: "Engage now" })).toBeDisabled();
+    expect(within(d).getByRole("alert")).toHaveTextContent("too long");
   });
 });
