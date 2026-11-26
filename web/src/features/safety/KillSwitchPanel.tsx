@@ -3,9 +3,10 @@ import { useState } from "react";
 import { ApiError } from "../../api/client";
 import { Button } from "../../shared/ui/Button";
 import { Disclosure } from "../../shared/ui/Disclosure";
+import { Modal } from "../../shared/ui/Modal";
 import { ErrorView } from "../../shared/ui/StateViews";
 import { Tag, type TagTone } from "../../shared/ui/Tag";
-import { EngageDialog, ReleaseDialog } from "./KillSwitchDialogs";
+import { ReleaseDialog } from "./KillSwitchDialogs";
 import { killSwitchQuery, useKillSwitchWrites, type KillSwitch } from "./queries";
 
 type State = "checking" | "sending" | "unknown" | "unreadable" | "engaged" | "off";
@@ -91,16 +92,28 @@ export function KillSwitchPanel() {
         it stays on after a restart, and you turn it off by typing the release phrase.
       </Disclosure>
       {dialog?.kind === "engage" && (
-        <EngageDialog
-          warning={NOT_CANCELLED}
-          onCancel={close}
-          onConfirm={(text) => {
-            close();
-            // A write still in flight keeps its place: the state stays unconfirmed until it settles.
-            if (!release.isPending) release.reset();
-            engage.mutate(text);
-          }}
-        />
+        <Modal title="Engage the kill switch" onClose={close}>
+          <p>
+            This is the emergency stop: new entries are blocked. {NOT_CANCELLED} It never places an order.
+          </p>
+          <p>Once saved, it stays on after a restart. To turn it off, you type the release phrase.</p>
+          <div className="dialog-actions">
+            <Button variant="ghost" onClick={close}>
+              Cancel
+            </Button>
+            <Button
+              className="safety-stop"
+              onClick={() => {
+                close();
+                // A write still in flight keeps its place: the state stays unconfirmed until it settles.
+                if (!release.isPending) release.reset();
+                engage.mutate();
+              }}
+            >
+              Engage now
+            </Button>
+          </div>
+        </Modal>
       )}
       {dialog?.kind === "release" && (
         <ReleaseDialog

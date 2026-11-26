@@ -22,9 +22,8 @@ const shows = (p: HTMLElement, tag: string) => waitFor(() => expect(within(p).ge
 
 const clickInDialog = async (name: string) =>
   userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name }));
-async function engage(p: HTMLElement, reason = "") {
+async function engage(p: HTMLElement) {
   await userEvent.click(engageBtn(p));
-  if (reason) await userEvent.type(await screen.findByLabelText("Reason (optional)"), reason);
   await clickInDialog("Engage now");
 }
 
@@ -214,12 +213,12 @@ describe("engage", () => {
     await userEvent.click(engageBtn(p));
     await clickInDialog("Cancel");
     expect(screen.queryByRole("dialog")).toBeNull();
-    await engage(p, "bad prices");
+    await engage(p);
     await within(p).findByText(/Sending your request/);
     expect(within(p).queryByText("OFF")).toBeNull();
     finish();
     await shows(p, "ENGAGED");
-    expect(sent).toEqual({ reason: "bad prices" });
+    expect(sent).toEqual({ reason: "" });
     expect(posts).toBe(1);
     expect(csrf).toBe("test-csrf");
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -327,15 +326,5 @@ describe("engage", () => {
     await within(p).findByText(/Cannot confirm the state/);
     expect(within(p).queryByText("OFF")).toBeNull();
     expect(engageBtn(p)).toBeEnabled();
-  });
-
-  it("limits the reason by bytes, not characters", async () => {
-    renderApp();
-    await userEvent.click(engageBtn(await panel()));
-    const d = await screen.findByRole("dialog");
-    await userEvent.click(within(d).getByLabelText("Reason (optional)"));
-    await userEvent.paste("\u00e9".repeat(251));
-    expect(within(d).getByRole("button", { name: "Engage now" })).toBeDisabled();
-    expect(within(d).getByRole("alert")).toHaveTextContent("too long");
   });
 });

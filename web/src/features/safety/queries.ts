@@ -59,10 +59,10 @@ export function useKillSwitchWrites() {
   // Settles when the release request in flight ends, however it ends.
   const releasing = useRef<Promise<void> | null>(null);
 
-  const engage = useKillSwitchWrite(async (reason: string) => {
+  const engage = useKillSwitchWrite(async () => {
     const post = async () => {
-      const signal = AbortSignal.timeout(TIMEOUT_MS);
-      return unwrap(await api.POST("/api/v1/killswitch/engage", { body: { reason }, signal }));
+      const body = { reason: "" }, signal = AbortSignal.timeout(TIMEOUT_MS); // blank is stored as "unspecified"
+      return unwrap(await api.POST("/api/v1/killswitch/engage", { body, signal }));
     };
     const ended = releasing.current;
     if (!ended) return post();

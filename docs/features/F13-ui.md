@@ -23,7 +23,7 @@ Owner area: `web/` (nothing in `crates/`). Plan: `.agents/plans/F13-ui-slice1.md
 - Slice 4 (BZ-505): `app/Home.tsx` overview of the practice account (capital, day profit or loss, open positions, ideas count, regime and data-delayed badges, IST as-of; empty state "No high-quality setups today") from mock `GET /api/v1/overview` (`mocks/account.ts`, provisional `features/overview/`); main navigation (Home, Ideas; the paper-order review opens from each idea) in `app/AppShell.tsx`.
 
 - LIVE plan slice 34, part 1 (kill switch state and engage): `features/safety/` (`KillSwitchPanel` in `app/AppShell.tsx`, inside `SessionGate`, above every route and outside the route error boundary). Generated types with runtime checks; `GET /api/v1/killswitch` polled every 5 s (hidden tab too) with a 10 s timeout, stopping on 401. Engage is offered in every state, behind one confirm step. The POST reply is never shown as the state: success or failure, the cache is cleared and re-read; a failed read shows UNKNOWN even with cached data; no answer, 408 or a server fault reads "result is unknown". The kill reason renders as text only (SEC-130-2). Mocks in `mocks/safety.ts`. Look: current, tokens only (owner O15).
-- LIVE plan slice 34, part 2 (release and reason): release is offered only on a confirmed engaged state and needs the typed phrase, which only the server checks; confirm is disabled if the state or reason changes under the open dialog. The phrase is not kept in the mutation cache. Engage takes an optional reason (500-byte cap); the reason shown is the server's stored one (the first engage's, "unspecified" when blank). An engage clicked during a release is sent at once and again when the release request ends.
+- LIVE plan slice 34, part 2 (release and reason): release is offered only on a confirmed engaged state and needs the typed phrase, which only the server checks; confirm is disabled if the state or reason changes under the open dialog. The phrase is not kept in the mutation cache. The reason shown is the server's stored one (the first engage's, "unspecified" when blank). This screen still engages with a blank reason (the reason input is the follow-up). An engage clicked during a release is sent at once and again when the release request ends.
 
 ## Disclaimer wording
 - Owner approved 2026-11-21: "For education and personal analysis. Not investment advice; not SEBI registered; markets carry risk. Past performance does not guarantee future results." Applied in `crates/core/src/disclaimer.rs`, `web/src/shared/disclaimer.ts`, README, the compliance skill reference and the regime doc comment; byte-equality pinned by `rust_and_ts_disclaimers_are_byte_equal`.
@@ -40,15 +40,16 @@ Owner area: `web/` (nothing in `crates/`). Plan: `.agents/plans/F13-ui-slice1.md
 - Mock data only; no real recommendations; no server routes, WS, charts, dark theme or live-mode UI.
 
 ## Deferred
+- LIVE-s34 part 2 follow-up: optional reason input on Engage (500-byte cap), split off at the 400-line limit.
 - DONE (PR 103): add "not SEBI registered" to the disclaimer in `crates/core/src/disclaimer.rs` and `web/src/shared/disclaimer.ts` together.
 - Swap provisional types for generated schema types (F13 server slice).
 - WebSocket events replacing polling mocks (F13 server slice).
 - CR-124-4: per-idea validation deferred to BZ-509 (generated types)
 - Owner to confirm the disclaimer wording, the read-only live note and the "Ideas to consider today" copy.
-- RISK-194-3: kill state and stop button inside the order dialog, Approve disabled while engaged or unknown (LIVE slice 37); kill hotkey (LIVE-s34 part 2).
-- RISK-194-4: compact stop and status kept visible, minding the `.shell-main` overflow; check at 720 px (LIVE-s34 part 2).
-- RISK-194-7: show UNKNOWN when the last read is older than about 15 s, or show its IST time (LIVE-s34 part 2).
-- RISK-194-10: unreachable alert clears once the server answers (LIVE-s34 part 2).
+- RISK-194-3: kill state and stop button inside the order dialog, Approve disabled while engaged or unknown (LIVE slice 37); kill hotkey (LIVE-s34 part 2 follow-up).
+- RISK-194-4: compact stop and status kept visible, minding the `.shell-main` overflow; check at 720 px (LIVE-s34 part 2 follow-up).
+- RISK-194-7: show UNKNOWN when the last read is older than about 15 s, or show its IST time (LIVE-s34 part 2 follow-up).
+- RISK-194-10: unreachable alert clears once the server answers (LIVE-s34 part 2 follow-up).
 - CR-194-5: split the two-value `const` in `features/safety/queries.ts` (next UI slice, nit).
 - DONE (LIVE slice 42): RISK-194-8, server returns the stored kill reason, from one row read with the state; `null` when the stored switch is off (also if only the latch is set) or unreadable. A repeat engage writes no row, so the reason is the first engage's.
 - RISK-194-5 (server part): cancel open orders on kill engage (LIVE slice 41, before slice 33).

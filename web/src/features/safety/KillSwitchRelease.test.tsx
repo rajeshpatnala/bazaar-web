@@ -55,6 +55,10 @@ describe("release", () => {
     await userEvent.type(input, "   ");
     expect(confirm).toBeDisabled();
     await userEvent.type(input, "words{Enter}");
+    // The server caps the text at 500 bytes.
+    await userEvent.clear(input);
+    await userEvent.paste("\u00e9".repeat(251));
+    expect(confirm).toBeDisabled();
     expect(count.posts).toBe(0);
   });
 
@@ -176,14 +180,13 @@ describe("release", () => {
     await shows(p, "ENGAGED");
     await submitRelease(p, "some phrase");
     await userEvent.click(within(p).getByRole("button", { name: "Engage kill switch" }));
-    await userEvent.type(within(await screen.findByRole("dialog")).getByLabelText("Reason (optional)"), "stop again");
-    await userEvent.click(screen.getByRole("button", { name: "Engage now" }));
+    await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Engage now" }));
     // The first engage goes at once; the release is still held.
     await waitFor(() => expect(engages).toHaveLength(1));
     await within(p).findByText(/Sending your request/);
     finish();
     await shows(p, "ENGAGED");
-    expect(engages).toEqual([{ reason: "stop again" }, { reason: "stop again" }]);
+    expect(engages).toEqual([{ reason: "" }, { reason: "" }]);
     // That release has ended, so the next engage is sent once.
     await userEvent.click(within(p).getByRole("button", { name: "Engage kill switch" }));
     await userEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Engage now" }));

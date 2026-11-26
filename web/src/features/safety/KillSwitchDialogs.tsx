@@ -5,39 +5,18 @@ import { Modal } from "../../shared/ui/Modal";
 const MAX_BYTES = 500; // the server's cap, in bytes
 const tooLong = (s: string) => new TextEncoder().encode(s).length > MAX_BYTES;
 
-type Props = { onCancel: () => void; onConfirm: (text: string) => void };
-
-export function EngageDialog({ onCancel, onConfirm, warning }: Props & { warning: string }) {
-  const [reason, setReason] = useState("");
-  const id = useId();
-  const long = tooLong(reason);
-  return (
-    <Modal title="Engage the kill switch" onClose={onCancel}>
-      <p>This is the emergency stop: new entries are blocked. {warning} It never places an order.</p>
-      <p>Once saved, it stays on after a restart. To turn it off, you type the release phrase.</p>
-      <label htmlFor={id}>Reason (optional)</label>
-      <input id={id} className="safety-input" value={reason} autoComplete="off" onChange={(e) => setReason(e.target.value)} />
-      <p className="lbl">Left blank, it is saved as "unspecified". If the switch is already on, the first reason is kept.</p>
-      {long && <p role="alert">The reason is too long. Please shorten it.</p>}
-      <div className="dialog-actions">
-        <Button variant="ghost" onClick={onCancel}>
-          Cancel
-        </Button>
-        <Button className="safety-stop" disabled={long} onClick={() => onConfirm(reason)}>
-          Engage now
-        </Button>
-      </div>
-    </Modal>
-  );
-}
-
 /** The phrase is sent exactly as typed; only the server decides whether it matches. */
 export function ReleaseDialog({
   onCancel,
   onConfirm,
   reason,
   confirmable,
-}: Props & { reason: string | null; confirmable: boolean }) {
+}: {
+  onCancel: () => void;
+  onConfirm: (phrase: string) => void;
+  reason: string | null;
+  confirmable: boolean;
+}) {
   const [phrase, setPhrase] = useState("");
   const id = useId();
   const long = tooLong(phrase);
