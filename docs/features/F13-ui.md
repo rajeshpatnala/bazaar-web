@@ -59,3 +59,4 @@ Owner area: `web/` (nothing in `crates/`). Plan: `.agents/plans/F13-ui-slice1.md
 - 2026-11-22: slice 3 (paper-order review dialog, BZ-504).
 - 2026-11-22: slice 4 (overview and navigation, BZ-505).
 - 2026-11-26: LIVE plan slice 34 part 1 (kill switch state and engage).
+- 2026-11-26: fix: the order review dialog re-arms its expiry timer if it fires early, so an expired preview cannot keep Approve enabled.
