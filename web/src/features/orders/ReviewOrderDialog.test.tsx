@@ -1,4 +1,5 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { onlineManager } from "@tanstack/react-query";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -22,7 +23,26 @@ async function openDialog() {
 const approveBtn = (d: HTMLElement) => within(d).findByRole("button", { name: "Approve paper order" });
 
 describe("Review paper order dialog", () => {
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => {
+    vi.useRealTimers();
+    onlineManager.setOnline(true);
+  });
+  const countApprovals = () => {
+    const sent = { n: 0 };
+    server.use(http.post(APPROVE, () => ((sent.n += 1), HttpResponse.json({ status: "paper_filled", message: "x" }))));
+    return sent;
+  };
+  /** Dialog on a preview that is valid for 60 s, with fake timers and a movable wall clock. */
+  const openWithMinute = async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    previewWith({ expires_at: new Date(Date.now() + 60_000).toISOString() });
+    const d = await openDialog();
+    return { d, button: await approveBtn(d) };
+  };
+  const expectExpired = (d: HTMLElement, button: HTMLElement) => {
+    expect(button).toBeDisabled();
+    expect(within(d).getByText(/have expired/)).toBeInTheDocument();
+  };
 
   it("shows mode-driven PAPER text, every figure in INR, IST times, gate reasons, safe wording", async () => {
     const d = await openDialog();
@@ -258,5 +278,89 @@ describe("Review paper order dialog", () => {
     vi.setSystemTime(Date.now() - 100); // the wall clock now lags the timer
     await vi.advanceTimersByTimeAsync(60_200);
     expect(await within(d).findByRole("button", { name: "Review again" })).toBeVisible();
+    expectExpired(d, await approveBtn(d));
+  });
+
+  it("a click after expiry but before any timer fires sends nothing", async () => {
+    const sent = countApprovals();
+    const { d, button } = await openWithMinute();
+    expect(button).toBeEnabled();
+    vi.setSystemTime(Date.now() + 3_600_000); // clock jumps; no timer has run yet
+    fireEvent.click(button);
+    await waitFor(() => expectExpired(d, button));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(sent.n).toBe(0);
+  });
+
+  it("notices a forward clock step within a second, without a click", async () => {
+    const { d, button } = await openWithMinute();
+    vi.setSystemTime(Date.now() + 3_600_000);
+    await vi.advanceTimersByTimeAsync(1_100);
+    await waitFor(() => expectExpired(d, button));
+  });
+
+  it("stays expired after the clock steps back and the re-preview fails", async () => {
+    const sent = countApprovals();
+    const { d, button } = await openWithMinute();
+    await vi.advanceTimersByTimeAsync(61_000);
+    await waitFor(() => expectExpired(d, button));
+    vi.setSystemTime(Date.now() - 120_000);
+    server.use(http.post(PREVIEW, () => new HttpResponse(null, { status: 500 })));
+    fireEvent.click(within(d).getByRole("button", { name: "Review again" }));
+    await within(d).findByText("Could not load the order details.");
+    expectExpired(d, button);
+    fireEvent.click(button);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(sent.n).toBe(0);
+  });
+
+  it("stays expired when the clock steps back and the re-preview returns the same expiry", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const same = makePreview({ expires_at: new Date(Date.now() + 60_000).toISOString() });
+    let previews = 0;
+    server.use(http.post(PREVIEW, () => ((previews += 1), HttpResponse.json({ ...same, version: previews }))));
+    const d = await openDialog();
+    const button = await approveBtn(d);
+    await vi.advanceTimersByTimeAsync(61_000);
+    await waitFor(() => expectExpired(d, button));
+    vi.setSystemTime(Date.now() - 120_000);
+    fireEvent.click(within(d).getByRole("button", { name: "Review again" }));
+    await waitFor(() => expect(previews).toBe(2));
+    await vi.advanceTimersByTimeAsync(100);
+    await waitFor(() => expectExpired(d, button));
+  });
+
+  it("keeps a rejected draft disabled while the re-preview runs and after it fails", async () => {
+    let approvals = 0;
+    server.use(
+      http.post(APPROVE, () => {
+        approvals += 1;
+        return HttpResponse.json({ code: "gate_blocked", detail: "Over your limit.", status: 422, errors: [] }, { status: 422 });
+      }),
+    );
+    const d = await openDialog();
+    const button = await approveBtn(d);
+    await userEvent.click(button);
+    await within(d).findByText("Over your limit.");
+    let fail = () => {};
+    const held = new Promise<void>((r) => (fail = r));
+    server.use(http.post(PREVIEW, async () => (await held, new HttpResponse(null, { status: 500 }))));
+    await userEvent.click(within(d).getByRole("button", { name: "Review again" }));
+    await waitFor(() => expect(button).toBeDisabled()); // while fetching
+    await userEvent.click(button);
+    fail();
+    await within(d).findByText("Could not load the order details.");
+    expect(button).toBeDisabled(); // after the failure
+    await userEvent.click(button);
+    expect(approvals).toBe(1);
+  });
+
+  it("never queues an offline click to be sent later, past expiry", async () => {
+    const sent = countApprovals();
+    const d = await openDialog();
+    const button = await approveBtn(d);
+    onlineManager.setOnline(false);
+    await userEvent.click(button);
+    await waitFor(() => expect(sent.n).toBe(1)); // sent now, not held until reconnect
   });
 });
