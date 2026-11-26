@@ -10,20 +10,22 @@ import { killSwitchQuery, useEngage, type KillSwitch } from "./queries";
 
 type State = "checking" | "sending" | "unknown" | "unreadable" | "engaged" | "off";
 
+const NOT_CANCELLED = "Orders already accepted are not cancelled and open positions are not closed.";
+
 const VIEW: Record<State, { tag: string; tone: TagTone; text: string }> = {
   checking: { tag: "UNKNOWN", tone: "warn", text: "Checking the kill switch. Do not assume it is off." },
   sending: { tag: "UNKNOWN", tone: "warn", text: "Sending your request. The state is not confirmed yet." },
   unknown: {
     tag: "UNKNOWN",
     tone: "warn",
-    text: "Cannot confirm the state. Do not assume trading is stopped; engage the switch if you want it stopped.",
+    text: "Cannot confirm the state. Do not assume new orders are blocked; engage the switch if you want them blocked.",
   },
   unreadable: {
     tag: "UNKNOWN",
     tone: "warn",
     text: "The server cannot read the saved state, so it treats the switch as engaged.",
   },
-  engaged: { tag: "ENGAGED", tone: "sell", text: "New orders are blocked." },
+  engaged: { tag: "ENGAGED", tone: "sell", text: `New entries are blocked. ${NOT_CANCELLED}` },
   off: { tag: "OFF", tone: "neutral", text: "The kill switch is not blocking orders. Other safety checks still apply." },
 };
 
@@ -38,7 +40,7 @@ function failureText(e: unknown): string {
   if (e instanceof ApiError && e.status > 0 && e.status !== 408 && !["unknown", "internal"].includes(e.code)) {
     return `Engage failed. ${e.message}`;
   }
-  return "Engage: no clear answer from the server, so the result is unknown. Check the state above.";
+  return "Engage: no clear answer from the server, so the result is unknown. Engage again unless the state above shows ENGAGED.";
 }
 
 export function KillSwitchPanel() {
@@ -48,7 +50,8 @@ export function KillSwitchPanel() {
   // A write in progress, then a failed read, win over cached data: old state is never shown as current.
   let state: State = "checking";
   if (engage.isPending) state = "sending";
-  else if (query.isError) state = "unknown";
+  // With no data, a retry goes back to pending; the error count keeps it "unknown" until a read works or the cache is reset.
+  else if (query.isError || (!query.data && query.errorUpdateCount > 0)) state = "unknown";
   else if (query.data) state = stateOf(query.data);
   const view = VIEW[state];
   const reason = state === "engaged" ? query.data?.reason : null;
@@ -74,13 +77,15 @@ export function KillSwitchPanel() {
       {query.error instanceof ApiError && query.error.status === 401 && <p>Your session has ended. Open Bazaar again from its login link.</p>}
       {engage.isError && <ErrorView message={failureText(engage.error)} />}
       <Disclosure summary="Why is there a kill switch?">
-        It is your emergency stop. Use it if prices, orders or the app look wrong. It stays on after a restart. This screen cannot
-        release it yet.
+        It is your emergency stop. Use it if prices, orders or the app look wrong. It blocks new entries. {NOT_CANCELLED} Once saved,
+        it stays on after a restart. This screen cannot release it yet.
       </Disclosure>
       {confirming && (
         <Modal title="Engage the kill switch" onClose={() => setConfirming(false)}>
-          <p>This is the emergency stop: new orders are blocked. It never places an order.</p>
-          <p>This screen cannot release it yet.</p>
+          <p>
+            This is the emergency stop: new entries are blocked. {NOT_CANCELLED} It never places an order.
+          </p>
+          <p>Once saved, it stays on after a restart. This screen cannot release it yet.</p>
           <div className="dialog-actions">
             <Button variant="ghost" onClick={() => setConfirming(false)}>
               Cancel

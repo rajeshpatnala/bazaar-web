@@ -35,7 +35,7 @@ Owner area: `web/` (nothing in `crates/`). Plan: `.agents/plans/F13-ui-slice1.md
 - Types for ideas, order preview and account are provisional (`// PROVISIONAL`) until F13 server slices publish OpenAPI.
 
 ## Known limits
-- Kill switch: the UI cannot release it yet (part 2: typed phrase) and shows no alarms banner yet (part 3). It is hidden when the session probe (`auth/me`) fails, because writes need its CSRF token. No engage hotkey.
+- Kill switch: the UI cannot release it yet (part 2: typed phrase) and shows no alarms banner yet (part 3). It appears only after a first successful session probe (`auth/me`), because writes need its CSRF token; a later failed probe keeps it, with a "cannot reach the server" alert, and only a 401 removes it. Engage does not cancel accepted orders or close open positions. No engage hotkey.
 - Mock data only; no real recommendations; no server routes, WS, charts, dark theme or live-mode UI.
 
 ## Deferred
@@ -44,6 +44,12 @@ Owner area: `web/` (nothing in `crates/`). Plan: `.agents/plans/F13-ui-slice1.md
 - WebSocket events replacing polling mocks (F13 server slice).
 - CR-124-4: per-idea validation deferred to BZ-509 (generated types)
 - Owner to confirm the disclaimer wording, the read-only live note and the "Ideas to consider today" copy.
+- RISK-194-3: kill state and stop button inside the order dialog, Approve disabled while engaged or unknown (LIVE slice 37); kill hotkey (LIVE-s34 part 2).
+- RISK-194-4: compact stop and status kept visible, minding the `.shell-main` overflow; check at 720 px (LIVE-s34 part 2).
+- RISK-194-7: show UNKNOWN when the last read is older than about 15 s, or show its IST time (LIVE-s34 part 2).
+- CR-194-5: split the two-value `const` in `features/safety/queries.ts` (next UI slice, nit).
+- RISK-194-8: server returns the stored kill reason (LIVE slice 42, before slice 34 part 2).
+- RISK-194-5 (server part): cancel open orders on kill engage (LIVE slice 41, before slice 33).
 
 ## History
 - 2026-11-21: slice 0 (shell, tokens, disclaimer, IST helper, stubs).

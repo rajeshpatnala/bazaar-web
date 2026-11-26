@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { screen } from "@testing-library/react";
+import { act, screen } from "@testing-library/react";
+import { onlineManager } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw/http";
+import { keys } from "../api/keys";
 import { DISCLAIMER } from "../shared/disclaimer";
 import { problemFixture, statusFixture } from "../mocks/handlers";
 import { server } from "../mocks/server";
@@ -42,5 +44,40 @@ describe("SessionGate and ModeBadge", () => {
     renderApp();
     expect(await screen.findByText(/Cannot reach the Bazaar server/)).toBeVisible();
     expect(screen.getByRole("contentinfo")).toHaveTextContent(DISCLAIMER);
+  });
+
+  it.each([
+    ["no answer", () => HttpResponse.error()],
+    ["a server fault", () => HttpResponse.json(problemFixture(500, "internal"), { status: 500 })],
+  ])("keeps Engage mounted when a later probe gets %s", async (_n, reply) => {
+    const { client } = renderApp();
+    const button = await screen.findByRole("button", { name: "Engage kill switch" });
+    server.use(http.get("/api/v1/auth/me", reply));
+    await act(() => client.refetchQueries({ queryKey: keys.authMe }));
+    expect(await screen.findByText(/Cannot reach the Bazaar server/)).toHaveAttribute("role", "alert");
+    // Same node: the children were not unmounted and mounted again.
+    expect(screen.getByRole("button", { name: "Engage kill switch" })).toBe(button);
+    expect(button).toBeEnabled();
+  });
+
+  it("still ends the session on a 401 from a later probe", async () => {
+    const { client } = renderApp();
+    await screen.findByRole("button", { name: "Engage kill switch" });
+    server.use(
+      http.get("/api/v1/auth/me", () => HttpResponse.json(problemFixture(401, "unauthenticated"), { status: 401 })),
+    );
+    await act(() => client.refetchQueries({ queryKey: keys.authMe }));
+    expect(await screen.findByText("Session ended")).toBeVisible();
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("offers Engage when the browser says it is offline", async () => {
+    onlineManager.setOnline(false);
+    try {
+      renderApp();
+      expect(await screen.findByRole("button", { name: "Engage kill switch" })).toBeEnabled();
+    } finally {
+      onlineManager.setOnline(true);
+    }
   });
 });

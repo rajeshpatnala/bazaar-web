@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { delay, http, HttpResponse } from "msw";
 import { createMemoryRouter } from "react-router";
@@ -27,7 +27,20 @@ async function engage(p: HTMLElement) {
   await clickInDialog("Engage now");
 }
 
+/** Replaces the native timer behind `AbortSignal.timeout`, so a test can let the limit expire. */
+function controlTimeouts() {
+  const started: AbortController[] = [];
+  const spy = vi.spyOn(AbortSignal, "timeout").mockImplementation(() => {
+    const c = new AbortController();
+    started.push(c);
+    return c.signal;
+  });
+  const expire = () => act(async () => started.forEach((c) => c.abort(new DOMException("limit", "TimeoutError"))));
+  return { spy, expire };
+}
+
 afterEach(() => {
+  vi.restoreAllMocks();
   setCsrfToken(null);
   vi.useRealTimers();
 });
@@ -93,6 +106,46 @@ describe("kill switch state", () => {
     read(killSwitchOff);
     await vi.advanceTimersByTimeAsync(5_100);
     await shows(p, "OFF");
+  });
+
+  it("gives up a hung read after 10 s and drops the cached OFF", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const { spy, expire } = controlTimeouts();
+    renderApp();
+    const p = await panel();
+    await shows(p, "OFF");
+    let hung = 0;
+    server.use(
+      http.get(KS, () => {
+        hung += 1;
+        return delay("infinite");
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(5_100);
+    await waitFor(() => expect(hung).toBe(1));
+    expect(spy).toHaveBeenCalledWith(10_000);
+    await expire();
+    await shows(p, "UNKNOWN");
+    expect(within(p).queryByText("OFF")).toBeNull();
+  });
+
+  it("stays unknown, not checking, while retrying a read that has never worked", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    server.use(http.get(KS, () => HttpResponse.error()));
+    renderApp();
+    const p = await panel();
+    await within(p).findByText(/Cannot confirm the state/);
+    let retries = 0;
+    server.use(
+      http.get(KS, () => {
+        retries += 1;
+        return delay("infinite");
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(5_100);
+    await waitFor(() => expect(retries).toBe(1));
+    expect(within(p).getByText(/Cannot confirm the state/)).toBeVisible();
+    expect(within(p).queryByText(/Checking/)).toBeNull();
   });
 
   it("keeps polling in a hidden tab and stops after a 401", async () => {
@@ -168,6 +221,74 @@ describe("engage", () => {
     expect(posts).toBe(1);
     expect(csrf).toBe("test-csrf");
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("gives up a hung engage after 10 s, says the result is unknown and offers Engage again", async () => {
+    const { spy, expire } = controlTimeouts();
+    let posts = 0;
+    server.use(
+      http.post(`${KS}/engage`, () => {
+        posts += 1;
+        return delay("infinite");
+      }),
+    );
+    renderApp();
+    const p = await panel();
+    await shows(p, "OFF");
+    await engage(p);
+    await waitFor(() => expect(posts).toBe(1));
+    expect(engageBtn(p)).toBeDisabled();
+    expect(spy).toHaveBeenCalledWith(10_000);
+    await expire();
+    expect(await within(p).findByRole("alert")).toHaveTextContent("result is unknown");
+    await waitFor(() => expect(engageBtn(p)).toBeEnabled());
+  });
+
+  it("says to engage again when the result is unclear and the re-read still says OFF", async () => {
+    server.use(http.post(`${KS}/engage`, () => problem(408, "request_timeout", "The request took too long.")));
+    renderApp();
+    const p = await panel();
+    await shows(p, "OFF");
+    await engage(p);
+    expect(await within(p).findByRole("alert")).toHaveTextContent("Engage again unless the state above shows ENGAGED.");
+    await shows(p, "OFF");
+    expect(engageBtn(p)).toBeEnabled();
+  });
+
+  it("says before and after engaging that accepted orders are not cancelled", async () => {
+    const kept = "Orders already accepted are not cancelled and open positions are not closed.";
+    renderApp();
+    const p = await panel();
+    await shows(p, "OFF");
+    expect(p).toHaveTextContent(kept); // the Why panel
+    await userEvent.click(engageBtn(p));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(kept);
+    expect(dialog).toHaveTextContent("new entries are blocked");
+    expect(dialog).toHaveTextContent("Once saved, it stays on after a restart.");
+  });
+
+  it("shows on the engaged state that accepted orders are not cancelled", async () => {
+    read(killSwitchOn);
+    renderApp();
+    const p = await panel();
+    await shows(p, "ENGAGED");
+    expect(p.querySelector(".safety-status")).toHaveTextContent(
+      "New entries are blocked. Orders already accepted are not cancelled and open positions are not closed.",
+    );
+  });
+
+  it("never promises that an unsaved engage survives a restart", async () => {
+    server.use(http.post(`${KS}/engage`, () => problem(503, "kill_switch_not_saved", "Latched but not saved.")));
+    renderApp();
+    const p = await panel();
+    await shows(p, "OFF");
+    await engage(p);
+    await within(p).findByRole("alert");
+    // Every mention of a restart on the screen carries the "once saved" condition.
+    const claims = p.textContent!.match(/[^.]*stays on after a restart/g)!;
+    expect(claims).not.toHaveLength(0);
+    for (const claim of claims) expect(claim).toContain("Once saved");
   });
 
   it("shows the server's not-saved refusal and re-reads the latched state", async () => {

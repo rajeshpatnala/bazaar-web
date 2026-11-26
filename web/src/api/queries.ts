@@ -10,6 +10,7 @@ export const authMeQuery = queryOptions({
     return me;
   },
   staleTime: 60_000,
+  networkMode: "always", // a localhost app is never "paused offline"
 });
 
 export const statusQuery = queryOptions({

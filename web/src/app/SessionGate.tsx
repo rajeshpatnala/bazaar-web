@@ -9,8 +9,13 @@ export function SessionGate({ children }: { children: ReactNode }) {
   const me = useQuery(authMeQuery);
   if (me.isPending) return <p>Checking session...</p>;
   if (me.error instanceof ApiError && me.error.status === 401) return <SessionEnded />;
-  if (me.isError) {
-    return <p role="alert">Cannot reach the Bazaar server. Is the app still running?</p>;
-  }
-  return <>{children}</>;
+  const unreachable = <p role="alert">Cannot reach the Bazaar server. Is the app still running?</p>;
+  // Gate on data, not on the latest error: a failed later probe must not remove the kill switch.
+  if (!me.data) return unreachable;
+  return (
+    <>
+      {me.isError && unreachable}
+      {children}
+    </>
+  );
 }

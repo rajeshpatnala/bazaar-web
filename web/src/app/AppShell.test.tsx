@@ -50,7 +50,12 @@ describe("AppShell", () => {
     expect(await screen.findByText("19 Nov, 10:00 IST")).toBeVisible();
     expect(screen.queryByRole("switch")).toBeNull();
     expect(screen.queryByRole("checkbox")).toBeNull();
-    expect(screen.queryByRole("button", { name: /live|mode|paper/i })).toBeNull();
+    // The exact list: any new button in the shell fails here until it is reviewed.
+    await screen.findByText("OFF");
+    expect(screen.getAllByRole("button").map((b) => b.textContent)).toEqual([
+      "Engage kill switch",
+      "Why is there a kill switch?",
+    ]);
   });
 
   it("states live is on when the server says so", async () => {
