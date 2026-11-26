@@ -221,7 +221,8 @@ pub struct KillSwitchDto {
     pub readable: bool,
     /// True when the pipeline's in-process latch is set (an engage whose save failed shows here).
     pub latched: bool,
-    /// Last engage reason with control characters escaped (SEC-130-2); `null` if none.
+    /// Reason the stored switch is engaged, with control characters escaped (SEC-130-2); `null`
+    /// when the stored switch is off (also if only the latch is set) or unreadable.
     pub reason: Option<String>,
 }
 
@@ -239,7 +240,7 @@ impl From<KillSwitchReading> for KillSwitchDto {
             engaged: engaged || latched || !readable,
             readable,
             latched,
-            reason: reason.as_deref().map(escape_control),
+            reason: reason.filter(|_| readable).map(|r| escape_control(&r)),
         }
     }
 }
@@ -323,6 +324,17 @@ mod tests {
             latched: false,
         });
         assert!(d.engaged && !d.readable && !d.latched);
+    }
+
+    #[test]
+    fn an_unreadable_kill_switch_has_no_reason_even_if_the_port_sent_one() {
+        let d = KillSwitchDto::from(KillSwitchReading {
+            engaged: true,
+            reason: Some("stale".into()),
+            readable: false,
+            latched: false,
+        });
+        assert_eq!(d.reason, None);
     }
 
     #[test]

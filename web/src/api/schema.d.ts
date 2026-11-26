@@ -243,7 +243,10 @@ export interface components {
             latched: boolean;
             /** @description False when the stored state could not be read. */
             readable: boolean;
-            /** @description Last engage reason with control characters escaped (SEC-130-2); `null` if none. */
+            /**
+             * @description Reason the stored switch is engaged, with control characters escaped (SEC-130-2); `null`
+             *     when the stored switch is off (also if only the latch is set) or unreadable.
+             */
             reason?: string | null;
         };
         /**

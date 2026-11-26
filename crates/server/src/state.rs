@@ -20,7 +20,8 @@ use crate::{error::ApiError, security::Security};
 pub struct KillSwitchReading {
     /// True when engaged, or when the state could not be read.
     pub engaged: bool,
-    /// Last engage reason, raw text (escape on output with `dto::escape_control`).
+    /// Why the stored switch is engaged, raw text (escape on output with `dto::escape_control`);
+    /// `None` when the stored switch is off or unreadable.
     pub reason: Option<String>,
     /// False when the state could not be read (then `engaged` is true).
     pub readable: bool,
