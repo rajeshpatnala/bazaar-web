@@ -1,11 +1,12 @@
 ---
 name: findings-table-pipes
-description: Never put a bare `||` or `|` inside a findings-file table cell (decision text or suggested fix); it shifts the columns and merge-check reads the finding as open
+description: Never put any pipe character, escaped or not, inside a findings table cell; the kit splits rows on every pipe and can hide an open finding
 metadata:
   type: feedback
 ---
 
-Findings files (`.agents/reviews/<F>/pr-N/*.md`) are pipe tables parsed by the kit. A bare `|` or `||` in a cell (e.g. `a || b` in a Rust condition) splits the cell, shifts the status column, and merge-check keeps reporting the finding as open (seen on PR 102 RISK-102-3, 2026-11-21).
+Put no pipe character in any cell of a findings file (`.agents/reviews/<F>/pr-N/*.md`), and do not escape one: the kit splits rows on every pipe, escaped ones too. Write "or", and describe closures and shell pipes in words.
 
-**Why:** the parser counts columns from the right; extra cells misplace `status`.
-**How to apply:** write decisions in words ("or"), or escape as `\|\|`. After editing, run `just merge-check <pr>`; if a closed finding still shows open, check that row's cell count first. Also copy the fixed file to `.saved/` if a stale copy exists there.
+**Why:** the extra cells shift the later columns. On PR 102 (RISK-102-3, 2026-11-21) a closed finding read as open. On PR 197 (2026-11-26) an escaped pipe hid an open major and triage printed "approved to merge". This note's earlier advice to escape pipes was wrong.
+
+**How to apply:** read each finding's status in the file yourself; do not rely on triage or merge-check alone. If a row looks broken, check its cell count. Copy a fixed file to `.saved/` if a stale copy exists there. Drop this note once the kit splits only on unescaped pipes (see the manager note `triage-pipe-bug`).

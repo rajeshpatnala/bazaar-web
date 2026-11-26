@@ -1,0 +1,1 @@
+- [Shared Cargo dir is unsafe](shared_cargo_dir_stale.md) — worktrees sharing target/build dir got stale code and a false test pass
