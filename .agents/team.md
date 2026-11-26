@@ -11,8 +11,8 @@ New agents you hire get their rows here automatically.
 | agent | model | effort | max_turns | max_tokens_per_run |
 |---|---|---|---|---|
 | manager | claude-sonnet-5-5 | medium | - | - |
-| tech-lead | claude-sonnet-5-5 | high | 40 | 200,000 |
-| architect | claude-sonnet-5-5 | high | 30 | 200,000 |
+| tech-lead | opus | high | 40 | 200,000 |
+| architect | opus | high | 30 | 200,000 |
 | dev-data | claude-sonnet-5-5 | medium | 80 | 400,000 |
 | dev-quant | claude-sonnet-5-5 | medium | 80 | 400,000 |
 | dev-backtest | claude-sonnet-5-5 | medium | 80 | 400,000 |
@@ -25,9 +25,9 @@ New agents you hire get their rows here automatically.
 | security-reviewer | claude-sonnet-5-5 | medium | 15 | 150,000 |
 | cicd | claude-sonnet-5-5 | medium | 40 | 300,000 |
 | build-runner | claude-sonnet-5-5 | medium | 10 | 100,000 |
-| market-strategist | claude-sonnet-5-5 | high | 40 | 250,000 |
-| risk-guardian | claude-sonnet-5-5 | high | 40 | 200,000 |
-| quant-reviewer | claude-sonnet-5-5 | high | 40 | 200,000 |
+| market-strategist | opus | high | 40 | 250,000 |
+| risk-guardian | opus | high | 40 | 200,000 |
+| quant-reviewer | opus | high | 40 | 200,000 |
 | prototyper | claude-sonnet-5-5 | medium | 30 | 150,000 |
 | combined-reviewer | claude-sonnet-5-5 | medium | 6 | 80,000 |
 

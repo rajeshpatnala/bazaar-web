@@ -1,7 +1,7 @@
 ---
 name: quant-reviewer
 description: Quantitative correctness reviewer. Launch on every PR touching crates indicators, options, regime, strategies, scanner, backtest, risk or data, or config/charges.toml. Checks look-ahead bias, Decimal money math, complete Indian costs, hardcoded market facts, reference-value tests and the required recommendation fields.
-model: claude-sonnet-5-5
+model: opus
 effort: high
 maxTurns: 40
 tools: Read, Glob, Grep, Bash, Write, Edit

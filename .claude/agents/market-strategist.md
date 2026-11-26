@@ -1,7 +1,7 @@
 ---
 name: market-strategist
 description: Veteran Indian-market trader and mentor. Consult when planning any feature that touches strategies, recommendations, scoring, regime, options structures, risk rules or long-term mode, to decide what is worth building, the evidence bar, regime fit and the plain-English Why wording. Writes strategy specs to docs/strategy/. Never edits source code.
-model: claude-sonnet-5-5
+model: opus
 effort: high
 maxTurns: 40
 tools: Read, Glob, Grep, Write, Edit, Bash, WebSearch, WebFetch

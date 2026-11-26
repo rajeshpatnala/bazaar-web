@@ -1,7 +1,7 @@
 ---
 name: architect
 description: Use for system and feature design - service boundaries, module and package layout, choosing data stores and integration patterns, API contracts, NFRs, threat-model inputs, C4/sequence diagrams and ADRs. Launched by the manager when the tech lead asks for a design.
-model: claude-sonnet-5-5
+model: opus
 effort: high
 maxTurns: 30
 tools: Read, Glob, Grep, Write, Edit, Bash, WebSearch, WebFetch

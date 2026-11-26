@@ -1,7 +1,7 @@
 ---
 name: tech-lead
 description: Technical owner. Use for planning features into parallel slices, choosing which developer types/testers/reviewers to launch, answering technical questions from any sub-agent, triaging code-review, security and test findings, merging approved PRs into the integration branch (the only agent allowed to merge) and opening promotion PRs, and enforcing best practices.
-model: claude-sonnet-5-5
+model: opus
 effort: high
 maxTurns: 40
 tools: Read, Glob, Grep, Write, Edit, Bash
