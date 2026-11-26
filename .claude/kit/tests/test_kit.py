@@ -43,7 +43,7 @@ class KitRepo:
     def __init__(self):
         self.dir = pathlib.Path(tempfile.mkdtemp(prefix="kit-test-"))
         (self.dir / ".claude").mkdir()
-        shutil.copytree(KIT, self.dir / ".claude" / "kit", ignore=shutil.ignore_patterns("tests", "__pycache__"))
+        shutil.copytree(KIT, self.dir / ".claude" / "kit", ignore=shutil.ignore_patterns("tests", "__pycache__", "installer"))
         (self.dir / ".agents" / "reviews").mkdir(parents=True)
         (self.dir / ".agents" / "plans").mkdir(parents=True)
         (self.dir / ".agents" / "stack.json").write_text(json.dumps(STACK))
