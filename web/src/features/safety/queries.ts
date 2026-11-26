@@ -1,4 +1,5 @@
 import { queryOptions, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useRef } from "react";
 import { api, ApiError, unwrap } from "../../api/client";
 import { keys } from "../../api/keys";
 import type { components } from "../../api/schema";
@@ -36,13 +37,10 @@ export const killSwitchQuery = queryOptions({
 });
 
 /** The POST reply is never shown as the state: success or failure, the cache is cleared and read again. */
-export function useEngage() {
+function useKillSwitchWrite<T>(send: (input: T) => Promise<unknown>) {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: async () => {
-      const body = { reason: "" }, signal = AbortSignal.timeout(TIMEOUT_MS); // blank is stored as "unspecified"
-      return unwrap(await api.POST("/api/v1/killswitch/engage", { body, signal }));
-    },
+    mutationFn: send,
     retry: false,
     networkMode: "always",
     onMutate: () => client.cancelQueries({ queryKey: keys.killSwitch }),
@@ -51,4 +49,39 @@ export function useEngage() {
       void client.resetQueries({ queryKey: keys.killSwitch });
     },
   });
+}
+
+/**
+ * The server runs the writes in the order they arrive, and two requests can arrive either way round. So an engage
+ * clicked during a release is sent at once and again when it ends: this beats a release queued before the second engage.
+ */
+export function useKillSwitchWrites() {
+  // Settles when the release request in flight ends, however it ends.
+  const releasing = useRef<Promise<void> | null>(null);
+
+  const engage = useKillSwitchWrite(async () => {
+    const post = async () => {
+      const body = { reason: "" }, signal = AbortSignal.timeout(TIMEOUT_MS); // blank is stored as "unspecified"
+      return unwrap(await api.POST("/api/v1/killswitch/engage", { body, signal }));
+    };
+    const ended = releasing.current;
+    if (!ended) return post();
+    await Promise.allSettled([post(), ended]);
+    return post();
+  });
+
+  // The phrase is taken out of its box as it is sent, so the mutation cache does not keep it.
+  const release = useKillSwitchWrite((box: { phrase: string }) => {
+    const body = { phrase: box.phrase };
+    box.phrase = "";
+    const signal = AbortSignal.timeout(TIMEOUT_MS);
+    const sent = (async () => unwrap(await api.POST("/api/v1/killswitch/release", { body, signal })))();
+    const done = () => {
+      releasing.current = null;
+    };
+    releasing.current = sent.then(done, done);
+    return sent;
+  });
+
+  return { engage, release };
 }

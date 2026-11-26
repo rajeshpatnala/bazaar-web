@@ -84,6 +84,7 @@ describe("kill switch state", () => {
     expect(within(p).getByText(tag)).toBeVisible();
     expect(within(p).queryByText("OFF")).toBeNull();
     expect(engageBtn(p)).toBeEnabled();
+    if (tag !== "ENGAGED") expect(within(p).queryByRole("button", { name: "Release..." })).toBeNull();
   });
 
   it("is unknown while loading, with Engage already there", async () => {

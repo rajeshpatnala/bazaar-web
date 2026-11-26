@@ -22,7 +22,8 @@ Owner area: `web/` (nothing in `crates/`). Plan: `.agents/plans/F13-ui-slice1.md
 - TODO(BZ-509): replace the provisional types in `features/orders/types.ts` and `features/ideas/types.ts` and the `apiJson` calls with the generated schema types and `api`.
 - Slice 4 (BZ-505): `app/Home.tsx` overview of the practice account (capital, day profit or loss, open positions, ideas count, regime and data-delayed badges, IST as-of; empty state "No high-quality setups today") from mock `GET /api/v1/overview` (`mocks/account.ts`, provisional `features/overview/`); main navigation (Home, Ideas; the paper-order review opens from each idea) in `app/AppShell.tsx`.
 
-- LIVE plan slice 34, part 1 (kill switch state and engage): `features/safety/` (`KillSwitchPanel` in `app/AppShell.tsx`, inside `SessionGate`, above every route and outside the route error boundary). Generated types with runtime checks; `GET /api/v1/killswitch` polled every 5 s (hidden tab too) with a 10 s timeout, stopping on 401. Engage is offered in every state, behind one confirm step; it sends a blank reason (a reason input comes with part 2). The POST reply is never shown as the state: success or failure, the cache is cleared and re-read; a failed read shows UNKNOWN even with cached data; no answer, 408 or a server fault reads "result is unknown". The kill reason renders as text only (SEC-130-2). Mocks in `mocks/safety.ts`. Look: current, tokens only (owner O15).
+- LIVE plan slice 34, part 1 (kill switch state and engage): `features/safety/` (`KillSwitchPanel` in `app/AppShell.tsx`, inside `SessionGate`, above every route and outside the route error boundary). Generated types with runtime checks; `GET /api/v1/killswitch` polled every 5 s (hidden tab too) with a 10 s timeout, stopping on 401. Engage is offered in every state, behind one confirm step. The POST reply is never shown as the state: success or failure, the cache is cleared and re-read; a failed read shows UNKNOWN even with cached data; no answer, 408 or a server fault reads "result is unknown". The kill reason renders as text only (SEC-130-2). Mocks in `mocks/safety.ts`. Look: current, tokens only (owner O15).
+- LIVE plan slice 34, part 2 (release and reason): release is offered only on a confirmed engaged state and needs the typed phrase, which only the server checks; confirm is disabled if the state or reason changes under the open dialog, and stays disabled until the dialog is reopened. The phrase is not kept in the mutation cache. The reason shown is the server's stored one (the first engage's, "unspecified" when blank). This screen still engages with a blank reason (reason input: LIVE slice 44). An engage clicked during a release is sent at once and again when the release request ends.
 
 ## Disclaimer wording
 - Owner approved 2026-11-21: "For education and personal analysis. Not investment advice; not SEBI registered; markets carry risk. Past performance does not guarantee future results." Applied in `crates/core/src/disclaimer.rs`, `web/src/shared/disclaimer.ts`, README, the compliance skill reference and the regime doc comment; byte-equality pinned by `rust_and_ts_disclaimers_are_byte_equal`.
@@ -35,19 +36,21 @@ Owner area: `web/` (nothing in `crates/`). Plan: `.agents/plans/F13-ui-slice1.md
 - Types for ideas, order preview and account are provisional (`// PROVISIONAL`) until F13 server slices publish OpenAPI.
 
 ## Known limits
-- Kill switch: the UI cannot release it yet (part 2: typed phrase) and shows no alarms banner yet (part 3). It appears only after a first successful session probe (`auth/me`), because writes need its CSRF token; a later failed probe keeps it, with a "cannot reach the server" alert, and only a 401 removes it (the session then stays ended until a probe succeeds). Engage does not cancel accepted orders or close open positions. No engage hotkey.
+- Kill switch: no alarms banner yet (part 3). It appears only after a first successful session probe (`auth/me`), because writes need its CSRF token; a later failed probe keeps it, with a "cannot reach the server" alert, and only a 401 removes it (the session then stays ended until a probe succeeds). Engage does not cancel accepted orders or close open positions. No engage hotkey (LIVE slice 44). An Engage clicked during a release is sent again after the release request ends; a release the server queues later than that (after the browser gave up on it) could still win, which the next read shows as OFF. If the page is closed, reloaded or logged out during the wait, the second engage is not sent (or is refused), so a release that landed after the first one wins.
 - Mock data only; no real recommendations; no server routes, WS, charts, dark theme or live-mode UI.
 
 ## Deferred
+- LIVE slice 43 (before slice 33): RISK-196-1 and RISK-196-4, server engage count; a stale release gets 409 and Confirm is disabled when the count moved.
+- LIVE slice 44 (before slice 33): reason input on Engage (500-byte cap); RISK-196-3 (tests: second engage held then failed; release ended by the 10 s limit); RISK-196-5 (with no saved reason, say the last engage may not have been saved).
 - DONE (PR 103): add "not SEBI registered" to the disclaimer in `crates/core/src/disclaimer.rs` and `web/src/shared/disclaimer.ts` together.
 - Swap provisional types for generated schema types (F13 server slice).
 - WebSocket events replacing polling mocks (F13 server slice).
 - CR-124-4: per-idea validation deferred to BZ-509 (generated types)
 - Owner to confirm the disclaimer wording, the read-only live note and the "Ideas to consider today" copy.
-- RISK-194-3: kill state and stop button inside the order dialog, Approve disabled while engaged or unknown (LIVE slice 37); kill hotkey (LIVE-s34 part 2).
-- RISK-194-4: compact stop and status kept visible, minding the `.shell-main` overflow; check at 720 px (LIVE-s34 part 2).
-- RISK-194-7: show UNKNOWN when the last read is older than about 15 s, or show its IST time (LIVE-s34 part 2).
-- RISK-194-10: unreachable alert clears once the server answers (LIVE-s34 part 2).
+- RISK-194-3: kill state and stop button inside the order dialog, Approve disabled while engaged or unknown (LIVE slice 37); kill hotkey (LIVE slice 44).
+- RISK-194-4: compact stop and status kept visible, minding the `.shell-main` overflow; check at 720 px (LIVE slice 44).
+- RISK-194-7: show UNKNOWN when the last read is older than about 15 s, or show its IST time (LIVE slice 44).
+- RISK-194-10: unreachable alert clears once the server answers (LIVE slice 44).
 - CR-194-5: split the two-value `const` in `features/safety/queries.ts` (next UI slice, nit).
 - DONE (LIVE slice 42): RISK-194-8, server returns the stored kill reason, from one row read with the state; `null` when the stored switch is off (also if only the latch is set) or unreadable. A repeat engage writes no row, so the reason is the first engage's.
 - RISK-194-5 (server part): cancel open orders on kill engage (LIVE slice 41, before slice 33).
@@ -60,3 +63,4 @@ Owner area: `web/` (nothing in `crates/`). Plan: `.agents/plans/F13-ui-slice1.md
 - 2026-11-22: slice 4 (overview and navigation, BZ-505).
 - 2026-11-26: LIVE plan slice 34 part 1 (kill switch state and engage).
 - 2026-11-26: fix: in the order review dialog, an early expiry timer re-arms, and the timer is set for at most one second before it re-reads the clock, and the Approve click re-reads it and sends nothing once expired. A running, paused or failed re-preview keeps Approve disabled, and neither the preview nor the approve request is queued when the browser reports offline. Browser sleep and tab throttling were not tried in a real browser; the server's expiry check remains the authority.
+- 2026-11-26: LIVE plan slice 34 part 2 (typed-phrase release).
