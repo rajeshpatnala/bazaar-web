@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { onSessionEnded, setCsrfToken } from "../../api/client";
 import { DISCLAIMER } from "../../shared/disclaimer";
 import { makePreview } from "../../mocks/orders";
@@ -22,6 +22,8 @@ async function openDialog() {
 const approveBtn = (d: HTMLElement) => within(d).findByRole("button", { name: "Approve paper order" });
 
 describe("Review paper order dialog", () => {
+  afterEach(() => vi.useRealTimers());
+
   it("shows mode-driven PAPER text, every figure in INR, IST times, gate reasons, safe wording", async () => {
     const d = await openDialog();
     expect(await within(d).findByText("₹57,000.00")).toBeInTheDocument();
@@ -246,5 +248,15 @@ describe("Review paper order dialog", () => {
     expect(seen.map((s) => s.id)).toEqual(["appr-1", "appr-2"]);
     expect(seen[0]?.idem).not.toBe(seen[1]?.idem);
     expect(within(d).queryByText(/Could not confirm the result/)).toBeNull();
+  });
+
+  it("still expires when its timer fires before the wall clock gets there", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    previewWith({ expires_at: new Date(Date.now() + 60_000).toISOString() });
+    const d = await openDialog();
+    await approveBtn(d);
+    vi.setSystemTime(Date.now() - 100); // the wall clock now lags the timer
+    await vi.advanceTimersByTimeAsync(60_200);
+    expect(await within(d).findByRole("button", { name: "Review again" })).toBeVisible();
   });
 });

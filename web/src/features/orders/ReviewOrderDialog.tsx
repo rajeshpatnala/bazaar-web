@@ -39,7 +39,12 @@ export function ReviewOrderDialog({ ideaId, onClose }: { ideaId: string; onClose
 
   useEffect(() => {
     if (expiresMs === null) return;
-    const t = setTimeout(() => setNow(Date.now()), Math.min(Math.max(expiresMs - Date.now(), 0), 2 ** 31 - 1));
+    // A timer can fire just before Date.now() reaches its target, so wait again until it has.
+    const check = () => {
+      if (Date.now() >= expiresMs) setNow(Date.now());
+      else t = setTimeout(check, Math.min(expiresMs - Date.now(), 2 ** 31 - 1));
+    };
+    let t = setTimeout(check, Math.min(Math.max(expiresMs - Date.now(), 0), 2 ** 31 - 1));
     return () => clearTimeout(t);
   }, [expiresMs]);
 
