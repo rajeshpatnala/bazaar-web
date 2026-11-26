@@ -22,6 +22,8 @@ Owner area: `web/` (nothing in `crates/`). Plan: `.agents/plans/F13-ui-slice1.md
 - TODO(BZ-509): replace the provisional types in `features/orders/types.ts` and `features/ideas/types.ts` and the `apiJson` calls with the generated schema types and `api`.
 - Slice 4 (BZ-505): `app/Home.tsx` overview of the practice account (capital, day profit or loss, open positions, ideas count, regime and data-delayed badges, IST as-of; empty state "No high-quality setups today") from mock `GET /api/v1/overview` (`mocks/account.ts`, provisional `features/overview/`); main navigation (Home, Ideas; the paper-order review opens from each idea) in `app/AppShell.tsx`.
 
+- LIVE plan slice 34 (kill switch and alarms): `features/safety/` (`SafetyBar` in `app/AppShell.tsx`, inside `SessionGate`, above every route and outside the route error boundary). Generated types with runtime checks; `GET /api/v1/killswitch` and `GET /api/v1/alarms` polled every 5 s with a 10 s timeout, polling stops on 401. Engage is offered in every state (optional reason, 500-byte cap); release is offered only on a confirmed engaged state and needs the typed phrase, which only the server checks. A write's reply is never shown as the state: success or failure, the cached state is cleared and re-read; a failed read shows UNKNOWN even with cached data. Kill reason and alarm text render as text only (SEC-130-2). An unreadable alarm list says so and keeps the last list labelled out of date. Mocks in `mocks/safety.ts`. Look: current light premium, tokens only (owner O15).
+
 ## Disclaimer wording
 - Owner approved 2026-11-21: "For education and personal analysis. Not investment advice; not SEBI registered; markets carry risk. Past performance does not guarantee future results." Applied in `crates/core/src/disclaimer.rs`, `web/src/shared/disclaimer.ts`, README, the compliance skill reference and the regime doc comment; byte-equality pinned by `rust_and_ts_disclaimers_are_byte_equal`.
 
@@ -33,6 +35,8 @@ Owner area: `web/` (nothing in `crates/`). Plan: `.agents/plans/F13-ui-slice1.md
 - Types for ideas, order preview and account are provisional (`// PROVISIONAL`) until F13 server slices publish OpenAPI.
 
 ## Known limits
+- Kill switch and alarms controls are hidden when the session probe (`auth/me`) fails, because writes need its CSRF token.
+- No keyboard hotkey for engage.
 - Mock data only; no real recommendations; no server routes, WS, charts, dark theme or live-mode UI.
 
 ## Deferred
@@ -48,3 +52,4 @@ Owner area: `web/` (nothing in `crates/`). Plan: `.agents/plans/F13-ui-slice1.md
 - 2026-11-22: slice 2 (ideas screen, BZ-503).
 - 2026-11-22: slice 3 (paper-order review dialog, BZ-504).
 - 2026-11-22: slice 4 (overview and navigation, BZ-505).
+- 2026-11-25: LIVE plan slice 34 (kill switch engage and release, alarms banner).

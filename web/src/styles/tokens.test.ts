@@ -31,6 +31,11 @@ describe("token contrast (WCAG AA, 4.5:1)", () => {
     ["amber", "card"],
     ["amber", "amber-bg"],
     ["on-accent", "green"],
+    ["on-accent", "red"],
+    ["ink", "red-bg"],
+    ["muted", "red-bg"],
+    ["ink", "amber-bg"],
+    ["muted", "amber-bg"],
   ])("%s on %s", (fg, bg) => {
     expect(ratio(token(fg), token(bg))).toBeGreaterThanOrEqual(4.5);
   });
