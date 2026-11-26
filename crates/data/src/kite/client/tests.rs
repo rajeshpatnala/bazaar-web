@@ -22,8 +22,9 @@ fn local(base: &str) -> KiteSection {
     KiteSection {
         api_base: base.to_owned(),
         allowed_hosts: vec!["127.0.0.1".to_owned()],
-        connect_timeout_secs: 1,
-        request_timeout_secs: 1,
+        // Generous, so a loaded machine cannot turn another result into `Timeout`.
+        connect_timeout_secs: 10,
+        request_timeout_secs: 10,
         max_response_bytes: 256,
         ..shipped()
     }
@@ -93,6 +94,26 @@ fn production_client_takes_the_shipped_config_and_refuses_other_targets() {
         config.api_base = base.to_owned();
         let got = KiteClient::new(&config).unwrap_err();
         assert_eq!(got, KiteError::Config("api_base must end at the host"));
+    }
+}
+
+#[test]
+fn listing_a_host_in_config_does_not_make_it_an_api_host() {
+    // `kite.zerodha.com` is the shipped login host; it must not take the API credential either.
+    for host in [
+        "evil.example",
+        "kite.zerodha.com",
+        "evilkite.trade",
+        "api.kite.trade.evil.example",
+        "kite.trade",
+        "192.0.2.1",
+        "[::1]",
+    ] {
+        let mut config = shipped();
+        config.allowed_hosts.push(host.to_owned());
+        config.api_base = format!("https://{host}");
+        let got = KiteClient::new(&config).unwrap_err();
+        assert_eq!(got, KiteError::DisallowedTarget, "{host}");
     }
 }
 
@@ -231,6 +252,31 @@ async fn bad_json_is_a_decode_error() {
 }
 
 #[tokio::test]
+async fn optional_data_must_be_present_and_only_null_is_none() {
+    let optional = async |text: &str| {
+        let server = serve(ResponseTemplate::new(200).set_body_string(text)).await;
+        let (api_key, access_token) = (Secret::new(KEY.into()), Secret::new(TOKEN.into()));
+        let credentials = KiteCredentials {
+            api_key: &api_key,
+            access_token: &access_token,
+        };
+        let client = client(&server.uri());
+        client
+            .get_json::<Option<Vec<u32>>>("/x", &[], credentials)
+            .await
+    };
+    let missing = optional(r#"{"status":"success"}"#).await;
+    assert!(
+        matches!(missing, Err(KiteError::Decode { .. })),
+        "{missing:?}"
+    );
+    let null = optional(r#"{"status":"success","data":null}"#).await;
+    assert_eq!(null, Ok(None));
+    let some = optional(r#"{"status":"success","data":[1]}"#).await;
+    assert_eq!(some, Ok(Some(vec![1])));
+}
+
+#[tokio::test]
 async fn a_redirect_is_never_followed() {
     // The destination is on the allowlist too, so only the redirect policy stops it.
     let destination = serve(ResponseTemplate::new(200)).await;
@@ -267,13 +313,21 @@ async fn a_body_over_the_cap_is_refused_with_or_without_a_length() {
 
 #[tokio::test]
 async fn slow_headers_and_a_stalled_body_time_out() {
+    let impatient = |base: &str| {
+        let config = KiteSection {
+            connect_timeout_secs: 1,
+            request_timeout_secs: 1,
+            ..local(base)
+        };
+        KiteClient::build(&config, Scheme::LoopbackHttp).unwrap()
+    };
     let slow = ResponseTemplate::new(200).set_delay(Duration::from_secs(5));
     let server = serve(slow).await;
-    let got = call(&client(&server.uri())).await;
+    let got = call(&impatient(&server.uri())).await;
     assert_eq!(got, Err(KiteError::Timeout));
     let stalled = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{";
-    let base = raw_server(stalled.into(), 3000);
-    assert_eq!(call(&client(&base)).await, Err(KiteError::Timeout));
+    let base = raw_server(stalled.into(), 5000);
+    assert_eq!(call(&impatient(&base)).await, Err(KiteError::Timeout));
 }
 
 #[tokio::test]

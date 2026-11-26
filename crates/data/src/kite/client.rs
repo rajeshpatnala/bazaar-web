@@ -13,6 +13,9 @@ use serde::de::DeserializeOwned;
 
 use super::{ApiErrorType, KiteError};
 
+/// The credential goes only to hosts under this domain. Not in config, so config cannot widen it.
+const API_DOMAIN_SUFFIX: &str = ".kite.trade";
+
 /// What a signed-in call sends. The caller checks token expiry. `Debug` is redacted.
 #[derive(Debug, Clone, Copy)]
 pub struct KiteCredentials<'a> {
@@ -44,7 +47,10 @@ struct Head {
 }
 
 #[derive(Deserialize)]
+#[serde(bound(deserialize = "T: Deserialize<'de>"))]
 struct Envelope<T> {
+    /// A missing key is an error even for an `Option`; only an explicit `null` is `None`.
+    #[serde(deserialize_with = "Deserialize::deserialize")]
     data: T,
 }
 
@@ -97,7 +103,9 @@ impl KiteClient {
     fn check_target(&self, url: &Url) -> Result<(), KiteError> {
         let host = url.host_str().unwrap_or_default();
         let transport_ok = match self.scheme {
-            Scheme::Https => url.scheme() == "https" && url.port().is_none(),
+            Scheme::Https => {
+                url.scheme() == "https" && url.port().is_none() && host.ends_with(API_DOMAIN_SUFFIX)
+            }
             #[cfg(test)]
             Scheme::LoopbackHttp => url.scheme() == "http" && host == "127.0.0.1",
         };
@@ -128,7 +136,8 @@ impl KiteClient {
         Ok(url)
     }
 
-    /// `GET` a raw body (the instruments dump is CSV). Only a 200 is data.
+    /// `GET` the body as received (the instruments dump is gzip CSV; the caller unzips with its
+    /// own size cap and checks the gzip trailer). Only a 200 is data.
     pub async fn get_bytes(
         &self,
         path: &str,
