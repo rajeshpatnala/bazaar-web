@@ -138,7 +138,7 @@ If one of these seems to have no effect, it may need to be set in your shell bef
 | `heavy_builds_at_once` | 1 | Compiling commands that may run at once across the checkout and all worktrees; others wait for a slot (`0` = no limit). Keeps parallel agents from running out of memory |
 | `build_jobs` | `-` | Cap on cargo's parallel jobs and test threads for kit-run builds (`-` = one per CPU). Lower = less memory per build |
 | `build_wait_minutes` | 30 | How long a gate waits for a build slot before it stops |
-| `rustc_wrapper` | `auto` | `auto`: use sccache when it is installed; `none`: never; any other value is used as RUSTC_WRAPPER |
+| `rustc_wrapper` | `auto` | `auto`: use sccache when it is installed; `sccache`: always; `none`: never. Any other wrapper comes only from your own `RUSTC_WRAPPER` environment variable |
 | `preview_first` | `yes` | Look-and-feel work gets a cheap preview you pick from before anything is built (frontend kits: clickable demo pages) |
 
 ### Review policy

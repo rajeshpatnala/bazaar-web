@@ -173,9 +173,21 @@ def base_ref() -> str:
 # ---------------------------------------------------------------- build economy (fewer, smaller, shared builds)
 
 # A cargo step reads more than .rs files (config, fixtures, SQL, include_str! data), so by default it depends on
-# every file except these. stack.json -> gate "build_ignore" adds project paths no Rust code reads (e.g. "web/**").
-BUILD_IGNORE_DEFAULT = ["**/*.md", "docs/**", ".agents/**", ".claude/**", ".github/**", "**/node_modules/**",
-                        "LICENSE*", ".gitignore", "justfile", ".env.example"]
+# every file except these. stack.json -> gate "build_ignore" adds project paths no Rust code or test reads. Check the
+# tests first: they may read files outside the crates (web sources, the justfile, CI workflows, example env files).
+BUILD_IGNORE_DEFAULT = ["**/*.md", "docs/**", ".agents/**", ".claude/**", "**/node_modules/**",
+                        "LICENSE*", ".gitignore"]
+
+# A dependency audit's result depends on an advisory database that changes while the files do not.
+AUDIT_RX = re.compile(r"\bcargo\s+(deny|audit)\b|\b(pnpm|npm|yarn)\b[^|;&]*\baudit\b")
+
+
+def always_runs(step: dict) -> bool:
+    """Never skipped and never served from the pass cache: stack.json "cache": false (or true to opt back in);
+    by default every dependency audit."""
+    if "cache" in step:
+        return not step["cache"]
+    return bool(AUDIT_RX.search(step["cmd"]))
 
 
 def step_paths(step: dict) -> tuple:
@@ -253,11 +265,18 @@ def changed_vs_base() -> list:
     if current_branch() in (integ, rel, ""):
         return None
     base = base_ref()
-    committed = git_checked("diff", "--name-only", f"{base}...HEAD") if base else None
-    status = git_checked("status", "--porcelain", "--untracked-files=all")
+    # --no-renames lists a moved file under its old and new path; -z gives paths unquoted
+    committed = git_checked("diff", "--name-only", "--no-renames", "-z", f"{base}...HEAD") if base else None
+    status = git_checked("status", "--porcelain", "-z", "--no-renames", "--untracked-files=all")
     if committed is None or status is None:
         return None
-    return [x for x in committed.splitlines() if x] + [l[3:].split(" -> ")[-1] for l in status.splitlines() if len(l) > 3]
+    entries = [x for x in status.split("\0") if x]
+    if any(len(x) < 4 or x[2] != " " for x in entries):
+        return None  # not the expected "XY path" form: every step runs
+    return [x for x in committed.split("\0") if x] + [x[3:] for x in entries]
+
+
+RUSTC_WRAPPERS = ("auto", "none", "sccache")
 
 
 def build_env() -> dict:
@@ -268,12 +287,33 @@ def build_env() -> dict:
     if jobs.isdigit() and int(jobs) > 0:
         env.setdefault("CARGO_BUILD_JOBS", jobs)
         env.setdefault("NEXTEST_TEST_THREADS", jobs)
+    # cargo runs the wrapper program on every build, so team.md can only name sccache; any other wrapper comes from
+    # the owner's own RUSTC_WRAPPER environment variable
     wrap = team_setting("rustc_wrapper", "auto").strip().lower()
-    if wrap == "auto" and shutil.which("sccache") and not env.get("RUSTC_WRAPPER"):
-        env["RUSTC_WRAPPER"] = "sccache"
-    elif wrap not in ("auto", "none", "-", "") and not env.get("RUSTC_WRAPPER"):
-        env["RUSTC_WRAPPER"] = wrap
+    if not env.get("RUSTC_WRAPPER"):
+        if wrap == "sccache" or (wrap == "auto" and shutil.which("sccache")):
+            env["RUSTC_WRAPPER"] = "sccache"
+        elif wrap not in ("auto", "none", "-", ""):
+            print(f"kit: team.md rustc_wrapper ignored (allowed: {', '.join(RUSTC_WRAPPERS)}); set RUSTC_WRAPPER "
+                  "in your own environment for another wrapper", file=sys.stderr)
     return env
+
+
+# what `just cargo` may run (Bash(just:*) is auto-approved): nothing that runs the apps, publishes or installs
+CARGO_ALLOWED = ("build", "check", "clippy", "fmt", "test", "bench", "doc", "tree", "nextest")
+NEXTEST_ALLOWED = ("run", "list")
+
+
+def cargo_refusal(args: list) -> str:
+    """Why `kit.py cargo` refuses these arguments, naming the rule; "" when they are allowed."""
+    if args[0] not in CARGO_ALLOWED:
+        return f"the first argument must be one of: {', '.join(CARGO_ALLOWED)} (got {args[0]!r})"
+    if args[0] == "nextest" and (len(args) < 2 or args[1] not in NEXTEST_ALLOWED):
+        return f"nextest must be followed by one of: {', '.join(NEXTEST_ALLOWED)}"
+    for a in args[:args.index("--") if "--" in args else len(args)]:
+        if a.startswith(("--config", "-Z")):
+            return f"--config and -Z are not allowed before -- (got {a!r})"
+    return ""
 
 
 class BuildSlot:
@@ -334,6 +374,7 @@ def run_step(step: dict, log_dir: pathlib.Path, max_lines: int, error_re: str) -
     if step.get("needs") and not ok(step["needs"]):
         if step.get("fallback"):
             cmd = step["fallback"]
+            step["_not_run"] = True  # the step's own command did not run: never remember this as its pass
         elif step.get("optional"):
             print(f"skip {step['name']} (tool not installed)")
             step["_not_run"] = True  # not a pass to remember
@@ -375,7 +416,7 @@ def gate(only: str = None, extra: bool = False, fresh: bool = False) -> int:
     fresh = fresh or os.environ.get("KIT_GATE_FRESH") == "1"
     changed = None if fresh else changed_vs_base()
     for st in steps:
-        paths = step_paths(st)
+        paths = ([], []) if always_runs(st) else step_paths(st)  # no paths: never skipped, never cached
         if paths[0] and not fresh:
             # nothing it reads changed on this branch: the integration branch's CI already covered these inputs
             if changed is not None and not any(reads(x, paths) for x in changed):
@@ -1776,20 +1817,16 @@ def nit_defers(fname: str) -> bool:
     return bool(re.match(r"(code-review|tests)([-_.]|\d|$)", stem))
 
 
-def fix_words(fix: str) -> set:
-    return {w for w in re.findall(r"[a-z0-9_]+", fix.lower()) if len(w) > 2 and w not in
-            {"the", "and", "for", "that", "this", "with", "add", "use", "should", "instead", "also", "into", "from"}}
+def normal_fix(fix: str) -> str:
+    """A suggested fix without formatting: lower case, no backticks, single spaces, no trailing . ; , - every other
+    word and symbol is kept."""
+    return " ".join(fix.lower().replace("`", "").split()).rstrip(".;, ")
 
 
 def fixes_conflict(fixes) -> bool:
-    """Two or more suggested fixes for one spot conflict unless they say the same thing: identical, or one's words
-    contain the other's, or they share most words (duplicates take one decision instead of a tech-lead run)."""
-    sets = [w for w in dict.fromkeys(frozenset(fix_words(f)) for f in fixes if f.strip()) if w]
-    for i, a in enumerate(sets):
-        for b in sets[i + 1:]:
-            if not (a <= b or b <= a or len(a & b) / len(a | b) >= 0.6):
-                return True
-    return False
+    """Suggested fixes for one spot conflict unless their normalised text is identical. Never judge by shared words:
+    "cache the result" and "do not cache the result" share almost all of them. Empty fixes are ignored."""
+    return len({normal_fix(f) for f in fixes} - {""}) > 1
 
 
 def triage_decision(fname: str, r: dict, spots: dict, defer_new: bool, fix_files: set) -> tuple:
@@ -1803,7 +1840,7 @@ def triage_decision(fname: str, r: dict, spots: dict, defer_new: bool, fix_files
         (bool(QUESTION_RX.search(fix)) and not fix.lower().startswith(("add", "use", "replace", "remove", "rename", "move")))
     if asks:
         return "", "a question or decision, not a fix (owner or tech lead decides)"
-    if status == "disputed":
+    if re.sub(r"[*_`]", "", status).strip().startswith("disputed"):  # also "disputed: <reason>"
         return "", "disputed by the developer"
     if status_state(status) == "unknown":
         return "", f"unknown status '{status[:30]}' (open | fixed | not fixed | disputed)"
@@ -2368,8 +2405,9 @@ def warm(argv: list) -> int:
 
 SETTING_CHOICES = {"work_mode": ["worktrees", "in-place"], "preload_mode": ["cards", "skills"],
                    "review_rounds": ["full", "fixes-only"], "defer_minor_after_round": ["off", "1", "2"],
-                   "budget_measure": ["tokens", "cost-eq"], "nit_policy": ["defer", "fix"]}
-FREE_TEXT = {"build_jobs", "rustc_wrapper", "envelope_command", "reuse_roles", "integration_branch", "release_branch", "usd_per_million_tokens",
+                   "budget_measure": ["tokens", "cost-eq"], "nit_policy": ["defer", "fix"],
+                   "rustc_wrapper": list(RUSTC_WRAPPERS)}
+FREE_TEXT = {"build_jobs", "envelope_command", "reuse_roles", "integration_branch", "release_branch", "usd_per_million_tokens",
              "subagent_model", "security_block_severities", "records_extra_globs"}
 
 
@@ -4827,7 +4865,10 @@ EXPORT_REQUIRED = ["install.py", "install.sh", ".claude/kit/kit.py"]
 INSTALLER_COPY = ".claude/kit/installer"
 EXPORT_SKIP = [".claude/worktrees/**", ".claude/settings.local.json", ".claude/**/__pycache__/**", "**/*.pyc",
                ".agents/backup-*/**", ".agents/.reuse-nudged", "**/.env", "**/.env.*", "**/node_modules/**",
-               "**/target/**", "data/**", "**/*.key", "**/*.pem", "**/*.p12", "**/.DS_Store"]
+               "**/target/**", "data/**", "**/*.key", "**/*.pem", "**/*.p12", "**/.DS_Store",
+               # the other names guard-secrets.sh treats as secret
+               "**/.envrc", "**/*.p8", "**/*.pfx", "**/*.jks", "**/*.keystore", "**/secrets/**",
+               "**/id_rsa*", "**/id_ecdsa*", "**/id_ed25519*"]
 
 
 def export_kit(argv: list) -> int:
@@ -4959,6 +5000,9 @@ def main(argv: list) -> int:
     if cmd == "cargo":  # a one-off cargo command (targeted test, build) under the same build slot and job cap
         if not rest:
             sys.exit("usage: kit.py cargo <cargo arguments>   e.g. kit.py cargo nextest run -p core my_test")
+        refused = cargo_refusal(rest)
+        if refused:
+            sys.exit(f"kit: cargo refused: {refused}; nothing was run")
         import shlex
         step = {"name": "cargo " + (rest[0] if rest else ""), "cmd": "cargo " + shlex.join(rest)}
         if is_heavy(step):

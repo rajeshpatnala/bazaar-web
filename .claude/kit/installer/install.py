@@ -13,6 +13,7 @@ Safe by design:
 """
 import datetime as dt
 import filecmp
+import fnmatch
 import json
 import re
 import pathlib
@@ -22,6 +23,7 @@ import sys
 
 KIT = pathlib.Path(__file__).resolve().parent
 SKIP = {"install.py", "install.sh", ".git", "__pycache__"}
+SECRET_NAMES = ("*.key", "*.pem", "*.p8", "*.p12", "*.pfx", "*.jks", "*.keystore", "id_rsa*", "id_ecdsa*", "id_ed25519*")
 MARK = "agent-kit"
 TITLE = json.loads((KIT / ".agents" / "stack.json").read_text()).get("title", "Agent") if (KIT / ".agents" / "stack.json").exists() else "Agent"
 
@@ -32,7 +34,7 @@ KIT_OWNED = (".claude/agents/", ".claude/skills/", ".claude/hooks/", ".claude/ru
 KEEP_IF_EXISTS = {".agents/team.md", ".agents/stack.json", ".agents/project.md", ".agents/owner-rules.md", ".agents/decisions.md", ".agents/board.md",
                   ".agents/codemap.md", ".env.example", "version.txt", ".release-please-manifest.json", "CHANGELOG.md"}
 
-report = {"added": [], "updated": [], "merged": [], "kept": [], "side": []}
+report = {"added": [], "updated": [], "merged": [], "kept": [], "side": [], "settings": []}
 
 
 def split_row(line: str) -> list:
@@ -59,6 +61,15 @@ def split_row(line: str) -> list:
 
 def rel(p: pathlib.Path) -> str:
     return p.relative_to(KIT).as_posix()
+
+
+def is_secret(path: str) -> bool:
+    """A file a kit folder must never hand to a repo: environment files (only the example is allowed), keys, and
+    anything under secrets/."""
+    *dirs, name = path.lower().split("/")
+    if name == ".envrc" or (name.startswith(".env") and name != ".env.example"):
+        return True
+    return "secrets" in dirs or any(fnmatch.fnmatch(name, pat) for pat in SECRET_NAMES)
 
 
 def ask(question: str) -> bool:
@@ -137,17 +148,25 @@ def merge_justfile(target: pathlib.Path, src: pathlib.Path) -> None:
     report["merged"].append("justfile (imports agents.just; rename any duplicate recipe names in yours)")
 
 
-def merge_settings(dst: pathlib.Path, src: pathlib.Path) -> None:
+def merge_settings(dst: pathlib.Path, src: pathlib.Path, backup: pathlib.Path) -> None:
     before = dst.read_text()
     mine, kit = json.loads(before), json.loads(src.read_text())
+    widened = []  # what can widen permissions or change behaviour: always listed for the owner
     if mine.get("agent") and mine["agent"] != "manager":
         report["side"].append(f".claude/settings.json: your \"agent\" was {mine['agent']!r}, now \"manager\"")
     mine["agent"] = "manager"
-    mine.setdefault("env", {}).update(kit.get("env", {}))
+    env = mine.setdefault("env", {})
+    for k, v in kit.get("env", {}).items():
+        if env.get(k) != v:
+            widened.append(f"env key {'changed' if k in env else 'added'}: {k}")  # names only, never values
+            env[k] = v
     perms = mine.setdefault("permissions", {})
     for key in ("allow", "deny", "ask"):  # "ask" = the owner approves (promote, settings, rule files, kit scripts)
         cur = perms.setdefault(key, [])
-        cur += [r for r in kit.get("permissions", {}).get(key, []) if r not in cur]
+        new = [r for r in kit.get("permissions", {}).get(key, []) if r not in cur]
+        if key == "allow":
+            widened += [f"allow rule added: {r}" for r in new]
+        cur += new
     hooks = mine.setdefault("hooks", {})
     for event, entries in kit.get("hooks", {}).items():
         cur = hooks.setdefault(event, [])
@@ -161,8 +180,12 @@ def merge_settings(dst: pathlib.Path, src: pathlib.Path) -> None:
         mine.setdefault(k, v)
     out = json.dumps(mine, indent=2) + "\n"
     if out != before:
+        b = backup / ".claude" / "settings.json"
+        b.parent.mkdir(parents=True, exist_ok=True)
+        b.write_text(before)
         dst.write_text(out)
-        report["merged"].append(".claude/settings.json")
+        report["merged"].append(f".claude/settings.json (your old file: {backup.name}/.claude/settings.json)")
+        report["settings"] += widened
 
 
 
@@ -553,6 +576,9 @@ def main() -> int:
         if src.is_dir() or any(part in SKIP for part in src.relative_to(KIT).parts):
             continue
         r = rel(src)
+        if is_secret(r):
+            report["side"].append(f"{r}: looks like a secret file, not copied")
+            continue
         dst = target / r
         dst.parent.mkdir(parents=True, exist_ok=True)
 
@@ -574,7 +600,7 @@ def main() -> int:
         elif r == "justfile":
             merge_justfile(target, src)
         elif r == ".claude/settings.json":
-            merge_settings(dst, src)
+            merge_settings(dst, src, backup)
         elif r == ".agents/stack.json":
             pass  # merged above (merge_stack_json)
         elif r in KEEP_IF_EXISTS or r.startswith((".agents/plans/", ".agents/reviews/", ".agents/reports/", ".agents/bugs/", "docs/features/README", "docs/bugs/README")):
@@ -605,6 +631,7 @@ def main() -> int:
     print_section("Merged", report["merged"])
     print_section("Kept your version", report["kept"], limit=12)
     print_section("Needs a look", report["side"])
+    print_section("Check what was added to your .claude/settings.json", report["settings"], limit=1000)
     missing = check_recipes(target)
     if missing:
         print("\n" + "!" * 70)

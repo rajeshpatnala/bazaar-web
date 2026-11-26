@@ -129,7 +129,7 @@ then there is no fixed cap on developers - the budget is the governor.
   CPU). A lower number uses less memory per build.
 - `build_wait_minutes`: how long a gate waits for a build slot before it stops and says another build is running.
 - `rustc_wrapper`: `auto` = use sccache when it is installed (crates compiled once, shared by every worktree);
-  `none` = never; anything else is used as RUSTC_WRAPPER.
+  `sccache` = always; `none` = never. Any other wrapper comes only from your own `RUSTC_WRAPPER` environment variable.
 - `work_mode`: `worktrees` (developers in parallel, each in its own git worktree) or `in-place` (one developer at a
   time in this checkout, for repos where worktrees fail). `just preflight` recommends one; `just work-mode <mode>` switches.
 - `small_max_files`: work touching at most this many files in one area is size S (no plan, one developer, gate only).
