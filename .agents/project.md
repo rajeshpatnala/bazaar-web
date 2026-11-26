@@ -19,7 +19,7 @@ errors, utoipa OpenAPI -> generated TS types) plus a WebSocket feed. Auth: launc
 ## Data stores
 | store | role | access | notes |
 |---|---|---|---|
-| SQLite (`data/bazaar.db`) | app state, approvals, kill switch, job runs, journal, paper account, audit log (sessions are in memory only) | sqlx 0.9, migrations in `crates/store/migrations` | |
+| SQLite (`data/bazaar.sqlite`) | app state, approvals, kill switch, job runs, journal, paper account, audit log (sessions are in memory only) | sqlx 0.9, migrations in `crates/store/migrations` | |
 | Parquet + DuckDB (`data/candles/`) | candles, bhavcopy history, backtest data | duckdb crate, partitioned by symbol/year | |
 | Zerodha Kite Connect | live ticks (WebSocket), historical candles, instruments, margins; broker orders only via the `live-trading` feature (never default), after approval | REST + WebSocket, daily login redirect to `/api/v1/kite/callback` | |
 | NSE/BSE bhavcopy archives | end-of-day universe, delivery % | official downloads only | |

@@ -19,3 +19,4 @@ problem in one go. One line per rule, newest last, at most 20; merge or retire o
 - Past 400 changed lines, stop: open what is done as its own PR and tell the manager (owner, 2026-11-23).
 - At the end-of-feature test run (T2), the tester checks that every refusal test asserts which rule refused and every money test checks all fields that move (known-pitfalls #5) (owner, 2026-11-23).
 - Consecutive slices in the same area go to the same developer while its context is under reuse_max_context (team.md); a fresh developer gets a handoff listing the earlier slices' major findings (owner, 2026-11-23).
+- Never run more than one Rust build at a time on this Mac: only one building agent at once, across all worktrees (developers, tester, build-runner, reviewers that build, and the automatic end-of-turn check); wait for its builds to end before starting the next (owner, 2026-11-26).
