@@ -99,3 +99,6 @@ storybook-static/
 
 # macOS
 .DS_Store
+
+# --- agent-kit ---
+.agents/codemap/

@@ -39,8 +39,17 @@ db-check:
     @python3 .claude/kit/kit.py db-check
 
 # regenerate .agents/codemap.md (also runs automatically at session start and after merges/pulls)
-codemap:
-    @python3 .claude/kit/kit.py codemap
+# `just codemap find <word>`: only the codemap lines that mention it (cheaper than reading the map)
+codemap *args:
+    @python3 .claude/kit/kit.py codemap {{args}}
+
+# one section of a long markdown file (roadmap, plan, report); no heading = list the sections and their sizes
+section file *heading:
+    @python3 .claude/kit/kit.py section {{file}} {{heading}}
+
+# move all but the newest handoff and the dated recommendations files to .agents/archive/
+archive-notes:
+    @python3 .claude/kit/kit.py archive-notes
 
 # can the team work here? branches, remote, gh, worktrees -> recommended work mode and how to fix problems
 preflight:

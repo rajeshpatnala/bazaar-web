@@ -68,12 +68,12 @@ Every checklist item is marked pass, fail or not applicable. Every blocker cites
 
 <!-- kit:handbooks bz-core,bz-trading-discipline,bz-backtest-risk,bz-execution -->
 ## Handbooks: look up the part you need
-Run `just docs "<topic>"` (or `"<handbook>: <topic>"`) to get one section; don't read whole handbooks.
+Run `just docs "<topic>"` (or `"<handbook>: <topic>"`) to get one section; don't read whole handbooks. `just docs --list <handbook>` shows every section.
 Before writing or judging code in an area, read that handbook's golden rules (`just docs "<handbook>: golden rules"`); a rule file may already have shown them when you opened a file there.
-- **bz-core**: Default stack · Golden rules · Idioms · Error model · Configuration · Secrets · Observability · Async and concurrency · Performance · TypeScript side · Security red flags · Tests · Done checklist; deeper: Money and price newtypes · IST and sessions · Config file shape
+- **bz-core**: Default stack · Golden rules · Idioms · Error model · Configuration · Secrets · Observability · Async and concurrency · Performance · TypeScript side · Security red flags · Tests · Done checklist
 - **bz-trading-discipline**: The contract · DecisionGate rule catalogue · Override policy · Paper-to-live readiness bar · Automation safety · Journaling discipline · risk-guardian PR checklist · Tests and verification · Checklist
-- **bz-backtest-risk**: Stack · Golden rules · Event-driven loop · Slippage · Cost model · Metrics · Walk-forward and out-of-sample · Position sizing · DecisionGate · Tests · Red flags · Checklist; deeper: Schema · Verification routine · Computation order · Design · Types · Overrides · Rule catalogue and risk.toml keys
-- **bz-execution**: Stack and files · Golden rules · OrderIntent and the state machine · ExecutionMode · ApprovalQueue · Executor trait · Paper trading · Kill switch, circuit breaker, rate limiter · Audit log · The broker crate and live-trading · Exit monitor · Tests · Red flags · Done checklist; deeper: Scope and guardrails · Kite Connect order API · SEBI / NSE rules and the pre-live checklist · Placing an order · Reconciliation · Runtime lock beyond the feature flag · Tests for this crate · Shape · Rules · Cash and margin · What must NOT happen
+- **bz-backtest-risk**: Stack · Golden rules · Event-driven loop · Slippage · Cost model · Metrics · Walk-forward and out-of-sample · Position sizing · DecisionGate · Tests · Red flags · Checklist
+- **bz-execution**: Stack and files · Golden rules · OrderIntent and the state machine · ExecutionMode · ApprovalQueue · Executor trait · Paper trading · Kill switch, circuit breaker, rate limiter · Audit log · The broker crate and live-trading · Exit monitor · Tests · Red flags · Done checklist
 
 Never break (project rules):
 - Rupee amounts are `rust_decimal::Decimal`, never `f64` (f64 only inside indicator/options math, converted at one boundary).

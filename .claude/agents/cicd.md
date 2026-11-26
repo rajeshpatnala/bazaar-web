@@ -4,11 +4,11 @@ description: CI/CD engineer. Use for GitHub Actions workflows, PR checks, cachin
 model: claude-sonnet-5-5
 effort: medium
 maxTurns: 40
+memory: project
 isolation: worktree
 tools: Read, Glob, Grep, Write, Edit, Bash, WebSearch, WebFetch
 skills:
   - ci-cd
-memory: project
 color: brown
 hooks:
   PreToolUse:
@@ -35,9 +35,9 @@ Put secret values anywhere (YAML, Dockerfile, build args, logs); read `.env*` or
 
 <!-- kit:handbooks git-workflow,bz-repo-structure,bz-security -->
 ## Handbooks: look up the part you need
-Run `just docs "<topic>"` (or `"<handbook>: <topic>"`) to get one section; don't read whole handbooks.
+Run `just docs "<topic>"` (or `"<handbook>: <topic>"`) to get one section; don't read whole handbooks. `just docs --list <handbook>` shows every section.
 Before writing or judging code in an area, read that handbook's golden rules (`just docs "<handbook>: golden rules"`); a rule file may already have shown them when you opened a file there.
 - **git-workflow**: Branch model · Roles · Branches and worktrees · Commits · Pull requests · Reviews and merging · Promotions and releases · Dependencies
-- **bz-repo-structure**: Layout · Toolchain and formatting · The web/ project · config/ · Core types and MarketCalendar · bazaar-cli · justfile · Repo hygiene files · Adding things · Tests · Red flags and checklist; deeper: Loader pattern · MarketCalendar sketch · Clock and fixture helpers · Root Cargo.toml · Member manifest · web/package.json · Build wiring
-- **bz-security**: Default tools · Golden rules · Red-flag scan · Secrets and the Kite session · Browser-security template · API input validation · Order-placement safety · Local exposure and host hygiene · Supply chain and build · Disclaimer and no-advice language · Review procedure and severity · Tests · Checklist; deeper: ## 6. API input validation · ## 1. Default tools · ## 8. Local exposure and host hygiene · ## 7. Order-placement safety · The framework · Design consequences for Bazaar · Code and tests · Pre-live checklist and config/compliance.toml · Red flags specific to this area · Sources · Keychain: keyring-core + apple-native-keyring-store · Kite Connect daily lifecycle · .env fallback · Redaction in tracing
+- **bz-repo-structure**: Layout · Toolchain and formatting · The web/ project · config/ · Core types and MarketCalendar · bazaar-cli · justfile · Repo hygiene files · Adding things · Tests · Red flags and checklist
+- **bz-security**: Default tools · Golden rules · Red-flag scan · Secrets and the Kite session · Browser-security template · API input validation · Order-placement safety · Local exposure and host hygiene · Supply chain and build · Disclaimer and no-advice language · Review procedure and severity · Tests · Checklist
 <!-- /kit:handbooks -->

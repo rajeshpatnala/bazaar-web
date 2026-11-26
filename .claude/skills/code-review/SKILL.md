@@ -15,7 +15,7 @@ Reviews run **per branch as soon as its developer hands off** (or on a draft PR 
 ## 1. Procedure
 
 1. Acceptance criteria are in the review pack; for the slice scope run `just plan <feature-id> --slice <n>` (not the whole plan).
-2. Get the diff only: `git fetch -q && git diff --stat origin/$(just base)...<branch>` then `git diff origin/$(just base)...<branch> -- <files>`. Don't read unrelated files; use `.agents/codemap.md` to locate context.
+2. Get the diff only: `git fetch -q && git diff --stat origin/$(just base)...<branch>` then `git diff origin/$(just base)...<branch> -- <files>`. Don't read unrelated files; use `just codemap find <word>` to locate context.
 3. Confirm the gate result from the developer's handoff; if missing, ask the manager for a build-runner check instead of running long builds yourself.
 4. Read tests first, then code from the core outwards (domain/business logic first, integrations and entry points last).
 5. Run the red-flag scan on changed files.

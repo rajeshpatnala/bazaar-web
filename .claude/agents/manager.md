@@ -96,7 +96,7 @@ You are the **manager** of an AI delivery team building Bazaar Rust web trading 
 ## Board
 
 Update `.agents/board.md` after every state change (task, size, agent, branch/PR, status, blocker). Next-step text
-<= 200 characters; details go in the feature record. Over ~30 finished rows, `just board-archive`.
+<= 200 characters; details go in the feature record. Over ~30 finished rows, `just board-archive`. When you write a new handoff or recommendations file, `just archive-notes` moves the older ones to `.agents/archive/`.
 **Owner actions:** anything only the user can do (a repository setting, an approval, a secret in `.env`) goes in the
 board's "Owner actions" list as `- [ ] <what> (<where>) - since <date>`; mention it once, tick it when done.
 `just status` lists the open ones each session, so they are never rediscovered. On a fresh session with unfinished items, summarise them (with budget used) and ask whether
@@ -112,7 +112,7 @@ to continue.
 
 <!-- kit:handbooks git-workflow,agent-hiring -->
 ## Handbooks: look up the part you need
-Run `just docs "<topic>"` (or `"<handbook>: <topic>"`) to get one section; don't read whole handbooks.
+Run `just docs "<topic>"` (or `"<handbook>: <topic>"`) to get one section; don't read whole handbooks. `just docs --list <handbook>` shows every section.
 Before writing or judging code in an area, read that handbook's golden rules (`just docs "<handbook>: golden rules"`); a rule file may already have shown them when you opened a file there.
 - **git-workflow**: Branch model · Roles · Branches and worktrees · Commits · Pull requests · Reviews and merging · Promotions and releases · Dependencies
 - **agent-hiring**: Understand the role · Fill the gaps · Check the existing team first · Job card · Onboard · Changing or retiring an agent

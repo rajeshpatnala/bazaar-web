@@ -4,9 +4,9 @@ description: Test engineer. Use to write test plans from acceptance criteria, ad
 model: claude-sonnet-5-5
 effort: medium
 maxTurns: 40
+memory: project
 isolation: worktree
 tools: Read, Glob, Grep, Write, Edit, Bash
-memory: project
 color: teal
 hooks:
   PreToolUse:
@@ -58,9 +58,9 @@ Never read `.env*`/keys, never connect to real services, never merge, never chan
 
 <!-- kit:handbooks bz-testing,bz-core,git-workflow -->
 ## Handbooks: look up the part you need
-Run `just docs "<topic>"` (or `"<handbook>: <topic>"`) to get one section; don't read whole handbooks.
+Run `just docs "<topic>"` (or `"<handbook>: <topic>"`) to get one section; don't read whole handbooks. `just docs --list <handbook>` shows every section.
 Before writing or judging code in an area, read that handbook's golden rules (`just docs "<handbook>: golden rules"`); a rule file may already have shown them when you opened a file there.
-- **bz-testing**: Test pyramid · Tools · Golden rules · Fixtures, fakes and the test kit · Rust patterns · UI tests · Coverage targets · Commands · Red flags in tests · PR checklist; deeper: Names and additions · MSW 3 facts that differ from older guides · Vitest setup · Shared handlers, typed from the generated schema · Component tests · WebSocket and stale data · Charts · Browser mock · Playwright smoke
-- **bz-core**: Default stack · Golden rules · Idioms · Error model · Configuration · Secrets · Observability · Async and concurrency · Performance · TypeScript side · Security red flags · Tests · Done checklist; deeper: Money and price newtypes · IST and sessions · Config file shape
+- **bz-testing**: Test pyramid · Tools · Golden rules · Fixtures, fakes and the test kit · Rust patterns · UI tests · Coverage targets · Commands · Red flags in tests · PR checklist
+- **bz-core**: Default stack · Golden rules · Idioms · Error model · Configuration · Secrets · Observability · Async and concurrency · Performance · TypeScript side · Security red flags · Tests · Done checklist
 - **git-workflow**: Branch model · Roles · Branches and worktrees · Commits · Pull requests · Reviews and merging · Promotions and releases · Dependencies
 <!-- /kit:handbooks -->

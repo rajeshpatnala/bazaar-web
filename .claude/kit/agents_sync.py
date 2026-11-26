@@ -221,7 +221,9 @@ def apply_preload(front: list, want_all: bool, base: set, extra: list) -> list:
 
 # ---- pocket cards: agents preload only their process skill; handbooks are an index looked up with `just docs`
 
-KEEP_PRELOADED = {"manager": {"delivery-process"}, "tech-lead": {"delivery-process"}, "code-reviewer": {"code-review"},
+# The tech lead looks delivery-process up by section (`just docs "delivery-process: <topic>"`): it is ~3k tokens on
+# every start, and most tech-lead tasks (a question, a triage) need one section of it.
+KEEP_PRELOADED = {"manager": {"delivery-process"}, "code-reviewer": {"code-review"},
                   "security-reviewer": {"security-review"}, "cicd": {"ci-cd"}}
 HB_START, HB_END = "<!-- kit:handbooks", "<!-- /kit:handbooks -->"
 
@@ -273,12 +275,13 @@ def never_break() -> list:
 
 def handbook_block(owned: list, omit_claude_md: bool) -> str:
     lines = [f"{HB_START} {','.join(owned)} -->", "## Handbooks: look up the part you need",
-             'Run `just docs "<topic>"` (or `"<handbook>: <topic>"`) to get one section; don\'t read whole handbooks.',
+             'Run `just docs "<topic>"` (or `"<handbook>: <topic>"`) to get one section; don\'t read whole handbooks. '
+             '`just docs --list <handbook>` shows every section.',
              "Before writing or judging code in an area, read that handbook's golden rules "
              '(`just docs "<handbook>: golden rules"`); a rule file may already have shown them when you opened a file there.']
     for s in owned:
-        main, deeper = skill_topics(s)
-        lines.append(f"- **{s}**: " + " · ".join(main) + ("; deeper: " + " · ".join(deeper) if deeper else ""))
+        main, _ = skill_topics(s)  # the section index: `just docs --list <handbook>` shows the rest
+        lines.append(f"- **{s}**: " + " · ".join(main))
     if omit_claude_md:
         nb = never_break()
         if nb:

@@ -68,12 +68,12 @@ Every PR that touches the `indicators`, `options`, `regime`, `strategies`, `scan
 
 <!-- kit:handbooks bz-core,bz-quant,bz-backtest-risk,bz-india-markets -->
 ## Handbooks: look up the part you need
-Run `just docs "<topic>"` (or `"<handbook>: <topic>"`) to get one section; don't read whole handbooks.
+Run `just docs "<topic>"` (or `"<handbook>: <topic>"`) to get one section; don't read whole handbooks. `just docs --list <handbook>` shows every section.
 Before writing or judging code in an area, read that handbook's golden rules (`just docs "<handbook>: golden rules"`); a rule file may already have shown them when you opened a file there.
-- **bz-core**: Default stack · Golden rules · Idioms · Error model · Configuration · Secrets · Observability · Async and concurrency · Performance · TypeScript side · Security red flags · Tests · Done checklist; deeper: Money and price newtypes · IST and sessions · Config file shape
-- **bz-quant**: Defaults · Golden rules · Indicators · Options math · Regime · Strategy trait and signal · Scanner scoring and Recommendation · Tests · Red flags · Done checklist; deeper: Warm-up and smoothing conventions · Formulas · Implementation notes · Reference-value sources and fixture recipe · Which model · Prices and Greeks · Implied volatility solver · IV rank, percentile and context · Chain analytics · Payoff engine and probability of profit · Reference values and tests · Equity: trend · Equity: momentum · Equity: mean reversion
-- **bz-backtest-risk**: Stack · Golden rules · Event-driven loop · Slippage · Cost model · Metrics · Walk-forward and out-of-sample · Position sizing · DecisionGate · Tests · Red flags · Checklist; deeper: Schema · Verification routine · Computation order · Design · Types · Overrides · Rule catalogue and risk.toml keys
-- **bz-india-markets**: Where each fact comes from · Config files carry verified_on · Sessions and the calendar · Expiries, lots and ticks · F&O ban, circuits, price bands · Events · Charges taxonomy · Data legality · Formatting and wording · Tests · Red flags · Checklist; deeper: calendar.toml · events.toml · Fixtures · Permanent disclaimer · Wording rules · SEBI adviser rules in plain terms · Tests for wording and compliance
+- **bz-core**: Default stack · Golden rules · Idioms · Error model · Configuration · Secrets · Observability · Async and concurrency · Performance · TypeScript side · Security red flags · Tests · Done checklist
+- **bz-quant**: Defaults · Golden rules · Indicators · Options math · Regime · Strategy trait and signal · Scanner scoring and Recommendation · Tests · Red flags · Done checklist
+- **bz-backtest-risk**: Stack · Golden rules · Event-driven loop · Slippage · Cost model · Metrics · Walk-forward and out-of-sample · Position sizing · DecisionGate · Tests · Red flags · Checklist
+- **bz-india-markets**: Where each fact comes from · Config files carry verified_on · Sessions and the calendar · Expiries, lots and ticks · F&O ban, circuits, price bands · Events · Charges taxonomy · Data legality · Formatting and wording · Tests · Red flags · Checklist
 
 Never break (project rules):
 - Rupee amounts are `rust_decimal::Decimal`, never `f64` (f64 only inside indicator/options math, converted at one boundary).

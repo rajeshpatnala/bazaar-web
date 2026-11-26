@@ -485,6 +485,11 @@ class ToolingTests(Base):
             self.assertEqual(f.read("install.py").decode(), "# kit installer\n")  # the installed kit's copy wins
         z.unlink()
 
+    def test_export_kit_includes_the_roadmap_when_there_is_one(self):
+        self.assertNotIn("ROADMAP.md", self.r.kit("export-kit", "--list")[1].split())
+        self.r.write("ROADMAP.md", "# Roadmap\n")
+        self.assertIn("ROADMAP.md", self.r.kit("export-kit", "--list")[1].split())
+
 
 class ReportTests(Base):
     def test_review_wait_returns_when_reviews_are_in(self):
@@ -1499,6 +1504,96 @@ class CiScopeWebReadTests(unittest.TestCase):
         text = (REPO / "scripts" / "ci-scope.py").read_text()
         listed = ast.literal_eval(text.split("WEB_READ_BY_RUST = ", 1)[1].split("}", 1)[0] + "}")
         self.assertEqual(named, set(listed.items()), "update WEB_READ_BY_RUST in scripts/ci-scope.py")
+
+
+class ContextTests(Base):
+    """Agents read narrowly: a split codemap with a lookup, one section of a long file, a guard on whole reads of big
+    notes, old notes archived, and owner rules only for agents that decide app behaviour."""
+
+    HOOKS = REPO / ".claude" / "hooks"
+
+    def codemap_stack(self, split_kb):
+        st = json.loads((self.r.dir / ".agents/stack.json").read_text())
+        st["codemap"] = {"groups": ["src/*"], "file_globs": ["**/*.rs"], "item_regex": r"^pub fn (\w+)",
+                         "split_kb": split_kb}
+        (self.r.dir / ".agents/stack.json").write_text(json.dumps(st))
+
+    def test_codemap_splits_by_area_and_find_reads_only_matching_lines(self):
+        self.r.write("src/orders/gate.rs", "pub fn decision_gate() {}\n")
+        self.r.write("src/charts/plot.rs", "pub fn draw() {}\n")
+        self.codemap_stack(0.01)
+        self.r.commit("feat: two areas")
+        rc, out = self.r.kit("codemap")
+        self.assertEqual(rc, 0, out)
+        idx = (self.r.dir / ".agents/codemap.md").read_text()
+        self.assertIn("`.agents/codemap/src-orders.md`", idx)
+        self.assertNotIn("decision_gate", idx)  # the index names areas, not every item
+        self.assertIn("decision_gate", (self.r.dir / ".agents/codemap/src-orders.md").read_text())
+        rc, out = self.r.kit("codemap", "find", "decision_gate")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("src/orders/gate.rs", out)
+        self.assertNotIn("plot.rs", out)
+        self.assertEqual(self.r.kit("codemap", "find", "nothing-like-this")[0], 1)
+        self.codemap_stack(0)  # split off: one file again, stale area files removed
+        self.r.kit("codemap")
+        self.assertFalse(list((self.r.dir / ".agents/codemap").glob("*.md")))
+        self.assertIn("decision_gate", (self.r.dir / ".agents/codemap.md").read_text())
+
+    def test_codemap_in_flight_leaves_out_squash_merged_branches(self):
+        self.codemap_stack(16)
+        self.r.commit("chore: codemap settings")
+        self.r.branch("feat/F1-merged", {"src/lib.rs": "pub fn a() -> i32 { 2 }\n"})
+        self.r.write("src/lib.rs", "pub fn a() -> i32 { 2 }\n")
+        self.r.commit("feat: squash of feat/F1-merged")
+        self.r.branch("feat/F1-open", {"src/new.rs": "pub fn b() {}\n"})
+        self.r.kit("codemap")
+        cm = (self.r.dir / ".agents/codemap.md").read_text()
+        self.assertIn("feat/F1-open", cm)
+        self.assertNotIn("feat/F1-merged", cm)
+
+    def test_section_lists_and_prints_one_section(self):
+        self.r.write("ROADMAP.md", "# Roadmap\n\n## Wave 1\none\n### Slice 36\nthirty-six\n## Wave 2\ntwo\n")
+        rc, out = self.r.kit("section", "ROADMAP.md")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Wave 2", out)
+        rc, out = self.r.kit("section", "ROADMAP.md", "wave", "1")
+        self.assertIn("thirty-six", out)
+        self.assertNotIn("two", out)
+        self.assertEqual(self.r.kit("section", "ROADMAP.md", "wave 9")[0], 1)
+
+    def hook(self, name, payload):
+        return subprocess.run([str(self.HOOKS / name)], input=json.dumps(payload), capture_output=True, text=True,
+                              env=dict(os.environ, CLAUDE_PROJECT_DIR=str(self.r.dir)))
+
+    def test_read_guard_blocks_only_whole_reads_of_big_markdown(self):
+        self.r.write("big.md", "x" * 40_000)
+        self.r.write("big.rs", "x" * 40_000)
+        self.r.write("small.md", "x")
+        read = lambda path, **kw: self.hook("read-narrow.sh", {"tool_name": "Read", "tool_input": {"file_path": str(self.r.dir / path), **kw}})
+        r = read("big.md")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("just section", r.stderr)
+        self.assertEqual(read("big.md", offset=1, limit=50).returncode, 0)
+        self.assertEqual(read("small.md").returncode, 0)
+        self.assertEqual(read("big.rs").returncode, 0)
+        self.r.set("read_whole_kb", "0")
+        self.assertEqual(read("big.md").returncode, 0)
+
+    def test_archive_notes_keeps_the_newest_handoff_and_current_recommendations(self):
+        for i, name in enumerate(["handoff-a.md", "handoff-b.md", "recommendations-2026-11-19.md", "recommendations.md"]):
+            self.r.write(f".agents/{name}", name)
+            os.utime(self.r.dir / ".agents" / name, (1_000_000 + i, 1_000_000 + i))
+        rc, out = self.r.kit("archive-notes")
+        self.assertEqual(rc, 0, out)
+        left = sorted(p.name for p in (self.r.dir / ".agents").glob("*.md") if p.name != "team.md")
+        self.assertEqual(left, ["handoff-b.md", "recommendations.md"])
+        self.assertTrue((self.r.dir / ".agents/archive/handoff-a.md").exists())
+
+    def test_owner_rules_skip_agents_that_do_not_decide_app_behaviour(self):
+        self.r.write(".agents/owner-rules.md", "- Paper mode is the default.\n")
+        start = lambda agent: self.hook("agent-context.sh", {"hook_event_name": "SubagentStart", "agent_type": agent}).stdout
+        self.assertIn("Paper mode", start("tech-lead"))
+        self.assertNotIn("Paper mode", start("build-runner"))
 
 
 if __name__ == "__main__":
