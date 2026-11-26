@@ -3,6 +3,7 @@ import type { components } from "../api/schema";
 import { accountHandlers } from "./account";
 import { ideasHandlers } from "./ideas";
 import { ordersHandlers } from "./orders";
+import { safetyHandlers } from "./safety";
 
 type S = components["schemas"];
 
@@ -34,4 +35,5 @@ export const handlers: RequestHandler[] = [
   ...ideasHandlers,
   ...ordersHandlers,
   ...accountHandlers,
+  ...safetyHandlers,
 ];

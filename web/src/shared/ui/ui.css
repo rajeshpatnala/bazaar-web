@@ -27,3 +27,11 @@
 .ui-modal { background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow); padding: 1.5rem; max-width: 520px; width: 100%; max-height: 90vh; overflow: auto; }
 .ui-modal h2 { margin-top: 0; font-weight: 500; }
 @media (prefers-reduced-motion: no-preference) { .ui-btn { transition: background-color 0.15s; } }
+.safety-panel { border: 1px solid var(--hairline); border-radius: var(--radius); padding: 0.75rem 1.25rem; margin: 0.5rem 0 1rem; background: var(--card); font: 0.95rem var(--font-ui); overflow-wrap: anywhere; }
+.safety-engaged { background: var(--red-bg); border-color: var(--red); }
+.safety-checking, .safety-sending, .safety-unknown, .safety-unreadable { background: var(--amber-bg); border-color: var(--amber); }
+.safety-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem 1rem; }
+.safety-status { margin: 0; flex: 1 1 16rem; }
+.safety-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.ui-btn.safety-stop { background: var(--red); border-color: var(--red); color: var(--on-accent); }
+.safety-reason { margin: 0.5rem 0 0; }
