@@ -1,5 +1,5 @@
 import { NavLink, Outlet } from "react-router";
-import { KillSwitchPanel } from "../features/safety/KillSwitchPanel";
+import { SafetyBar } from "../features/safety/SafetyBar";
 import { Disclaimer } from "../shared/ui/Disclaimer";
 import { ModeBadge } from "./ModeBadge";
 import { SessionGate } from "./SessionGate";
@@ -20,7 +20,7 @@ export function AppShell() {
       </header>
       <main className="shell-main">
         <SessionGate>
-          <KillSwitchPanel />
+          <SafetyBar />
           <Outlet />
         </SessionGate>
       </main>

@@ -36,3 +36,5 @@
 .ui-btn.safety-stop { background: var(--red); border-color: var(--red); color: var(--on-accent); }
 .safety-reason { margin: 0.5rem 0 0; }
 .safety-input { display: block; width: 100%; margin-top: 0.25rem; padding: 0.5rem 0.75rem; font: 1rem var(--font-ui); color: var(--ink); background: var(--card); border: 1px solid var(--muted); border-radius: 8px; }
+.safety-alarms { border: 1px solid var(--red); border-radius: var(--radius); padding: 0.75rem 1.25rem; margin: 0.5rem 0 1rem; background: var(--red-bg); font: 0.95rem var(--font-ui); overflow-wrap: anywhere; max-height: 14rem; overflow-y: auto; }
+.safety-alarm-meta { font-size: 0.8rem; }
