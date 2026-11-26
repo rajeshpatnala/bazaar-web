@@ -1,0 +1,1 @@
+- [Fix round in another worktree](fix-round-in-another-worktree.md) — fix-list may falsely say "nothing to fix": stop and report to the manager; push only your assigned PR branch, never force
