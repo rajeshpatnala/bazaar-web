@@ -4,6 +4,9 @@
   kit.py gate                 fmt/lint/test steps with compact output (exit 0 = PASS)
   kit.py test                 only the test step
   kit.py check                gate + extra checks (docs tests, supply chain, ...)
+  kit.py gate|test|check --fresh   run every step even when its inputs are unchanged (steps are skipped when this
+                              branch changed nothing they read, or when they passed on exactly these inputs before)
+  kit.py cargo <args>         one cargo command under the build slot and job cap (team.md heavy_builds_at_once, build_jobs)
   kit.py db-check             connection status of configured data stores (never prints secrets)
   kit.py test-check [base]    fail if production code changed without new tests (developer gate)
   kit.py codemap [out]        write .agents/codemap.md (modules, items, routes, migrations, config keys, in-flight)
@@ -167,6 +170,165 @@ def base_ref() -> str:
 
 # ---------------------------------------------------------------- gate
 
+# ---------------------------------------------------------------- build economy (fewer, smaller, shared builds)
+
+# A cargo step reads more than .rs files (config, fixtures, SQL, include_str! data), so by default it depends on
+# every file except these. stack.json -> gate "build_ignore" adds project paths no Rust code reads (e.g. "web/**").
+BUILD_IGNORE_DEFAULT = ["**/*.md", "docs/**", ".agents/**", ".claude/**", ".github/**", "**/node_modules/**",
+                        "LICENSE*", ".gitignore", "justfile", ".env.example"]
+
+
+def step_paths(step: dict) -> tuple:
+    """(include, exclude) globs of the files a gate step depends on. stack.json "paths" / "ignore" on the step win;
+    a cargo step defaults to everything but BUILD_IGNORE_DEFAULT and gate.build_ignore; any other step has none
+    (it always runs)."""
+    ign = list(step.get("ignore", []))
+    if step.get("paths"):
+        return list(step["paths"]), ign
+    if step["cmd"].lstrip().startswith("cargo "):
+        return ["**"], ign + BUILD_IGNORE_DEFAULT + list(stack().get("gate", {}).get("build_ignore", []))
+    return [], []
+
+
+def reads(path: str, paths: tuple) -> bool:
+    inc, exc = paths
+    return matches(path, inc) and not matches(path, exc)
+
+
+def is_heavy(step: dict) -> bool:
+    """Compiles: takes a build slot. stack.json "heavy": true/false overrides; default every cargo command but fmt."""
+    if "heavy" in step:
+        return bool(step["heavy"])
+    c = step["cmd"].lstrip()
+    return c.startswith("cargo ") and not c.startswith("cargo fmt")
+
+
+def common_dir() -> pathlib.Path:
+    """The git directory shared by the main checkout and every worktree (holds the gate records and build slots)."""
+    c = git("rev-parse", "--git-common-dir").strip() or ".git"
+    p = pathlib.Path(c)
+    return p if p.is_absolute() else ROOT / p
+
+
+def inputs_key(step: dict, paths: list) -> str:
+    """Hash of the step's command and of every file it depends on (tracked or new, as they are on disk now)."""
+    import hashlib
+    out = subprocess.run(["git", "ls-files", "-z", "-co", "--exclude-standard"], cwd=ROOT, capture_output=True)
+    if out.returncode != 0:
+        return ""
+    h = hashlib.sha256((step["name"] + "\0" + step["cmd"]).encode())
+    for rel in sorted(x for x in out.stdout.decode(errors="replace").split("\0") if x and reads(x, paths)):
+        f = ROOT / rel
+        h.update(rel.encode() + b"\0")
+        try:
+            h.update(hashlib.sha256(f.read_bytes()).digest() if f.is_file() else b"-")
+        except OSError:
+            h.update(b"?")
+    return h.hexdigest()
+
+
+STEP_CACHE = "kit-step-passed"
+
+
+def step_cached(name: str, key: str) -> bool:
+    f = common_dir() / STEP_CACHE
+    return bool(key) and f.exists() and f"{name} {key}" in f.read_text().splitlines()
+
+
+def record_step(name: str, key: str) -> None:
+    if not key:
+        return
+    f = common_dir() / STEP_CACHE
+    try:
+        old = f.read_text().splitlines() if f.exists() else []
+        f.write_text("\n".join((old + [f"{name} {key}"])[-1000:]) + "\n")
+    except OSError:
+        pass
+
+
+def changed_vs_base() -> list:
+    """Files this branch changes against the integration branch, committed or not; None when that can't be told
+    (on the integration or release branch itself, or git failed)."""
+    integ, rel = branches()
+    if current_branch() in (integ, rel, ""):
+        return None
+    base = base_ref()
+    committed = git_checked("diff", "--name-only", f"{base}...HEAD") if base else None
+    status = git_checked("status", "--porcelain", "--untracked-files=all")
+    if committed is None or status is None:
+        return None
+    return [x for x in committed.splitlines() if x] + [l[3:].split(" -> ")[-1] for l in status.splitlines() if len(l) > 3]
+
+
+def build_env() -> dict:
+    """Environment for kit-run builds: team.md build_jobs caps cargo's parallel jobs (less RAM per build);
+    rustc_wrapper = auto uses sccache when it is installed (compiled crates shared by every worktree)."""
+    env = dict(os.environ)
+    jobs = team_setting("build_jobs", "-").strip()
+    if jobs.isdigit() and int(jobs) > 0:
+        env.setdefault("CARGO_BUILD_JOBS", jobs)
+        env.setdefault("NEXTEST_TEST_THREADS", jobs)
+    wrap = team_setting("rustc_wrapper", "auto").strip().lower()
+    if wrap == "auto" and shutil.which("sccache") and not env.get("RUSTC_WRAPPER"):
+        env["RUSTC_WRAPPER"] = "sccache"
+    elif wrap not in ("auto", "none", "-", "") and not env.get("RUSTC_WRAPPER"):
+        env["RUSTC_WRAPPER"] = wrap
+    return env
+
+
+class BuildSlot:
+    """At most team.md heavy_builds_at_once compiling commands at a time across the main checkout and all worktrees
+    (0 = no limit), so parallel agents don't run the machine out of memory. Waits up to build_wait_minutes."""
+
+    def __init__(self, label: str):
+        self.label, self.fh = label, None
+
+    def __enter__(self):
+        try:
+            import fcntl
+        except ImportError:  # no flock on this platform: no limit
+            return self
+        n = team_setting("heavy_builds_at_once", "1").strip()
+        n = int(n) if n.isdigit() else 1
+        if n <= 0:
+            return self
+        wait = int(os.environ.get("KIT_BUILD_WAIT") or 60 * int(team_setting("build_wait_minutes", "30") or 30))
+        import time
+        start, told = time.time(), False
+        while True:
+            for i in range(n):
+                fh = open(common_dir() / f"kit-build-{i}.lock", "a+")
+                try:
+                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    fh.close()
+                    continue
+                fh.seek(0)
+                fh.truncate()
+                fh.write(f"{ROOT} {self.label} since {dt.datetime.now():%H:%M}\n")
+                fh.flush()
+                self.fh = fh
+                if told:
+                    print(f"build slot free after {int(time.time() - start)}s")
+                return self
+            if not told:
+                try:
+                    who = (common_dir() / "kit-build-0.lock").read_text().strip()
+                except OSError:
+                    who = "another build"
+                print(f"waiting for a build slot (team.md heavy_builds_at_once = {n}; busy: {who})", flush=True)
+                told = True
+            if time.time() - start > wait:
+                raise SystemExit(f"GATE: FAIL (no build slot within {wait // 60} min: another build is still running; "
+                                 "run the same command again later)")
+            time.sleep(3)
+
+    def __exit__(self, *exc):
+        if self.fh:
+            self.fh.close()  # closing releases the lock
+        return False
+
+
 def run_step(step: dict, log_dir: pathlib.Path, max_lines: int, error_re: str) -> bool:
     cmd = step["cmd"]
     if step.get("needs") and not ok(step["needs"]):
@@ -174,10 +336,15 @@ def run_step(step: dict, log_dir: pathlib.Path, max_lines: int, error_re: str) -
             cmd = step["fallback"]
         elif step.get("optional"):
             print(f"skip {step['name']} (tool not installed)")
+            step["_not_run"] = True  # not a pass to remember
             return True
     log = log_dir / f"{step['name']}.log"
     with log.open("w") as f:
-        rc = sh(cmd, stdout=f, stderr=subprocess.STDOUT).returncode
+        if is_heavy(step):
+            with BuildSlot(step["name"]):
+                rc = sh(cmd, stdout=f, stderr=subprocess.STDOUT, env=build_env()).returncode
+        else:
+            rc = sh(cmd, stdout=f, stderr=subprocess.STDOUT, env=build_env()).returncode
     if rc == 0:
         print(f"ok   {step['name']}")
         return True
@@ -192,7 +359,7 @@ def run_step(step: dict, log_dir: pathlib.Path, max_lines: int, error_re: str) -
     return False
 
 
-def gate(only: str = None, extra: bool = False) -> int:
+def gate(only: str = None, extra: bool = False, fresh: bool = False) -> int:
     s = stack()
     g = s.get("gate", {})
     req = g.get("requires_file")
@@ -205,9 +372,23 @@ def gate(only: str = None, extra: bool = False) -> int:
     steps = [st for st in g.get("steps", []) if not only or st["name"] == only]
     if extra:
         steps += g.get("check_steps", [])
+    fresh = fresh or os.environ.get("KIT_GATE_FRESH") == "1"
+    changed = None if fresh else changed_vs_base()
     for st in steps:
+        paths = step_paths(st)
+        if paths[0] and not fresh:
+            # nothing it reads changed on this branch: the integration branch's CI already covered these inputs
+            if changed is not None and not any(reads(x, paths) for x in changed):
+                print(f"skip {st['name']} (no change to its inputs on this branch; CI covers the base)")
+                continue
+        key = inputs_key(st, paths) if paths[0] else ""
+        if key and not fresh and step_cached(st["name"], key):
+            print(f"skip {st['name']} (passed before on exactly these inputs, here or in another worktree)")
+            continue
         if not run_step(st, log_dir, max_lines, g.get("error_regex", "")):
             return 1
+        if not st.get("_not_run"):
+            record_step(st["name"], key)
     print("GATE: PASS" if not only else f"{only}: PASS")
     if not only and not [l for l in git("status", "--porcelain").splitlines() if l and not l[3:].startswith(".agents/")]:
         record_gate_pass(git("rev-parse", "HEAD").strip())
@@ -894,7 +1075,7 @@ def envelope(argv: list) -> int:
         f = d_out / review_file(r)
         if f.exists():
             _, rows = findings(f)
-            open_rows = [x for x in rows if x.get("status", "").lower() in OPEN]
+            open_rows = [x for x in rows if is_open(x)]
             if open_rows:
                 parts.append(f"### Earlier findings for '{r}' (give each a status in 'previous')\n" + "\n".join(
                     f"- {x.get('id')} [{x.get('severity')}] {x.get('file:line')}: {x.get('issue')}" for x in open_rows))
@@ -1011,7 +1192,7 @@ def envelope_write(data: dict, covered: list, req: list, agents: dict, d_out: pa
             round_no = int(m.group(1)) + 1 if m else 2
             status = {p.get("id"): p.get("status") for p in rv.get("previous", [])}
             for x in rows:
-                if x.get("id") in status and x.get("status", "").lower() in OPEN:
+                if x.get("id") in status and is_open(x):
                     x["status"] = status[x["id"]]
         nums = [int(n) for x in rows for n in re.findall(r"-(\d+)$", x.get("id", ""))]
         nxt = max(nums, default=0)
@@ -1023,7 +1204,7 @@ def envelope_write(data: dict, covered: list, req: list, agents: dict, d_out: pa
         block = security_block() if name == "security" else {"blocker", "major", "critical", "high"}
         yes, no = VERDICTS.get(name, ("APPROVE", "REQUEST CHANGES"))
         model_ok = str(rv.get("verdict", "")).upper().startswith(("APPROVE", "PASS"))
-        still_open = [x for x in rows if x.get("status", "").lower() in OPEN]
+        still_open = [x for x in rows if is_open(x)]
         verdict = no if open_blockers(rows, block) else yes if (model_ok or not still_open) else no
         cols = ["id", "severity", "file:line", "issue", "why it matters", "suggested fix", "status", "tech-lead decision"]
         clean = lambda v: str(v).replace("|", "/").replace("\n", " ").strip()
@@ -1032,7 +1213,7 @@ def envelope_write(data: dict, covered: list, req: list, agents: dict, d_out: pa
         text = (f"# {feature} - {name} review ({agents.get(name, name)}, by envelope) - {head}\n\n"
                 f"Verdict: {verdict}\nRound: {round_no}\nReviewed by: {by}\n\n" + "\n".join(table) + "\n")
         f.write_text(set_review_meta(text, commit, round_no, old_text) if commit else text)
-        n_open = len([x for x in rows if x.get("status", "").lower() in OPEN])
+        n_open = len([x for x in rows if is_open(x)])
         summary.append(f"{name} {verdict} ({n_open} open)")
     missing = [x for x in covered if x not in {rv.get("name") for rv in data.get("reviews", [])}]
     print(f"envelope {ref}: " + "; ".join(summary) + (f"  [{used:,} tokens, no reviewer agents]" if used else "")
@@ -1595,6 +1776,22 @@ def nit_defers(fname: str) -> bool:
     return bool(re.match(r"(code-review|tests)([-_.]|\d|$)", stem))
 
 
+def fix_words(fix: str) -> set:
+    return {w for w in re.findall(r"[a-z0-9_]+", fix.lower()) if len(w) > 2 and w not in
+            {"the", "and", "for", "that", "this", "with", "add", "use", "should", "instead", "also", "into", "from"}}
+
+
+def fixes_conflict(fixes) -> bool:
+    """Two or more suggested fixes for one spot conflict unless they say the same thing: identical, or one's words
+    contain the other's, or they share most words (duplicates take one decision instead of a tech-lead run)."""
+    sets = [w for w in dict.fromkeys(frozenset(fix_words(f)) for f in fixes if f.strip()) if w]
+    for i, a in enumerate(sets):
+        for b in sets[i + 1:]:
+            if not (a <= b or b <= a or len(a & b) / len(a | b) >= 0.6):
+                return True
+    return False
+
+
 def triage_decision(fname: str, r: dict, spots: dict, defer_new: bool, fix_files: set) -> tuple:
     """(decision, why-it-needs-the-tech-lead) for one undecided finding. Exactly one of the two is non-empty."""
     sev, status = r.get("severity", "").lower(), r.get("status", "").lower()
@@ -1608,7 +1805,9 @@ def triage_decision(fname: str, r: dict, spots: dict, defer_new: bool, fix_files
         return "", "a question or decision, not a fix (owner or tech lead decides)"
     if status == "disputed":
         return "", "disputed by the developer"
-    if spot and len(spots.get(spot, ())) > 1:
+    if status_state(status) == "unknown":
+        return "", f"unknown status '{status[:30]}' (open | fixed | not fixed | disputed)"
+    if spot and fixes_conflict(spots.get(spot, ())):
         return "", "reviewers suggest different fixes for the same spot"
     if sev not in AUTO_FIX | CHEAP:
         return "", "unknown severity"
@@ -1647,7 +1846,7 @@ def triage(argv: list) -> int:
         print(f"triage {feature}: no findings files under {base.relative_to(ROOT)}")
         return 0
     defer_after = team_setting("defer_minor_after_round", "off").lower()
-    pending, spots = [], {}
+    pending, spots, broken = [], {}, []
     for f in files:
         text = f.read_text(errors="replace")
         _, rows = findings_text(text)
@@ -1655,9 +1854,11 @@ def triage(argv: list) -> int:
         prev_commit = meta["rounds"].get(str(rnd - 1), "")
         fix_files = fix_files_between(prev_commit, file_commit(text)) if prev_commit else set()
         for r in rows:
-            status = r.get("status", "").lower()
+            if r.get("_malformed"):  # never decided by script; blocks the approval until the table is fixed
+                broken.append((f, r))
+                continue
             decision = r.get("tech-lead decision", r.get("decision", "")).strip()
-            if status not in OPEN or decision:
+            if not is_open(r) or decision:
                 continue
             spot = (r.get("file:line") or "").strip()
             fix = (r.get("suggested fix") or r.get("fix") or "").strip()
@@ -1677,13 +1878,13 @@ def triage(argv: list) -> int:
                 continue
             lines, hdr, mine = text.splitlines(), table_header(text), []
             for i, line in enumerate(lines):
-                cells = line.strip().strip("|").split("|") if line.strip().startswith("|") else []
+                cells = split_row(line)
                 if not cells or "status" not in hdr or len(cells) != len(hdr):
                     continue
                 r = dict(zip(hdr, [x.strip() for x in cells]))
                 r["severity"] = normalize_severity(r.get("severity", ""))
                 if r["severity"] in ("minor", "nit", "low") and not is_safety(f.name, r) \
-                        and r.get("status", "").lower() in OPEN \
+                        and is_open(r) \
                         and r.get("tech-lead decision", "").strip().lower().startswith("fix now") \
                         and touches_cited_line(c, head, r.get("file:line", "")):
                     cells[hdr.index("status")] = f" fixed (touched cited line (scope check, reviewer confirms) at {head[:9]}) "
@@ -1723,7 +1924,7 @@ def triage(argv: list) -> int:
             if not good or lint_review(t, True) or not table_header(t) or not approving_verdict(rf.name, findings_text(t)[0]):
                 stale.append(rf.name)
             rows_all += findings_text(t)[1]
-        unfixed = [r.get("id", "?") for r in rows_all if r.get("status", "").lower() in OPEN
+        unfixed = [r.get("id", "?") for r in rows_all if is_open(r)
                    and r.get("tech-lead decision", r.get("decision", "")).strip().lower().startswith("fix now")]
         blockers = open_blockers(rows_all, AUTO_FIX)
         if why or stale or unfixed or blockers:
@@ -1737,6 +1938,23 @@ def triage(argv: list) -> int:
         write_approval(feature, ref_arg, f"{by.group(1).strip() if by else 'unknown'} (triage re-stamped after a fix round; {reason})",
                        commit=head)
         print(f"  approval re-stamped {old[:9]} -> {head[:9]} ({ref_arg}): every review covers the head, nothing needs judgment")
+
+    def waits_for_fixes() -> list:
+        """Why no approval may be written yet: a review that doesn't approve (REQUEST CHANGES, FAIL, ...), a fix-now
+        finding not confirmed fixed, or a malformed row. Read after this run's decisions were written."""
+        why = []
+        for f in files:
+            verdict, rows = findings_text(f.read_text(errors="replace"))
+            if not approving_verdict(f.name, verdict):
+                why.append(f"{f.name}: Verdict {verdict or 'missing'}")
+            bad = malformed_rows(rows)
+            if bad:
+                why.append(f"{f.name}: malformed row(s) {', '.join(bad[:3])}")
+            owed = [r.get("id", "?") for r in rows if not r.get("_malformed") and is_open(r)
+                    and r.get("tech-lead decision", r.get("decision", "")).strip().lower().startswith("fix now")]
+            if owed:
+                why.append(f"{f.name}: fix-now not confirmed {', '.join(owed[:6])}")
+        return why
 
     def maybe_approve(reason: str) -> None:
         if ref_arg and not dry and approval_path(feature, ref_arg).exists():
@@ -1752,11 +1970,19 @@ def triage(argv: list) -> int:
         if missing:
             print(f"  not approved yet: waiting for {', '.join(missing)} (run triage again when every review is in)")
             return
+        owed = waits_for_fixes()
+        if owed:
+            print("  waiting for fix round: no approval written (" + "; ".join(owed[:6]) + "). After the fixes and the "
+                  f"re-review, run `just triage {feature} --ref {ref_arg}` again")
+            return
         write_approval(feature, ref_arg, f"triage ({reason})", commit=ref_head(feature, ref_arg))
         print(f"  approved to merge ({ref_arg}): the manager ships it with `just ship` once merge-check passes")
 
     if not pending:
         print(f"triage {feature}: nothing undecided")
+        for f, r in broken:
+            print(f"  malformed row: {r.get('id', '?')} in {f.relative_to(ROOT)} ({r['_malformed']}) - fix the table "
+                  "and run `just save-review`")
         maybe_approve("nothing needed judgment")
         return 0
     auto, judge = [], []
@@ -1768,11 +1994,12 @@ def triage(argv: list) -> int:
         for f, r, decision, _ in auto:
             by_file.setdefault(f, {})[r.get("id", "")] = decision
         for f, ids in by_file.items():
-            out = []
+            out, hdr = [], table_header(f.read_text(errors="replace"))
+            col = hdr.index("tech-lead decision") if "tech-lead decision" in hdr else len(hdr) - 1
             for line in f.read_text().splitlines():
-                cells = line.strip().strip("|").split("|") if line.strip().startswith("|") else []
-                if cells and cells[0].strip() in ids and len(cells) >= 2:
-                    cells[-1] = f" {ids[cells[0].strip()]} "
+                cells = split_row(line)
+                if cells and cells[0].strip() in ids and len(cells) == len(hdr) and col >= 0:
+                    cells[col] = f" {ids[cells[0].strip()]} "
                     line = "|" + "|".join(cells) + "|"
                 out.append(line)
             f.write_text("\n".join(out) + "\n")
@@ -1790,6 +2017,9 @@ def triage(argv: list) -> int:
         print(f"  deferred (carry them in the feature record; `just deferred {feature}`): {', '.join(deferred)}")
     for f, r, _, why in judge:
         print(f"  needs tech lead: {r.get('id', '?')} in {rel(f)} - {why}")
+    for f, r in broken:
+        print(f"  malformed row: {r.get('id', '?')} in {rel(f)} ({r['_malformed']}) - the reviewer fixes the table "
+              "(a `|` inside a cell is written `\\|`) and runs `just save-review`; nothing is approved until then")
     if not judge:
         print("  no judgment needed: send the fix list straight to the developer(s); no tech-lead launch")
         maybe_approve("only clear fixes or deferrals; no judgment needed")
@@ -1936,7 +2166,8 @@ def efficiency(argv: list) -> int:
     session = "--session" in argv
     feature = "" if session else next((a for a in argv if not a.startswith("--")), "") or (CURRENT_TASK_ID() or "")
     allrows = "--all" in argv or not feature
-    fid = (re.match(r"^([A-Za-z]+\d+)", feature) or [None, feature])[1]
+    task_key = lambda t: (re.match(r"^([A-Za-z]+\d+)", t or "") or [None, (t or "").strip()])[1]  # F12-s3 -> F12; LIVE -> LIVE
+    fid = task_key(feature)
     led = ROOT / ".agents" / "budget.csv"
     rows = list(csv.DictReader(led.open())) if led.exists() else []
     sid = ""
@@ -1946,7 +2177,7 @@ def efficiency(argv: list) -> int:
         rows = [r for r in rows if sid and r.get("session") == sid]
         fid = ""
     else:
-        rows = [r for r in rows if allrows or (re.match(r"^([A-Za-z]+\d+)", r.get("task", "")) or [None, ""])[1] == fid]
+        rows = [r for r in rows if allrows or task_key(r.get("task", "")) == fid]
     if not rows:
         sys.exit(f"kit: no budget rows for {'this session' if session else feature or 'any task'} "
                  "(agent runs are recorded when they finish)")
@@ -1974,8 +2205,12 @@ def efficiency(argv: list) -> int:
     collect_reviews(quiet=True)
     by_envelope = by_agents = approved_auto = approved_lead = 0
     prs, rounds = set(), {}
+    # session mode: only review folders of the session's tasks that changed on the session's days (not every feature)
+    s_feats = {task_key(t) for t in tasks if t}
+    in_session = lambda f: f.relative_to(rev_dir).parts[0] in s_feats and any(
+        dt.date.fromtimestamp(x.stat().st_mtime).isoformat() in dates for x in f.parent.glob("*.md"))
     for f in rev_dir.rglob("*.md") if rev_dir.exists() else []:
-        if ".saved" in f.parts:
+        if ".saved" in f.parts or (session and not in_session(f)):
             continue
         t = f.read_text(errors="replace")
         if f.parent.name.startswith("pr-") and f.name != APPROVAL_FILE:
@@ -2134,7 +2369,7 @@ def warm(argv: list) -> int:
 SETTING_CHOICES = {"work_mode": ["worktrees", "in-place"], "preload_mode": ["cards", "skills"],
                    "review_rounds": ["full", "fixes-only"], "defer_minor_after_round": ["off", "1", "2"],
                    "budget_measure": ["tokens", "cost-eq"], "nit_policy": ["defer", "fix"]}
-FREE_TEXT = {"envelope_command", "reuse_roles", "integration_branch", "release_branch", "usd_per_million_tokens",
+FREE_TEXT = {"build_jobs", "rustc_wrapper", "envelope_command", "reuse_roles", "integration_branch", "release_branch", "usd_per_million_tokens",
              "subagent_model", "security_block_severities", "records_extra_globs"}
 
 
@@ -2145,7 +2380,7 @@ def setting_rules() -> dict:
     ref = ROOT / "AGENT-SETTINGS.md"
     text = ref.read_text(errors="replace") if ref.exists() else ""
     for line in text.splitlines():
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        cells = [c.strip() for c in split_row(line)]
         if len(cells) < 3 or not re.fullmatch(r"`[a-z_]+`", cells[0]):
             continue
         name, default = cells[0].strip("`"), cells[1]
@@ -2323,7 +2558,7 @@ def status_cmd(argv: list) -> int:
         for l in board.read_text().splitlines():
             if not l.strip().startswith("|"):
                 continue
-            cells = [c.strip() for c in l.strip().strip("|").split("|")]
+            cells = [c.strip() for c in split_row(l)]
             if header is None and "status" in [c.lower() for c in cells]:
                 header = [c.lower() for c in cells]
                 continue
@@ -2779,7 +3014,7 @@ def board_archive(argv: list) -> int:
     lines = board.read_text().splitlines()
     header, keep, done = None, [], []
     for l in lines:
-        cells = [c.strip().lower() for c in l.strip().strip("|").split("|")] if l.strip().startswith("|") else []
+        cells = [c.strip().lower() for c in split_row(l)]
         if cells and "status" in cells and header is None:
             header = cells
             keep.append(l)
@@ -2835,6 +3070,56 @@ OPEN = {"open", "not fixed", "disputed", ""}
 CLEARED = ("reject", "defer", "accepted")
 
 
+def split_row(line: str) -> list:
+    """Cells of one markdown table row, split only on unescaped pipes: `a \\| b` stays one cell. Cells keep their
+    text as written (escapes included), so a row rebuilt with "|".join keeps them. [] for a line that is not a row.
+    The one table-row parser of the kit: budget.py, agents_sync.py, new_agent.py and install.py carry a copy
+    (kit-test checks the copies match)."""
+    s = line.strip()
+    if not s.startswith("|"):
+        return []
+    cells, cur, i = [], "", 1
+    while i < len(s):
+        if s[i] == "\\" and i + 1 < len(s):
+            cur, i = cur + s[i:i + 2], i + 2
+            continue
+        if s[i] == "|":
+            cells.append(cur)
+            cur = ""
+        else:
+            cur += s[i]
+        i += 1
+    if cur.strip():  # a row without its closing pipe
+        cells.append(cur)
+    return cells
+
+
+# Finding statuses. Anything that is not clearly closed counts as open (fail closed): a typo, an empty cell or a
+# malformed row can never hide a finding. save-review refuses empty and unknown statuses outright.
+OPEN_STATUSES = ("open", "not fixed", "partly fixed", "partially fixed", "disputed", "reopened", "fix now", "unfixed",
+                 "pending", "in progress", "todo")
+CLOSED_STATUSES = ("fixed", "verified", "accepted", "deferred", "defer", "rejected", "reject", "closed", "resolved",
+                   "answered", "decided", "carried", "no change", "n/a", "wontfix", "won't fix", "not a bug", "duplicate",
+                   "superseded", "withdrawn", "noted", "informational", "info")
+
+
+def status_state(raw: str) -> str:
+    """'open', 'closed' or 'unknown' for a status cell; an empty cell is open."""
+    s = re.sub(r"[*_`]", "", raw or "").strip().lower()
+    if not s:
+        return "open"
+    for state, words in (("open", OPEN_STATUSES), ("closed", CLOSED_STATUSES)):
+        for w in words:
+            if s == w or (s.startswith(w) and not (s[len(w)].isalnum() or s[len(w)] in "-'")):
+                return state
+    return "unknown"
+
+
+def is_open(r: dict) -> bool:
+    """A finding still counts: its status is open or unknown, or its row is malformed (cells don't match the header)."""
+    return bool(r.get("_malformed")) or status_state(r.get("status", "")) != "closed"
+
+
 def findings(path: pathlib.Path) -> tuple:
     """Return (verdict, rows) from a findings file written with the kit templates."""
     return findings_text(path.read_text(errors="replace"))
@@ -2875,7 +3160,7 @@ COLUMN_ALIASES = {"sev": "severity", "priority": "severity", "level": "severity"
 def table_header(text: str) -> list:
     """Column names of the first findings table (aliases mapped to the template's names)."""
     for line in text.splitlines():
-        cells = [c.strip().lower() for c in line.strip().strip("|").split("|")] if line.strip().startswith("|") else []
+        cells = [c.strip().lower() for c in split_row(line)]
         if cells and cells[0] == "id":
             return [COLUMN_ALIASES.get(c, c) for c in cells]
     return []
@@ -2889,7 +3174,7 @@ def findings_text(text: str) -> tuple:
         if not line.strip().startswith("|"):
             header = None if header and not line.strip() else header
             continue
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        cells = [c.strip() for c in split_row(line)]
         if header is None:
             if cells and cells[0].lower() == "id":
                 header = [COLUMN_ALIASES.get(c.lower(), c.lower()) for c in cells]
@@ -2897,19 +3182,26 @@ def findings_text(text: str) -> tuple:
         if set("".join(cells)) <= set("-: "):
             continue
         row = dict(zip(header, cells))
+        if len(cells) != len(header):  # a stray pipe or a missing cell shifts every later column: never trust it
+            row["_malformed"] = f"{len(cells)} cells, the header has {len(header)}"
         if "severity" in row:
             row["severity"] = normalize_severity(row["severity"])
         rows.append(row)
     return verdict, rows
 
 
+def malformed_rows(rows: list) -> list:
+    return [f"{r.get('id', '?')} ({r['_malformed']})" for r in rows if r.get("_malformed")]
+
+
 def open_blockers(rows: list, severities: set) -> list:
     out = []
     for r in rows:
         sev = r.get("severity", "").lower()
-        status = r.get("status", "").lower()
         decision = r.get("tech-lead decision", r.get("decision", "")).lower()
-        if sev in severities and status in OPEN and not decision.startswith(CLEARED):
+        if r.get("_malformed"):  # its severity, status and decision cells can't be trusted
+            out.append(f"{r.get('id', '?')} (malformed row)")
+        elif sev in severities and is_open(r) and not decision.startswith(CLEARED):
             out.append(r.get("id", "?"))
     return out
 
@@ -2960,7 +3252,7 @@ def plan_slices(text: str) -> list:
     for line in body.splitlines():
         if not line.strip().startswith("|"):
             continue
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        cells = [c.strip() for c in split_row(line)]
         if header is None:
             header = [c.lower() for c in cells]
             continue
@@ -3213,7 +3505,7 @@ def unresolved_rows(rows: list, fname: str = "") -> list:
         if r.get("severity") == "info" or dec.startswith(CLEARED) or \
                 (r.get("severity") == "nit" and not is_safety(fname, r) and nit_defers(fname)):
             continue
-        if r.get("status", "").lower() in OPEN:
+        if is_open(r):
             out.append(r.get("id", "?"))
     return out
 
@@ -3235,6 +3527,19 @@ def lint_review(text: str, pr_level: bool) -> list:
     if not rows and BULLET_FINDING_RX.search(re.sub(r"<!--.*?-->", "", text, flags=re.S)):
         problems.append("findings are written as bullets: put every finding in the table (bullets are not counted, so "
                         "they would never reach the developer or block a merge)")
+    broken = malformed_rows(rows)
+    if broken:
+        problems.append(f"wrong number of cells in {', '.join(broken[:5])} - a `|` inside a cell must be written `\\|`, "
+                        "and every row needs one cell per column")
+    if "status" in header:
+        nostatus = [r.get("id", "?") for r in rows if not r.get("_malformed") and not r.get("status", "").strip()]
+        if nostatus:
+            problems.append(f"empty status on {', '.join(nostatus[:5])} - write open | fixed | not fixed | disputed")
+        odd = [f"{r.get('id', '?')} ('{r.get('status', '')[:30]}')" for r in rows if not r.get("_malformed")
+               and r.get("status", "").strip() and status_state(r.get("status", "")) == "unknown"]
+        if odd:
+            problems.append(f"unknown status on {', '.join(odd[:5])} - start it with open | fixed | not fixed | disputed "
+                            "| accepted risk | deferred")
     blank = [r.get("id", "?") for r in rows if not r.get("severity")]
     if blank:
         problems.append(f"no severity on {', '.join(blank[:5])}")
@@ -3355,7 +3660,7 @@ def keep_decisions(old: str, new: str) -> str:
         return new
     out = []
     for line in new.splitlines():
-        cells = line.strip().strip("|").split("|") if line.strip().startswith("|") else []
+        cells = split_row(line)
         if cells and cells[0].strip() in dec and len(cells) >= 2 and not cells[-1].strip():
             cells[-1] = f" {dec[cells[0].strip()]} "
             line = "|" + "|".join(cells) + "|"
@@ -3792,7 +4097,7 @@ def freshness_checks(d: pathlib.Path, names: list, head: str, base: str) -> list
         _, rows = findings_text(text)
         for r in rows:
             dec = r.get("tech-lead decision", r.get("decision", "")).strip().lower()
-            if r.get("status", "").lower() in OPEN and dec.startswith("fix now"):
+            if is_open(r) and dec.startswith("fix now"):
                 unfixed.append(r.get("id", "?"))
     if head:
         res.append(("reviews cover the current commit", not stale, "; ".join(stale[:4]) or "; ".join(carried[:4])))
@@ -4201,7 +4506,7 @@ def review_pack(argv: list) -> int:
         prior = []
         for f in sorted(d.glob("*.md")) if d.exists() else []:
             v, rows = findings(f)
-            open_ids = [r.get("id", "?") for r in rows if r.get("status", "").lower() in OPEN]
+            open_ids = [r.get("id", "?") for r in rows if is_open(r)]
             prior.append(f"- {f.name}: verdict {v or '-'}; open: {', '.join(open_ids) or 'none'}")
         if prior:
             print("\n## Previous findings (re-review: update these in place)\n" + "\n".join(prior))
@@ -4287,22 +4592,20 @@ def fix_list(argv: list) -> int:
         _, rows = findings(f)
         for r in rows:
             dec = r.get("tech-lead decision", r.get("decision", "")).strip().lower()
-            if r.get("status", "").lower() in OPEN and dec.startswith("fix now"):
+            if is_open(r) and dec.startswith("fix now"):
                 fix = (r.get("suggested fix") or "").strip() or "(see the issue)"
                 items.append(f"- {r.get('id', '?')} [{r.get('severity', '?')}] {r.get('file:line', '-')}: "
                              f"{r.get('issue', '').strip()[:220]}\n  Fix: {fix[:260]}")
     undecided = [r.get("id", "?") for f in (sorted(d.glob("*.md")) if d.exists() else []) if f.name != APPROVAL_FILE
-                 for r in findings(f)[1] if r.get("status", "").lower() in OPEN
+                 for r in findings(f)[1] if is_open(r)
                  and not r.get("tech-lead decision", r.get("decision", "")).strip()]
-    if undecided:
-        print(f"fix-list: {len(undecided)} finding(s) not decided yet ({', '.join(undecided[:6])}): run `just triage "
-              f"{feature} --ref {ref}` first")
-        return 1
+    later = (f"Not in this brief: {len(undecided)} finding(s) not decided yet ({', '.join(undecided[:6])}) - "
+             f"`just triage {feature} --ref {ref}` or the tech lead decides; a later fix-list adds the ones to fix")
     if not items:
-        print(f"fix-list {ref}: nothing to fix")
-        return 0
+        print(f"fix-list {ref}: " + (later if undecided else "nothing to fix"))
+        return 1 if undecided else 0
     print(f"Task: {feature} fix round for {ref}\nFix exactly these {len(items)} finding(s):\n" + "\n".join(items)
-          + "\n\n" + FIX_RULES)
+          + "\n\n" + FIX_RULES + (f"\n\n{later}" if undecided else ""))
     return 0
 
 
@@ -4340,7 +4643,7 @@ def verify_fixes(argv: list) -> int:
         _, rows = findings(f)
         byid = {r.get("id"): r for r in rows}
         for i, line in enumerate(lines):
-            cells = line.strip().strip("|").split("|") if line.strip().startswith("|") else []
+            cells = split_row(line)
             rid = cells[0].strip() if cells else ""
             if rid not in ids or "status" not in header:
                 continue
@@ -4479,7 +4782,7 @@ def next_cmd(argv: list) -> int:
             names = [review_file(r) for r in req if r not in ("tests", "light")]
             stale = [x for x in names if not review_fresh((d / x).read_text(errors="replace"), sha_of(headref), base)[0]]
             undecided = [r.get("id") for x in names for r in findings(d / x)[1]
-                         if r.get("status", "").lower() in OPEN and not r.get("tech-lead decision", r.get("decision", "")).strip()]
+                         if is_open(r) and not r.get("tech-lead decision", r.get("decision", "")).strip()]
             fixnow = [c for c in freshness_checks(d, names, "", "") if c[1] is False]
             if undecided:
                 action = f"{len(undecided)} undecided finding(s): `just triage {fid} --ref {ref}`"
@@ -4516,7 +4819,12 @@ def next_cmd(argv: list) -> int:
 
 EXPORT_DIRS = [".claude", ".agents", ".github", "docs/features", "docs/bugs", "docs/decisions", "docs/adr"]
 EXPORT_FILES = ["CLAUDE.md", "AGENTS.md", "AGENT-GUIDE.md", "AGENT-KIT.md", "AGENT-SETTINGS.md", "justfile", ".gitignore",
-                ".mcp.json", ".env.example"]
+                ".mcp.json", ".env.example", "install.py", "install.sh"]
+# Needed by whoever upgrades the kit from the zip: always included (a symlink is followed when it points at a plain
+# file of the same name) and reported when missing. The installer leaves a copy of itself in .claude/kit/installer/
+# (a project has no install.py of its own); that copy goes to the zip root, ahead of an older hand-copied one.
+EXPORT_REQUIRED = ["install.py", "install.sh", ".claude/kit/kit.py"]
+INSTALLER_COPY = ".claude/kit/installer"
 EXPORT_SKIP = [".claude/worktrees/**", ".claude/settings.local.json", ".claude/**/__pycache__/**", "**/*.pyc",
                ".agents/backup-*/**", ".agents/.reuse-nudged", "**/.env", "**/.env.*", "**/node_modules/**",
                "**/target/**", "data/**", "**/*.key", "**/*.pem", "**/*.p12", "**/.DS_Store"]
@@ -4539,13 +4847,27 @@ def export_kit(argv: list) -> int:
             files += [p for p in base.rglob("*") if p.is_file()]
     files += [ROOT / f for f in EXPORT_FILES if (ROOT / f).is_file()]
     picked, skipped = [], 0
+    kept = {n: ROOT / INSTALLER_COPY / n for n in ("install.py", "install.sh") if (ROOT / INSTALLER_COPY / n).is_file()}
     for p in sorted(set(files)):
         rel = str(p.relative_to(ROOT))
+        if rel.startswith(INSTALLER_COPY + "/") or rel in kept:
+            continue  # added once below, at the zip root
+        if rel in EXPORT_REQUIRED and p.is_symlink():
+            real = p.resolve()
+            if real.is_file() and real.name == p.name:
+                picked.append((real, rel))
+                continue
         hard_skip = rel.startswith((".claude/worktrees/", ".agents/backup-")) or "/node_modules/" in f"/{rel}"
         if hard_skip or (matches(rel, EXPORT_SKIP) and not keep_example(rel)) or p.is_symlink():
             skipped += 1
             continue
         picked.append((p, rel))
+    picked += [(f, n) for n, f in kept.items() if not f.is_symlink()]
+    picked.sort(key=lambda x: x[1])
+    missing = [r for r in EXPORT_REQUIRED if r not in {rel for _, rel in picked}]
+    if missing:
+        print(f"export-kit: not found, add them to the repo root (copy from the kit folder) or send them separately: "
+              f"{', '.join(missing)}", file=sys.stderr)
     if "--list" in argv:
         for _, rel in picked:
             print(rel)
@@ -4629,11 +4951,20 @@ def main(argv: list) -> int:
             sys.exit(f"kit: {cmd} does not take {', '.join(bad)}; nothing was done.\n{command_help(cmd)}")
     validate_args(cmd, rest)
     if cmd == "gate":
-        return gate()
+        return gate(fresh="--fresh" in rest)
     if cmd == "test":
-        return gate(only="test")
+        return gate(only="test", fresh="--fresh" in rest)
     if cmd == "check":
-        return gate(extra=True)
+        return gate(extra=True, fresh="--fresh" in rest)
+    if cmd == "cargo":  # a one-off cargo command (targeted test, build) under the same build slot and job cap
+        if not rest:
+            sys.exit("usage: kit.py cargo <cargo arguments>   e.g. kit.py cargo nextest run -p core my_test")
+        import shlex
+        step = {"name": "cargo " + (rest[0] if rest else ""), "cmd": "cargo " + shlex.join(rest)}
+        if is_heavy(step):
+            with BuildSlot(step["name"]):
+                return sh(step["cmd"], env=build_env()).returncode
+        return sh(step["cmd"], env=build_env()).returncode
     if cmd == "db-check":
         return db_check()
     if cmd == "test-check":

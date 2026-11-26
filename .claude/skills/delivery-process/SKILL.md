@@ -34,6 +34,8 @@ When unsure, pick the smaller size. A plan costing more than ~3x what the visibl
 ### 2b. Preview first
 One question at most, answerable by pointing; then `prototyper` makes <= 3 previews (cap 150k); the owner picks; the
 pick becomes owner rules and acceptance criteria. Details: `references/preview-and-verify.md`.
+Plan review turns failure paths and "controls that must be disabled" into acceptance criteria, not developer
+checklists: `references/plan-checklist.md`.
 
 ## 3. Lifecycle
 ```
@@ -75,7 +77,11 @@ Assign by dominant skill: `dev-data`, `dev-quant`, `dev-backtest`, `dev-executio
 T0 every step (gate hook), T1 one quick look at the changed thing, T2 the full matrix once per feature by the tester.
 A PR gets its own tester only when `review-plan` says "risk area" (money, auth, migrations, destructive operations);
 then the tester checks that area only. `just promote` waits until every feature in it has a signed-off T2.
-Slices never run T2; never re-run a tier that already passed on unchanged code. Stack specifics: `references/preview-and-verify.md`.
+Slices never run T2; never re-run a tier that already passed on unchanged code.
+Builds: the gate skips a step when the branch changed nothing it reads, or when it already passed on exactly these
+inputs (any worktree); `--fresh` forces it. Compiling steps take one of team.md `heavy_builds_at_once` slots, so
+parallel developers queue instead of running out of memory. Reviewers never build: they read the diff, and the head
+commit's gate and CI results speak for it. Stack specifics: `references/preview-and-verify.md`.
 
 ## 5. Dispatch (the only format)
 ```

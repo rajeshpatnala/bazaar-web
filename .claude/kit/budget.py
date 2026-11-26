@@ -48,13 +48,35 @@ DEVELOPER_ESTIMATE = 200_000
 OTHER_ESTIMATE = 100_000
 
 
+def split_row(line: str) -> list:
+    """Cells of one markdown table row, split only on unescaped pipes (`a \\| b` stays one cell). A copy of
+    kit.py split_row: keep them identical (kit-test checks)."""
+    s = line.strip()
+    if not s.startswith("|"):
+        return []
+    cells, cur, i = [], "", 1
+    while i < len(s):
+        if s[i] == "\\" and i + 1 < len(s):
+            cur, i = cur + s[i:i + 2], i + 2
+            continue
+        if s[i] == "|":
+            cells.append(cur)
+            cur = ""
+        else:
+            cur += s[i]
+        i += 1
+    if cur.strip():  # a row without its closing pipe
+        cells.append(cur)
+    return cells
+
+
 def limits() -> dict:
     """Read 'setting | value' rows from the Budget section of team.md."""
     out = {"per_task_tokens": 0, "per_day_tokens": 0, "warn_percent": 80, "usd_per_million_tokens": 0.0}
     text = TEAM.read_text() if TEAM.exists() else ""
     section = re.search(r"^## Budget.*?(?=^## |\Z)", text, re.S | re.M)
     for line in (section.group(0) if section else "").splitlines():
-        cells = [c.strip().strip("`") for c in line.strip().strip("|").split("|")]
+        cells = [c.strip().strip("`") for c in split_row(line)]
         if len(cells) >= 2 and cells[0] in out:
             raw = cells[1].replace(",", "").replace("_", "").strip()
             if raw in ("", "-", "none", "unlimited"):
@@ -298,7 +320,7 @@ def agent_caps() -> dict:
         if not s.startswith("|"):
             header = None
             continue
-        cells = [c.strip().strip("`") for c in s.strip("|").split("|")]
+        cells = [c.strip().strip("`") for c in split_row(s)]
         if header is None:
             header = [c.lower() for c in cells] if cells and cells[0].lower() == "agent" else []
             continue

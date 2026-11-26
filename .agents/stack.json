@@ -240,19 +240,28 @@
         "name": "ui-typecheck",
         "cmd": "pnpm -s -C web typecheck",
         "needs": "test -f web/package.json",
-        "optional": true
+        "optional": true,
+        "paths": [
+          "web/**"
+        ]
       },
       {
         "name": "ui-lint",
         "cmd": "pnpm -s -C web lint",
         "needs": "test -f web/package.json",
-        "optional": true
+        "optional": true,
+        "paths": [
+          "web/**"
+        ]
       },
       {
         "name": "ui-test",
         "cmd": "pnpm -s -C web test:ci",
         "needs": "test -f web/package.json",
-        "optional": true
+        "optional": true,
+        "paths": [
+          "web/**"
+        ]
       }
     ],
     "check_steps": [
@@ -270,8 +279,15 @@
         "name": "ui-audit",
         "cmd": "pnpm -C web audit --prod",
         "needs": "test -f web/package.json",
-        "optional": true
+        "optional": true,
+        "paths": [
+          "web/**"
+        ]
       }
+    ],
+    "build_ignore": [
+      "web/**",
+      "previews/**"
     ]
   },
   "db_check": {

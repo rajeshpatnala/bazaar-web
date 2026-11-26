@@ -8,6 +8,7 @@ way agents do (`--branch` mode, which needs no PR). Run after any change to .cla
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -274,7 +275,7 @@ class TriageTests(Base):
         text = (self.r.dir / f".agents/reviews/F1/{ref}/{name}").read_text()
         for line in text.splitlines():
             if line.startswith(f"| {rid} |"):
-                return line.strip().strip("|").split("|")[-1].strip()
+                return re.split(r"(?<!\\)\|", line.strip().strip("|"))[-1].strip()
         return None
 
     def test_reviewer_deferral_is_respected_for_minor_and_escalated_for_blocker(self):
@@ -345,6 +346,97 @@ class RoundTwoTests(Base):
         self.assertIn("Fix-round rules", out)
 
 
+class TableSafetyTests(Base):
+    """P0 (kit recommendations 2026-11-26): an escaped pipe or a malformed row can never hide an open finding."""
+    PIPE_ISSUE = r"`a \| b` is parsed as two cells"
+    PIPE_FIX = r"split on `(?<!\\)\|` only"
+
+    def approval(self, ref):
+        return self.r.dir / f".agents/reviews/F1/{ref}/approval.md"
+
+    def test_escaped_pipe_major_stays_open_in_save_review_triage_fix_list_and_merge_check(self):
+        b, ref = "feat/F1-pipe", "feat-F1-pipe"
+        self.r.branch(b, {"src/lib.rs": "pub fn a() -> i32 { 2 }\n"})
+        rc, out = self.r.review(b, "code-review.md", "REQUEST CHANGES",
+                                [row("CR-1-1", "major", issue=self.PIPE_ISSUE, fix=self.PIPE_FIX)])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("1 finding(s)", out)
+        rc, out = self.r.kit("triage", "F1", "--ref", ref)
+        self.assertIn("1 decided by the defaults", out)
+        self.assertIn("waiting for fix round", out)
+        self.assertNotIn("approved to merge", out)
+        self.assertFalse(self.approval(ref).exists())
+        text = (self.r.dir / f".agents/reviews/F1/{ref}/code-review.md").read_text()
+        self.assertIn(r"a \| b", text)  # triage rewrote the row and kept the escape
+        rc, out = self.r.kit("fix-list", "--branch", b, "--feature", "F1")
+        self.assertIn("CR-1-1", out)
+        self.r.approve(b)
+        self.r.gate_pass(b)
+        rc, out = self.r.kit("merge-check", "--branch", b, "--feature", "F1")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("FAIL code review approved", out)
+
+    def test_hidden_major_under_an_approving_verdict_fails_merge_check(self):
+        b = "feat/F1-hidden"
+        self.r.branch(b, {"src/lib.rs": "pub fn a() -> i32 { 2 }\n"})
+        rc, out = self.r.review(b, "code-review.md", "APPROVE",
+                                [row("CR-1-1", "major", issue=self.PIPE_ISSUE, fix=self.PIPE_FIX, dec="fix now (auto)")])
+        self.r.approve(b)
+        self.r.gate_pass(b)
+        rc, out = self.r.kit("merge-check", "--branch", b, "--feature", "F1")
+        self.assertEqual(rc, 1, out)
+        self.assertRegex(out, r"FAIL code review approved \(verdict APPROVE; open: CR-1-1")
+
+    def test_malformed_row_is_refused_by_save_review_and_blocks_triage_and_merge(self):
+        b, ref = "feat/F1-bad", "feat-F1-bad"
+        self.r.branch(b, {"src/lib.rs": "pub fn a() -> i32 { 2 }\n"})
+        bad = row("CR-1-1", "major", issue="a | b unescaped", status="open")
+        rc, out = self.r.review(b, "code-review.md", "APPROVE", [bad])
+        self.assertEqual(rc, 1, out)
+        self.assertIn("wrong number of cells in CR-1-1", out)
+        # a file that bypassed save-review (hand edit) still can't be approved or merged
+        rc, out = self.r.kit("triage", "F1", "--ref", ref)
+        self.assertIn("malformed row: CR-1-1", out)
+        self.assertFalse(self.approval(ref).exists())
+        self.r.approve(b)
+        self.r.gate_pass(b)
+        rc, out = self.r.kit("merge-check", "--branch", b, "--feature", "F1")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("CR-1-1 (malformed row)", out)
+
+    def test_empty_or_unknown_status_is_refused(self):
+        b = "feat/F1-st"
+        self.r.branch(b, {"src/lib.rs": "pub fn a() -> i32 { 2 }\n"})
+        for status, msg in (("", "empty status on CR-1-1"), ("fxied", "unknown status on CR-1-1")):
+            rc, out = self.r.review(b, "code-review.md", "REQUEST CHANGES", [row("CR-1-1", "major", status=status)])
+            self.assertEqual(rc, 1, out)
+            self.assertIn(msg, out)
+
+    def test_triage_writes_no_approval_while_a_review_requests_changes(self):
+        b, ref = "feat/F1-rc", "feat-F1-rc"
+        self.r.branch(b, {"src/lib.rs": "pub fn a() -> i32 { 2 }\n"})
+        self.r.review(b, "code-review.md", "REQUEST CHANGES", [row("CR-1-1", "minor", status="fixed", dec="fix now (auto)")])
+        rc, out = self.r.kit("triage", "F1", "--ref", ref)
+        self.assertIn("waiting for fix round", out)
+        self.assertIn("Verdict REQUEST CHANGES", out)
+        self.assertFalse(self.approval(ref).exists())
+        self.r.review(b, "code-review.md", "APPROVE", [row("CR-1-1", "minor", status="fixed", dec="fix now (auto)")])
+        rc, out = self.r.kit("triage", "F1", "--ref", ref)
+        self.assertIn("approved to merge", out)
+        self.assertTrue(self.approval(ref).exists())
+
+
+    def test_fix_list_prints_decided_findings_and_lists_undecided_apart(self):
+        b = "feat/F1-u"
+        self.r.branch(b, {"src/lib.rs": "pub fn a() -> i32 { 2 }\n"})
+        self.r.review(b, "code-review.md", "REQUEST CHANGES", [row("CR-1-1", "major", dec="fix now (auto)"),
+                                                             row("CR-1-2", "question", issue="should we keep it?")])
+        rc, out = self.r.kit("fix-list", "--branch", b, "--feature", "F1")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Fix exactly these 1 finding(s)", out)
+        self.assertIn("Not in this brief: 1 finding(s) not decided yet (CR-1-2)", out)
+
+
 class ToolingTests(Base):
     def test_help_never_runs_a_command_and_unknown_flags_are_refused(self):
         rc, out = self.r.kit("records-pr", "--help")
@@ -370,6 +462,27 @@ class ToolingTests(Base):
         files = self.r.git("show", "--name-only", "--format=", self.r.git("branch", "--list", "docs/agents-records-*").strip(" *"))
         self.assertIn(".agents/owner-input/F2-charges.md", files)
         self.assertIn(".agents/handoff-2026-11-20.md", files)
+
+    def test_export_kit_includes_installer_and_engine(self):
+        rc, out = self.r.kit("export-kit", "--list")
+        self.assertIn(".claude/kit/kit.py", out.split())
+        self.assertIn("not found", out)
+        self.assertIn("install.py, install.sh", out)
+        self.r.write(".claude/kit/installer/install.py", "# kit installer\n")
+        self.r.write(".claude/kit/installer/install.sh", "#!/bin/sh\n")
+        self.r.write("install.py", "# an older hand-copied installer\n")
+        rc, out = self.r.kit("export-kit", "--list")
+        listed = out.split()
+        self.assertEqual(listed.count("install.py"), 1)
+        self.assertIn("install.sh", listed)
+        self.assertNotIn(".claude/kit/installer/install.py", listed)
+        self.assertNotIn("not found", out)
+        z = self.r.dir.parent / f"{self.r.dir.name}-test.zip"
+        self.r.kit("export-kit", "--out", str(z))
+        import zipfile
+        with zipfile.ZipFile(z) as f:
+            self.assertEqual(f.read("install.py").decode(), "# kit installer\n")  # the installed kit's copy wins
+        z.unlink()
 
 
 class ReportTests(Base):
@@ -405,6 +518,23 @@ class ReportTests(Base):
         self.assertIn("Spend by role", report)
         self.assertNotIn("code-reviewer relaunched", report)
 
+    def test_efficiency_takes_any_task_id_and_session_mode_counts_only_its_reviews(self):
+        led = self.r.dir / ".agents" / "budget.csv"
+        led.write_text("date,time,task,agent,tokens,note,source,processed,start,session,start_cached,cost_eq\n"
+                       "2026-11-20,10:00,LIVE,dev-core,100000,\"50 steps, id a1\",auto,1,10000,s1,0,500000\n"
+                       "2026-11-20,11:00,F1,dev-core,100000,\"50 steps, id a3\",auto,1,10000,s2,0,500000\n")
+        rc, out = self.r.kit("efficiency", "LIVE")
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(list((self.r.dir / ".agents" / "reports").glob("efficiency-LIVE-*.md")))
+        for i in (1, 2, 3):  # an older feature's review rounds must not count for session s1
+            self.r.write(f".agents/reviews/F9/pr-{i}/code-review.md", "Verdict: APPROVE\nRound: 3\n")
+        rc, out = subprocess.run([sys.executable, str(self.r.dir / ".claude/kit/kit.py"), "efficiency", "--session"],
+                                 cwd=self.r.dir, capture_output=True, text=True,
+                                 env=dict(os.environ, KIT_ROOT=str(self.r.dir), CLAUDE_CODE_SESSION_ID="s1")).returncode, ""
+        self.assertEqual(rc, 0)
+        report = max((self.r.dir / ".agents" / "reports").glob("efficiency-*.md"), key=lambda f: f.stat().st_mtime).read_text()
+        self.assertIn("| PR review folders | 0;", report)
+
 
 class NitCostTests(Base):
     LIB = "".join(f"pub fn f{i}() -> i32 {{ {i} }}\n" for i in range(30))
@@ -413,7 +543,7 @@ class NitCostTests(Base):
         text = (self.r.dir / f".agents/reviews/F1/{ref}/{fname}").read_text()
         for line in text.splitlines():
             if line.startswith(f"| {rid} "):
-                return line.strip().strip("|").split("|")[-1].strip()
+                return re.split(r"(?<!\\)\|", line.strip().strip("|"))[-1].strip()
         return None
 
     def edit(self, b, files):
@@ -429,7 +559,12 @@ class NitCostTests(Base):
         self.r.review(name, "code-review.md", "APPROVE", rows)
         ref = name.replace("/", "-")
         rc, out = self.r.kit("triage", "F1", "--ref", ref)
-        self.assertIn("approved to merge", out)
+        if any(r[7].lower().startswith("fix now") for r in rows):
+            # P0 (2026-11-26): no approval while a fix-now finding is unconfirmed; triage approves after the fix push
+            self.assertIn("waiting for fix round", out)
+            self.assertFalse((self.r.dir / f".agents/reviews/F1/{ref}/approval.md").exists())
+        else:
+            self.assertIn("approved to merge", out)
         return name, ref
 
     def test_nit_is_deferred_by_default_minor_and_security_nit_are_not(self):
@@ -636,6 +771,93 @@ class NitCostTests(Base):
         self.assertEqual(old, self.approval_text(ref))
 
 
+
+class BuildEconomyTests(Base):
+    """Builds run only when something they read changed, never twice on the same inputs, and one at a time."""
+
+    def use_steps(self, steps):
+        st = json.loads((self.r.dir / ".agents/stack.json").read_text())
+        st["gate"] = {"steps": steps}
+        (self.r.dir / ".agents/stack.json").write_text(json.dumps(st))
+        self.r.commit("chore: gate steps")
+
+    def runs(self):
+        f = self.r.dir / "ran.txt"
+        return f.read_text().count("x") if f.exists() else 0
+
+    STEP = {"name": "build", "cmd": "printf x >> ran.txt", "paths": ["src/**"], "heavy": True}
+
+    def test_steps_skip_when_nothing_they_read_changed_and_reuse_a_pass(self):
+        self.use_steps([self.STEP])
+        (self.r.dir / ".gitignore").write_text((self.r.dir / ".gitignore").read_text() + "ran.txt\n")
+        self.r.commit("chore: ignore")
+        self.r.git("switch", "-q", "-c", "feat/F1-docs")
+        self.r.write("docs/note.md", "only docs\n")
+        rc, out = self.r.kit("gate")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("skip build (no change to its inputs", out)
+        self.assertEqual(self.runs(), 0)
+        self.r.write("src/lib.rs", "pub fn a() -> i32 { 9 }\n")
+        rc, out = self.r.kit("gate")
+        self.assertEqual((rc, self.runs()), (0, 1), out)
+        rc, out = self.r.kit("gate")
+        self.assertIn("skip build (passed before on exactly these inputs", out)
+        self.assertEqual(self.runs(), 1)
+        rc, out = self.r.kit("gate", "--fresh")
+        self.assertEqual(self.runs(), 2)
+        self.r.write("src/lib.rs", "pub fn a() -> i32 { 10 }\n")  # new inputs: runs again
+        self.r.kit("gate")
+        self.assertEqual(self.runs(), 3)
+
+    def test_a_failed_step_is_not_remembered(self):
+        self.use_steps([{"name": "build", "cmd": "false", "paths": ["src/**"]}])
+        self.r.git("switch", "-q", "-c", "feat/F1-fail")
+        self.r.write("src/lib.rs", "broken\n")
+        for _ in range(2):
+            rc, out = self.r.kit("gate")
+            self.assertEqual(rc, 1, out)
+            self.assertIn("FAIL build", out)
+
+    def test_heavy_step_waits_for_the_build_slot_and_gets_the_job_cap(self):
+        import fcntl
+        self.r.set("build_jobs", "2")
+        self.use_steps([{"name": "build", "cmd": "echo jobs=$CARGO_BUILD_JOBS > jobs.txt", "paths": ["src/**"], "heavy": True}])
+        self.r.git("switch", "-q", "-c", "feat/F1-lock")
+        self.r.write("src/lib.rs", "pub fn a() -> i32 { 3 }\n")
+        lock = open(self.r.dir / ".git" / "kit-build-0.lock", "a+")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            r = subprocess.run([sys.executable, str(self.r.dir / ".claude/kit/kit.py"), "gate"], cwd=self.r.dir,
+                               capture_output=True, text=True, env=dict(os.environ, KIT_ROOT=str(self.r.dir), KIT_BUILD_WAIT="2"))
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("waiting for a build slot", r.stdout + r.stderr)
+            self.assertIn("no build slot", r.stdout + r.stderr)
+        finally:
+            lock.close()
+        rc, out = self.r.kit("gate")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual((self.r.dir / "jobs.txt").read_text().strip(), "jobs=2")
+
+    def test_cargo_steps_ignore_docs_but_not_config(self):
+        st = {"name": "lint", "cmd": "cargo clippy"}
+        paths = self.k_paths(st)
+        reads = lambda x: self.k.reads(x, paths)
+        self.assertFalse(reads("docs/guide.md"))
+        self.assertFalse(reads(".agents/board.md"))
+        self.assertTrue(reads("crates/core/src/lib.rs"))
+        self.assertTrue(reads("config/limits.toml"))  # tests may read it
+        self.assertTrue(self.k.is_heavy(st))
+        self.assertFalse(self.k.is_heavy({"name": "fmt", "cmd": "cargo fmt --all -- --check"}))
+
+    def k_paths(self, st):
+        import importlib.util
+        os.environ["KIT_ROOT"] = str(self.r.dir)
+        spec = importlib.util.spec_from_file_location("kit_be", self.r.dir / ".claude" / "kit" / "kit.py")
+        self.k = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.k)
+        return self.k.step_paths(st)
+
+
 class FunctionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -777,6 +999,47 @@ class FunctionTests(unittest.TestCase):
         _, rows = self.k.findings_text("Verdict: APPROVE\n\n| id | sev | where | check | status |\n|---|---|---|---|---|\n| Q-1 | must-fix | a.rs:3 | x | open |\n")
         self.assertEqual(rows[0]["severity"], "major")
         self.assertEqual(rows[0]["file:line"], "a.rs:3")
+
+    def test_split_row_keeps_escaped_pipes_in_one_cell(self):
+        self.assertEqual(self.k.split_row(r"| a \| b | c |"), [r" a \| b ", " c "])
+        self.assertEqual(self.k.split_row(r"| a \\| b |"), [r" a \\", " b "])  # an escaped backslash, then a real pipe
+        self.assertEqual(self.k.split_row("| a | b"), [" a ", " b"])
+        self.assertEqual(self.k.split_row("not a row | x"), [])
+        _, rows = self.k.findings_text("Verdict: APPROVE\n\n| id | severity | issue | status |\n|---|---|---|---|\n"
+                                       r"| X-1 | major | `a \| b` | open |" "\n| X-2 | major | a | b | fixed |\n")
+        self.assertEqual(rows[0]["status"], "open")
+        self.assertNotIn("_malformed", rows[0])
+        self.assertIn("_malformed", rows[1])
+        self.assertEqual(self.k.open_blockers(rows, {"major"}), ["X-1", "X-2 (malformed row)"])
+
+    def test_status_states_fail_closed(self):
+        st = self.k.status_state
+        for s in ("open", "", "not fixed (accepted)", "partly fixed", "disputed", "Open (non-blocking)", "fix now"):
+            self.assertEqual(st(s), "open", s)
+        for s in ("fixed", "fixed (round 2)", "Fixed in abc123", "accepted risk", "deferred to s5", "verified", "closed"):
+            self.assertEqual(st(s), "closed", s)
+        for s in ("fxied", "done-ish", "rounding fixed"):
+            self.assertEqual(st(s), "unknown", s)
+            self.assertTrue(self.k.is_open({"status": s}))
+
+    def test_every_table_parser_copy_matches_kit_py(self):
+        import inspect
+        want = inspect.getsource(self.k.split_row).split('"""')[2].strip()  # the body, after the docstring
+        copies = [KIT / n for n in ("budget.py", "agents_sync.py", "new_agent.py")] + \
+            [p for p in (REPO / "install.py",) if p.exists()]
+        for f in copies:
+            text = f.read_text()
+            self.assertTrue("def split_row(" in text, f"{f.name}: no split_row copy")
+            body = text.split("def split_row(", 1)[1].split('"""')[2].split("\n\n\n")[0].strip()
+            self.assertTrue(body == want, f"{f.name}: split_row differs from kit.py")
+            naive = [l.strip() for l in text.splitlines() if '.split("|")' in l and '["matcher"]' not in l]
+            self.assertFalse(naive, f"{f.name}: naive table split: {naive[:2]}")
+
+    def test_same_spot_escalates_only_when_fixes_differ(self):
+        c = self.k.fixes_conflict
+        self.assertFalse(c({"assert the error message", "Assert the error message."}))
+        self.assertFalse(c({"assert the refusal reason", "also assert the refusal reason in the test"}))
+        self.assertTrue(c({"return early when the list is empty", "make the field optional in the schema"}))
 
 
 PLAN_L = ("# F1: thing\n\n## Goal\ng\n\n## Slices\n| slice | developer type | scope (modules/files owned) | est. lines | live path | reject if |\n"

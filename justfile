@@ -364,3 +364,7 @@ ci-scope base="origin/develop":
 # self-check: a crash in the scope script, or an unknown path, must give a full run (fail safe)
 ci-scope-selftest:
     @CI_SCOPE_FILES=crates/core/src/a.rs CI_SCOPE_CRASH=1 python3 scripts/ci-scope.py origin/develop 2>/dev/null | grep -qx 'full=yes' && CI_SCOPE_FILES=.cargo/config.toml python3 scripts/ci-scope.py origin/develop 2>/dev/null | grep -qx 'full=yes' && echo "ci-scope selftest: ok"
+
+# one cargo command under the kit's build slot and job cap, e.g. just cargo nextest run -p bazaar-core my_test
+cargo *args:
+    @python3 .claude/kit/kit.py cargo "$@"

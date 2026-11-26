@@ -109,6 +109,28 @@ KINDS = {
 }
 
 
+def split_row(line: str) -> list:
+    """Cells of one markdown table row, split only on unescaped pipes (`a \\| b` stays one cell). A copy of
+    kit.py split_row: keep them identical (kit-test checks)."""
+    s = line.strip()
+    if not s.startswith("|"):
+        return []
+    cells, cur, i = [], "", 1
+    while i < len(s):
+        if s[i] == "\\" and i + 1 < len(s):
+            cur, i = cur + s[i:i + 2], i + 2
+            continue
+        if s[i] == "|":
+            cells.append(cur)
+            cur = ""
+        else:
+            cur += s[i]
+        i += 1
+    if cur.strip():  # a row without its closing pipe
+        cells.append(cur)
+    return cells
+
+
 def fail(msg: str) -> None:
     sys.exit(f"new_agent: {msg}")
 
@@ -173,7 +195,7 @@ def team_rows(add: dict = None, remove: str = None) -> None:
     lines, out, i, seen = TEAM.read_text().splitlines(), [], 0, False
     while i < len(lines):
         line = lines[i]
-        cells = [c.strip() for c in line.strip().strip("|").split("|")] if line.strip().startswith("|") else []
+        cells = [c.strip() for c in split_row(line)]
         if cells and cells[0].lower() == "agent":
             seen = True
             header = [c.lower() for c in cells]

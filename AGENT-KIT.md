@@ -209,7 +209,9 @@ Run the new kit's installer against your repo (once per repo that uses this kit)
 
 **Sending the kit for feedback or an upgrade:** `just export-kit` zips only the kit (agents, skills, hooks, `.agents`
 notes and records, CI, kit docs) into your Downloads folder (or the folder above the repo; `--out <path>` to choose) and prints its size and contents - never your code, `data/`, build output, worktrees,
-backups or `.env` files. `just export-kit --list` shows the file list without zipping.
+backups or `.env` files. The installer (`install.py`, `install.sh`, from the copy the installer keeps in
+`.claude/kit/installer/`) and the engine (`.claude/kit/kit.py`) are always included, so the zip can be upgraded and
+reinstalled as it is; a missing one is named. `just export-kit --list` shows the file list without zipping.
 
 After upgrading:
 1. Restart Claude Code in the repo.

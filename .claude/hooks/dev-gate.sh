@@ -22,7 +22,8 @@ fi
 [ -f .agents/stack.json ] || exit 0
 kit=./.claude/kit/kit.py
 [ -f "$kit" ] || kit="$CLAUDE_PROJECT_DIR/.claude/kit/kit.py"
-if ! out=$( { KIT_ROOT="$PWD" GATE_MAX_LINES=15 python3 "$kit" gate && KIT_ROOT="$PWD" python3 "$kit" test-check "$base"; } 2>&1 ); then
+# wait at most 8 minutes for a build slot, so the hook ends within its own time limit
+if ! out=$( { KIT_ROOT="$PWD" KIT_BUILD_WAIT="${KIT_BUILD_WAIT:-480}" GATE_MAX_LINES=15 python3 "$kit" gate && KIT_ROOT="$PWD" python3 "$kit" test-check "$base"; } 2>&1 ); then
   {
     echo "Quality gate failed in $(pwd). Fix it before finishing (or report Gate: FAIL with the reason):"
     echo "$out" | tail -n 25
