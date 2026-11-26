@@ -58,7 +58,7 @@ export function ReviewOrderDialog({ ideaId, onClose }: { ideaId: string; onClose
   const allowed = p?.gate.verdict === "allow";
   const err = approve.error;
   const definitive = approve.isError && !isAmbiguous(err); // the server answered: this draft is dead
-  const stale = preview.isFetching || preview.isError; // a draft being replaced, or one we failed to replace
+  const stale = preview.fetchStatus !== "idle" || preview.isError; // a draft being replaced, or one we failed to replace
   const canApprove = !!p && paper && allowed && !expired && !stale && !definitive && !approve.isPending;
   const needsRepreview = !!p && paper && (expired || !allowed || definitive);
 

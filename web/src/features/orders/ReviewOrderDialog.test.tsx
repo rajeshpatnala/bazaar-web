@@ -355,6 +355,28 @@ describe("Review paper order dialog", () => {
     expect(approvals).toBe(1);
   });
 
+  it("an offline re-preview cannot revive a rejected draft", async () => {
+    let approvals = 0;
+    server.use(
+      http.post(APPROVE, () => {
+        approvals += 1;
+        return HttpResponse.json({ code: "gate_blocked", detail: "Over your limit.", status: 422, errors: [] }, { status: 422 });
+      }),
+    );
+    const d = await openDialog();
+    const button = await approveBtn(d);
+    await userEvent.click(button);
+    await within(d).findByText("Over your limit.");
+    let previews = 0;
+    server.use(http.post(PREVIEW, () => ((previews += 1), new Promise<never>(() => {})))); // held
+    onlineManager.setOnline(false);
+    await userEvent.click(within(d).getByRole("button", { name: "Review again" }));
+    await waitFor(() => expect(previews).toBe(1)); // sent, not paused
+    expect(button).toBeDisabled();
+    await userEvent.click(button);
+    expect(approvals).toBe(1);
+  });
+
   it("never queues an offline click to be sent later, past expiry", async () => {
     const sent = countApprovals();
     const d = await openDialog();
