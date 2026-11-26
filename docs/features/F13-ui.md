@@ -59,3 +59,4 @@ Owner area: `web/` (nothing in `crates/`). Plan: `.agents/plans/F13-ui-slice1.md
 - 2026-11-22: slice 3 (paper-order review dialog, BZ-504).
 - 2026-11-22: slice 4 (overview and navigation, BZ-505).
 - 2026-11-26: LIVE plan slice 34 part 1 (kill switch state and engage).
+- 2026-11-26: fix: in the order review dialog, an early expiry timer re-arms, and the timer is set for at most one second before it re-reads the clock, and the Approve click re-reads it and sends nothing once expired. A running, paused or failed re-preview keeps Approve disabled, and neither the preview nor the approve request is queued when the browser reports offline. Browser sleep and tab throttling were not tried in a real browser; the server's expiry check remains the authority.

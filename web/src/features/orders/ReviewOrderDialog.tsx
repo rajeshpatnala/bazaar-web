@@ -13,6 +13,9 @@ import { approvePaperOrder, previewQuery } from "./queries";
 const isAmbiguous = (e: unknown) =>
   !(e instanceof ApiError) || (e.status === 0 && e.code !== "csrf") || e.status >= 500;
 
+/** Never backwards: a wall clock stepping back must not revive figures already seen as expired. */
+const latestClock = (seen: number) => Math.max(seen, Date.now());
+
 /**
  * Practice order review. The Approve click is the only thing that calls the server.
  * Fails closed: no Approve button unless the server says execution_mode is "paper".
@@ -30,6 +33,7 @@ export function ReviewOrderDialog({ ideaId, onClose }: { ideaId: string; onClose
       return approvePaperOrder(p!, keys.current.get(id)!);
     },
     retry: false,
+    networkMode: "always", // never queue a click: a paused request could be sent after expiry
     onSuccess: () => setUnconfirmed(false),
     onError: (e) => {
       if (isAmbiguous(e)) setUnconfirmed(true);
@@ -39,7 +43,13 @@ export function ReviewOrderDialog({ ideaId, onClose }: { ideaId: string; onClose
 
   useEffect(() => {
     if (expiresMs === null) return;
-    const t = setTimeout(() => setNow(Date.now()), Math.min(Math.max(expiresMs - Date.now(), 0), 2 ** 31 - 1));
+    // Timers can fire early, or late (sleep, clock step), so re-read the clock at least every second.
+    const wait = () => Math.min(Math.max(expiresMs - Date.now(), 0), 1_000);
+    const check = () => {
+      if (Date.now() >= expiresMs) setNow(latestClock);
+      else t = setTimeout(check, wait());
+    };
+    let t = setTimeout(check, wait());
     return () => clearTimeout(t);
   }, [expiresMs]);
 
@@ -48,13 +58,19 @@ export function ReviewOrderDialog({ ideaId, onClose }: { ideaId: string; onClose
   const allowed = p?.gate.verdict === "allow";
   const err = approve.error;
   const definitive = approve.isError && !isAmbiguous(err); // the server answered: this draft is dead
-  const canApprove = !!p && paper && allowed && !expired && !definitive && !approve.isPending;
+  const stale = preview.fetchStatus !== "idle" || preview.isError; // a draft being replaced, or one we failed to replace
+  const canApprove = !!p && paper && allowed && !expired && !stale && !definitive && !approve.isPending;
   const needsRepreview = !!p && paper && (expired || !allowed || definitive);
 
   const repreview = () => {
     approve.reset();
-    setNow(Date.now());
+    setNow(latestClock);
     void preview.refetch();
+  };
+
+  const onApprove = () => {
+    if (expiresMs === null || Date.now() >= expiresMs) setNow(latestClock); // the screen may be behind the clock
+    else approve.mutate();
   };
 
   return (
@@ -139,7 +155,7 @@ export function ReviewOrderDialog({ ideaId, onClose }: { ideaId: string; onClose
           </Button>
         )}
         {p && paper && !approve.data && (
-          <Button disabled={!canApprove} onClick={() => approve.mutate()}>
+          <Button disabled={!canApprove} onClick={onApprove}>
             Approve paper order
           </Button>
         )}

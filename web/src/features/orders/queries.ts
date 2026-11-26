@@ -50,6 +50,7 @@ export const previewQuery = (ideaId: string) =>
       parsePreview(await apiJson(`/api/v1/ideas/${encodeURIComponent(ideaId)}/paper-preview`, { method: "POST", body: {} })),
     staleTime: Infinity,
     gcTime: 0,
+    networkMode: "always", // never pause a re-preview: the old draft would look current
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   });
