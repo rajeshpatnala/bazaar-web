@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { act, screen } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import { onlineManager } from "@tanstack/react-query";
 import { http, HttpResponse } from "msw/http";
 import { keys } from "../api/keys";
@@ -69,6 +69,63 @@ describe("SessionGate and ModeBadge", () => {
     await act(() => client.refetchQueries({ queryKey: keys.authMe }));
     expect(await screen.findByText("Session ended")).toBeVisible();
     expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it.each([
+    ["on first load", true],
+    ["after a good probe", false],
+  ])("stays ended after a 401 %s until a probe succeeds", async (_n, firstLoad) => {
+    const unauthorised = () => HttpResponse.json(problemFixture(401, "unauthenticated"), { status: 401 });
+    if (firstLoad) server.use(http.get("/api/v1/auth/me", unauthorised));
+    const { client } = renderApp();
+    const probe = () => client.refetchQueries({ queryKey: keys.authMe });
+    const staysEnded = () => {
+      expect(screen.getByText("Session ended")).toBeVisible();
+      expect(screen.queryByRole("button")).toBeNull();
+      expect(screen.queryByText(/Checking session|Cannot reach/)).toBeNull();
+    };
+    if (!firstLoad) {
+      await screen.findByRole("button", { name: "Engage kill switch" });
+      server.use(http.get("/api/v1/auth/me", unauthorised));
+      await act(probe);
+    }
+    await screen.findByText("Session ended");
+
+    // No answer, held open first: the screen must not change while the probe is in flight either.
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let calls = 0;
+    server.use(
+      http.get("/api/v1/auth/me", async () => {
+        calls += 1;
+        await held;
+        return HttpResponse.error();
+      }),
+    );
+    let done!: Promise<void>;
+    act(() => void (done = probe()));
+    await waitFor(() => expect(calls).toBe(1));
+    staysEnded();
+    await act(async () => {
+      release();
+      await done;
+    });
+    staysEnded();
+
+    server.use(
+      http.get("/api/v1/auth/me", () => {
+        calls += 1;
+        return HttpResponse.json(problemFixture(500, "internal"), { status: 500 });
+      }),
+    );
+    await act(probe);
+    expect(calls).toBe(2);
+    staysEnded();
+
+    server.resetHandlers();
+    await act(probe);
+    expect(await screen.findByRole("button", { name: "Engage kill switch" })).toBeEnabled();
+    expect(screen.queryByText("Session ended")).toBeNull();
   });
 
   it("offers Engage when the browser says it is offline", async () => {

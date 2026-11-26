@@ -111,7 +111,7 @@ describe("kill switch state", () => {
   it("gives up a hung read after 10 s and drops the cached OFF", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const { spy, expire } = controlTimeouts();
-    renderApp();
+    renderApp({ route: "/nope" }); // no page fetch, so every timeout seen is the kill switch's
     const p = await panel();
     await shows(p, "OFF");
     let hung = 0;
@@ -123,7 +123,7 @@ describe("kill switch state", () => {
     );
     await vi.advanceTimersByTimeAsync(5_100);
     await waitFor(() => expect(hung).toBe(1));
-    expect(spy).toHaveBeenCalledWith(10_000);
+    expect(new Set(spy.mock.calls.map(([ms]) => ms))).toEqual(new Set([10_000])); // at least one call, none other
     await expire();
     await shows(p, "UNKNOWN");
     expect(within(p).queryByText("OFF")).toBeNull();
@@ -232,13 +232,13 @@ describe("engage", () => {
         return delay("infinite");
       }),
     );
-    renderApp();
+    renderApp({ route: "/nope" }); // no page fetch, so every timeout seen is the kill switch's
     const p = await panel();
     await shows(p, "OFF");
     await engage(p);
     await waitFor(() => expect(posts).toBe(1));
     expect(engageBtn(p)).toBeDisabled();
-    expect(spy).toHaveBeenCalledWith(10_000);
+    expect(new Set(spy.mock.calls.map(([ms]) => ms))).toEqual(new Set([10_000])); // at least one call, none other
     await expire();
     expect(await within(p).findByRole("alert")).toHaveTextContent("result is unknown");
     await waitFor(() => expect(engageBtn(p)).toBeEnabled());
