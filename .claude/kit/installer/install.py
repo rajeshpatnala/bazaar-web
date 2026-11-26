@@ -176,8 +176,11 @@ def merge_settings(dst: pathlib.Path, src: pathlib.Path, backup: pathlib.Path) -
             if missing:
                 cur.append({**e, "hooks": missing})
                 existing.update(h.get("command") for h in missing)
+                widened += [f"hook added: {event}: {h.get('command')}" for h in missing]
     for k, v in kit.items():  # new top-level kit keys (e.g. includeGitInstructions); your own values stay
         mine.setdefault(k, v)
+    had = json.loads(before)
+    widened += [f"top-level key added: {k}" for k, v in mine.items() if k not in had and v != {}]  # names only
     out = json.dumps(mine, indent=2) + "\n"
     if out != before:
         b = backup / ".claude" / "settings.json"

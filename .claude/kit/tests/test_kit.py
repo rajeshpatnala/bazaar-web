@@ -1282,7 +1282,8 @@ class ExportAndInstallSecretTests(Base):
     def test_installer_backs_up_settings_and_lists_what_it_adds(self):
         mod = load_module("kit_installer_m", self.installer())
         mine = {"env": {"A": "old"}, "permissions": {"allow": ["Bash(ls:*)"]}}
-        kit = {"env": {"A": "new-value", "B": "2"}, "permissions": {"allow": ["Bash(ls:*)", "Bash(just:*)"]}}
+        kit = {"env": {"A": "new-value", "B": "2"}, "permissions": {"allow": ["Bash(ls:*)", "Bash(just:*)"]},
+               "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "stop.sh"}]}]}, "newKey": "hidden-value"}
         dst, src = self.r.dir / ".claude" / "settings.json", self.r.dir / "kit-settings.json"
         dst.write_text(json.dumps(mine))
         src.write_text(json.dumps(kit))
@@ -1290,8 +1291,11 @@ class ExportAndInstallSecretTests(Base):
         mod.merge_settings(dst, src, backup)
         self.assertEqual(json.loads((backup / ".claude" / "settings.json").read_text()), mine)
         self.assertEqual(sorted(mod.report["settings"]),
-                         ["allow rule added: Bash(just:*)", "env key added: B", "env key changed: A"])
-        self.assertNotIn("new-value", " ".join(mod.report["settings"]))
+                         ["allow rule added: Bash(just:*)", "env key added: B", "env key changed: A",
+                          "hook added: Stop: stop.sh", "top-level key added: agent", "top-level key added: hooks",
+                          "top-level key added: newKey"])
+        for value in ("new-value", "hidden-value"):
+            self.assertNotIn(value, " ".join(mod.report["settings"]))
         self.assertIn("Bash(just:*)", json.loads(dst.read_text())["permissions"]["allow"])
 
 
