@@ -103,11 +103,33 @@ def strip_unmarked_kit_copy(text: str) -> tuple:
     return text[cut:], text[:cut]
 
 
+def strip_markers(text: str) -> str:
+    """The kit guide without marker lines of its own, so wrapping it always leaves exactly one pair."""
+    return re.sub(rf"(?m)^[ \t]*<!-- (?:rust-)?{MARK}:(?:start|end) -->[ \t]*(?:\n|\Z)", "", text).strip()
+
+
+def kit_block_span(text: str, start: str, end: str):
+    """(from, to) of the kit section: the first start marker to the end marker that closes it. Markers stacked by
+    earlier upgrades (nested pairs, spare end markers right after) belong to it. None when there is no section."""
+    first = text.find(start)
+    close = text.find(end, first + len(start)) if first >= 0 else -1
+    if close < 0:
+        return None
+    depth = 0
+    for m in re.finditer(f"{re.escape(start)}|{re.escape(end)}", text[first:]):
+        depth += 1 if m.group(0) == start else -1
+        if depth == 0:
+            close = first + m.start()
+            break
+    to = close + len(end)
+    return first, to + re.match(rf"(?:\s*{re.escape(end)})*", text[to:]).end()
+
+
 def merge_claude_md(dst: pathlib.Path, src: pathlib.Path, backup: pathlib.Path = None) -> None:
     text, kit = dst.read_text(), src.read_text()
     text = text.replace("<!-- rust-agent-kit:start -->", f"<!-- {MARK}:start -->").replace("<!-- rust-agent-kit:end -->", f"<!-- {MARK}:end -->")
     start, end = f"<!-- {MARK}:start -->", f"<!-- {MARK}:end -->"
-    block = f"{start}\n{kit.strip()}\n{end}\n"
+    block = f"{start}\n{strip_markers(kit)}\n{end}\n"
     original = text
     text, removed = strip_unmarked_kit_copy(text)
     if removed and backup is not None:
@@ -117,10 +139,9 @@ def merge_claude_md(dst: pathlib.Path, src: pathlib.Path, backup: pathlib.Path =
         report["side"].append(f"CLAUDE.md: removed an old copy of the kit guide that had no markers (it was duplicated). "
                               f"If you had added your own notes inside it, copy them back from {b.relative_to(dst.parent)} - "
                               f"outside the <!-- {MARK} --> markers they survive future upgrades")
-    if start in text and end in text:
-        before, rest = text.split(start, 1)
-        after = rest.split(end, 1)[1]
-        new = before + block + after.lstrip("\n")
+    span = kit_block_span(text, start, end)
+    if span:
+        new = text[:span[0]] + block + text[span[1]:].lstrip("\n")
     elif not text.strip():
         new = block
     else:
@@ -589,7 +610,7 @@ def main() -> int:
             if r == "justfile":
                 shutil.copyfile(src, dst)
             elif r == "CLAUDE.md":  # wrapped in markers so your own notes outside them survive upgrades
-                dst.write_text(f"<!-- {MARK}:start -->\n{src.read_text().strip()}\n<!-- {MARK}:end -->\n")
+                dst.write_text(f"<!-- {MARK}:start -->\n{strip_markers(src.read_text())}\n<!-- {MARK}:end -->\n")
             else:
                 shutil.copy2(src, dst)
             report["added"].append(r)

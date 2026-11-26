@@ -9,11 +9,13 @@
   kit.py cargo <args>         one cargo command under the build slot and job cap (team.md heavy_builds_at_once, build_jobs)
   kit.py db-check             connection status of configured data stores (never prints secrets)
   kit.py test-check [base]    fail if production code changed without new tests (developer gate)
-  kit.py codemap [out]        write .agents/codemap.md (modules, items, routes, migrations, config keys, in-flight);
+  kit.py codemap              write .agents/codemap.md (modules, items, routes, migrations, config keys, in-flight);
                               a big module list is split into one file per area under .agents/codemap/
   kit.py codemap find <words> print only the codemap lines that mention every word (what agents use)
-  kit.py section <file> [heading]   one section of a long markdown file (no heading: list sections and sizes)
-  kit.py archive-notes        move all but the newest handoff and recommendations file to .agents/archive/
+  kit.py section <file> [heading]   one section of a long markdown file inside the repo (no heading: list sections
+                              and sizes)
+  kit.py archive-notes        keeps the newest handoff and recommendations.md; moves older handoffs and all dated
+                              recommendations to .agents/archive/ (without recommendations.md the newest dated one stays)
   kit.py base                 print the integration branch feature PRs target (team.md -> Branches)
   kit.py new-branch <name>    create a work branch from the latest integration branch
   kit.py merge-check <pr> [--feature ID] | --branch <b> --feature ID
@@ -556,10 +558,10 @@ def _slug(title: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "-", title).strip("-").lower() or "root"
 
 
-def codemap(out: str = None) -> int:
+def codemap() -> int:
     s = stack()
     cm = s.get("codemap", {})
-    out_path = ROOT / (out or ".agents/codemap.md")
+    out_path = ROOT / ".agents" / "codemap.md"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     doc_re = re.compile(cm["doc_regex"], re.M) if cm.get("doc_regex") else None
     item_re = re.compile(cm["item_regex"], re.M) if cm.get("item_regex") else None
@@ -597,7 +599,7 @@ def codemap(out: str = None) -> int:
     split_kb = float(cm.get("split_kb", 16))
     area_dir = ROOT / CODEMAP_DIR
     written = set()
-    if body and not out and split_kb and len("\n".join(body)) > split_kb * 1024:
+    if body and split_kb and len("\n".join(body)) > split_kb * 1024:
         # One file per area: an agent reads its area (or `just codemap find`), never 100 KB of module lists.
         area_dir.mkdir(parents=True, exist_ok=True)
         index, cur = [], None
@@ -668,12 +670,15 @@ def codemap(out: str = None) -> int:
             if b in (integ, rel) or subprocess.run(["git", "merge-base", "--is-ancestor", b, base], cwd=ROOT).returncode == 0:
                 continue
             changed = [l.split("\t") for l in git("diff", "--name-status", f"{base}...{b}").splitlines() if l]
-            changed = [(c[0][0], c[-1]) for c in changed if matches(c[-1], src_globs)][:15]
+            changed = [c for c in changed if any(matches(p, src_globs) for p in c[1:])]
             if not changed:
                 continue
-            # A squash-merged branch kept around is not in flight: its files already match the base.
-            if subprocess.run(["git", "diff", "--quiet", base, b, "--", *[p for _, p in changed]], cwd=ROOT).returncode == 0:
+            # A squash-merged branch kept around is not in flight: every source path it changed (both sides of a
+            # rename) already matches the base.
+            paths = [p for c in changed for p in c[1:]]
+            if subprocess.run(["git", "diff", "--quiet", base, b, "--", *paths], cwd=ROOT).returncode == 0:
                 continue
+            changed = [(c[0][0], c[-1]) for c in changed][:15]
             verbs = {"A": "added", "M": "changed", "D": "deleted", "R": "renamed"}
             inflight.append(f"### {b} (last commit {git('log', '-1', '--format=%cr', b).strip()})")
             inflight += [f"- {verbs.get(st, st)} {p}" for st, p in changed]
@@ -689,7 +694,7 @@ def codemap(out: str = None) -> int:
     tmp = out_path.with_suffix(".tmp")
     tmp.write_text("\n".join(lines).rstrip() + "\n")
     tmp.replace(out_path)
-    if not out and area_dir.is_dir():
+    if area_dir.is_dir():
         for old in area_dir.glob("*.md"):
             if old.name not in written:
                 old.unlink()  # an area that no longer exists, or the map is no longer split
@@ -713,12 +718,24 @@ def _md_heads(lines: list) -> list:
     return out
 
 
+def section_path(name: str) -> tuple:
+    """(resolved file, path to show) for `section`, or exit. Only a .md file inside this checkout or the main one
+    (where agent worktrees live). Links are resolved first, so a .md link can't point elsewhere. Refused before the
+    file is opened."""
+    f = pathlib.Path(name)
+    f = (f if f.is_absolute() else ROOT / f).resolve()
+    if f.suffix.lower() == ".md":
+        for base in (ROOT.resolve(), main_root().resolve()):
+            if f.is_relative_to(base):
+                return f, f.relative_to(base)
+    sys.exit(f"kit: section refused: {name} is not a .md file inside the repo")
+
+
 def section_cmd(argv: list) -> int:
     """One section of a long markdown file (a roadmap, a plan, a report), so nobody reads 80 KB to find one part."""
     if not argv:
         sys.exit('usage: kit.py section <file> ["<heading words>"]   (no heading: list the sections with sizes)')
-    f = pathlib.Path(argv[0])
-    f = f if f.is_absolute() else ROOT / f
+    f, rel = section_path(argv[0])
     if not f.is_file():
         sys.exit(f"kit: no file {argv[0]}")
     lines = f.read_text(errors="replace").splitlines()
@@ -740,7 +757,6 @@ def section_cmd(argv: list) -> int:
     k = found[0]
     i, j = heads[k][0], end_of(k)
     limit = int(team_setting("docs_max_lines", "120")) * 2
-    rel = f.relative_to(ROOT) if f.is_relative_to(ROOT) else f
     print(f"{rel}:{i + 1}  ({j - i} lines)" + ("; also: " + "; ".join(heads[x][2] for x in found[1:4]) if len(found) > 1 else ""))
     print("\n".join(lines[i:min(j, i + limit)]))
     if j - i > limit:
@@ -748,18 +764,29 @@ def section_cmd(argv: list) -> int:
     return 0
 
 
+def _note_age(f: pathlib.Path) -> tuple:
+    """Sort key, oldest first: the date in the name; mtime (arbitrary after a clone or checkout) only breaks ties."""
+    m = re.search(r"\d{4}-\d{2}-\d{2}", f.name)
+    return (m.group(0) if m else "", f.stat().st_mtime, f.name)
+
+
 def archive_notes() -> int:
-    """Old handoffs and recommendation files go to .agents/archive/ (kept, out of the way). The newest of each stays."""
+    """Keeps the newest handoff and recommendations.md; older handoffs and all dated recommendations move to
+    .agents/archive/ (without a recommendations.md the newest dated one stays). An archived note is never replaced."""
     a = ROOT / ".agents"
     moved = []
     for pat in ("handoff*.md", "recommendations-*.md"):
-        files = sorted(a.glob(pat), key=lambda f: f.stat().st_mtime)
-        for f in files[:-1] if pat.startswith("handoff") else files:
-            if pat.startswith("recommendations") and not (a / "recommendations.md").exists() and f == files[-1]:
-                continue  # no current recommendations.md: the newest dated one is current
+        files = sorted(a.glob(pat), key=_note_age)
+        if pat.startswith("handoff") or not (a / "recommendations.md").exists():
+            files = files[:-1]  # the newest one is current
+        for f in files:
             (a / "archive").mkdir(exist_ok=True)
-            f.replace(a / "archive" / f.name)
-            moved.append(f.name)
+            dest, n = a / "archive" / f.name, 1
+            while dest.exists():
+                n += 1
+                dest = a / "archive" / f"{f.stem}-{n}{f.suffix}"
+            f.replace(dest)
+            moved.append(f.name if dest.name == f.name else f"{f.name} (as {dest.name})")
     print(f"archive-notes: moved {len(moved)} file(s) to .agents/archive/" + (": " + ", ".join(moved) if moved else ""))
     return 0
 
@@ -804,10 +831,21 @@ def pr_refs(info: dict) -> tuple:
 
 
 def diff_stats(base: str, head: str) -> list:
+    """(added, deleted, path) per changed path. A rename gives two rows with real paths, so review rules see both
+    sides: the new path carries the line counts (size is that of the edit), the old path 0/0. Never `old => new`:
+    a `**` record or docs glob would match that whole string."""
     out = []
-    for line in git("diff", "--numstat", f"{base}...{head}").splitlines():
-        a, d, path = (line.split("\t") + ["", "", ""])[:3]
+    fields = iter(git("diff", "--numstat", "-z", "--find-renames", f"{base}...{head}").split("\0"))
+    for line in fields:
+        if not line:
+            continue
+        a, d, path = line.split("\t", 2)
+        old = ""
+        if not path:  # rename: "a<TAB>d<TAB>" NUL old NUL new
+            old, path = next(fields), next(fields)
         out.append((int(a) if a.isdigit() else 0, int(d) if d.isdigit() else 0, path))
+        if old:
+            out.append((0, 0, old))
     return out
 
 
@@ -2633,10 +2671,14 @@ def records_pr(argv: list) -> int:
     subprocess.run(["git", "fetch", "-q", "origin"], cwd=ROOT, capture_output=True)
     base = f"origin/{integ}" if ref_exists(f"origin/{integ}") else integ
     # --untracked-files=all lists files inside new folders one by one (plain status shows only the folder)
-    changed = [l[3:].strip().strip('"') for l in git("status", "--porcelain", "--untracked-files=all").splitlines() if l[3:].strip()]
-    files = [f for f in changed if matches(f, record_globs()) and (ROOT / f).is_file()]
-    other = [f for f in changed if f not in files and not f.startswith(".claude/worktrees")]
-    if not files:
+    # -z gives paths unquoted; --no-renames lists a moved file as a deletion plus a new file
+    raw = git("status", "--porcelain", "-z", "--no-renames", "--untracked-files=all")
+    status = [(x[:2], x[3:]) for x in raw.split("\0") if x]
+    in_records = [(st, f) for st, f in status if matches(f, record_globs())]
+    files = [f for _, f in in_records if (ROOT / f).is_file()]
+    deleted = [f for st, f in in_records if "D" in st and not (ROOT / f).exists()]
+    other = [f for _, f in status if f not in files + deleted and not f.startswith(".claude/worktrees")]
+    if not files and not deleted:
         print("records-pr: no changed records (board, decisions, reports, project, codemap, owner inputs, handoffs; "
               "more paths: team.md -> records_extra_globs)")
         return 0
@@ -2649,11 +2691,15 @@ def records_pr(argv: list) -> int:
         for f in files:
             (wt / f).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / f, wt / f)
-        subprocess.run(["git", "add", "--", *files], cwd=wt, check=True, capture_output=True)
+        if files:
+            subprocess.run(["git", "add", "--", *files], cwd=wt, check=True, capture_output=True)
+        if deleted:
+            subprocess.run(["git", "--literal-pathspecs", "rm", "-q", "--ignore-unmatch", "--", *deleted], cwd=wt,
+                           check=True, capture_output=True)
         if not git_in(str(wt), "diff", "--cached", "--name-only").strip():
             print("records-pr: the records already match the integration branch")
             return 0
-        subprocess.run(["git", "commit", "-q", "-m", f"docs(agents): update records ({len(files)} files)"], cwd=wt, check=True,
+        subprocess.run(["git", "commit", "-q", "-m", f"docs(agents): update records ({len(files + deleted)} files)"], cwd=wt, check=True,
                        capture_output=True)
         if "--no-push" in argv or not git("remote").strip():
             print(f"records-pr: committed on {branch} (not pushed)")
@@ -2662,9 +2708,10 @@ def records_pr(argv: list) -> int:
         pr = subprocess.run(["gh", "pr", "create", "--base", integ, "--head", branch, "--title",
                              f"docs(agents): update records {stamp}", "--body",
                              "Manager records only (board, decisions, reports). No code; no reviewer needed.\n\n"
-                             + "\n".join(f"- {f}" for f in files)], cwd=wt, capture_output=True, text=True)
+                             + "\n".join([f"- {f}" for f in files] + [f"- {f} (removed)" for f in deleted])],
+                            cwd=wt, capture_output=True, text=True)
         url = pr.stdout.strip() or pr.stderr.strip()[:200]
-        print(f"records-pr: {len(files)} file(s) -> {url}\nShip it with `just ship <pr>`; afterwards `just sync-base`.")
+        print(f"records-pr: {len(files + deleted)} file(s) -> {url}\nShip it with `just ship <pr>`; afterwards `just sync-base`.")
     except subprocess.CalledProcessError as e:
         sys.exit(f"records-pr: {e.cmd[:3]} failed: {(e.stderr or b'').decode(errors='replace')[:200]}")
     finally:
@@ -5161,7 +5208,9 @@ def main(argv: list) -> int:
     if cmd == "codemap":
         if rest and rest[0] == "find":
             return codemap_find(rest[1:])
-        return codemap(rest[0] if rest else None)
+        if rest:  # no output path from the command line: it could overwrite any file
+            sys.exit("usage: kit.py codemap | kit.py codemap find <word> [word...]; nothing was written")
+        return codemap()
     if cmd == "section":
         return section_cmd(rest)
     if cmd == "archive-notes":

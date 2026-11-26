@@ -1589,6 +1589,145 @@ class ContextTests(Base):
         self.assertEqual(left, ["handoff-b.md", "recommendations.md"])
         self.assertTrue((self.r.dir / ".agents/archive/handoff-a.md").exists())
 
+    def test_archive_notes_orders_by_the_date_in_the_name_and_never_replaces_a_note(self):
+        names = ["handoff-2026-11-21.md", "handoff-2026-11-20.md", "recommendations-2026-11-21.md",
+                 "recommendations-2026-11-19.md"]
+        for i, name in enumerate(names):  # mtime says the opposite of the dates
+            self.r.write(f".agents/{name}", "current " + name)
+            os.utime(self.r.dir / ".agents" / name, (1_000_000 + i, 1_000_000 + i))
+        self.r.write(".agents/archive/handoff-2026-11-20.md", "archived earlier")
+        rc, out = self.r.kit("archive-notes")
+        self.assertEqual(rc, 0, out)
+        a = self.r.dir / ".agents"
+        self.assertEqual(sorted(p.name for p in a.glob("*.md") if p.name != "team.md"),
+                         ["handoff-2026-11-21.md", "recommendations-2026-11-21.md"])
+        self.assertEqual((a / "archive/handoff-2026-11-20.md").read_text(), "archived earlier")
+        self.assertEqual((a / "archive/handoff-2026-11-20-2.md").read_text(), "current handoff-2026-11-20.md")
+
+    def test_records_pr_removes_the_old_path_of_an_archived_note(self):
+        self.r.write(".agents/handoff-2026-11-20.md", "old handoff\n")
+        self.r.write(".agents/handoff-2026-11-21.md", "new handoff\n")
+        self.r.commit("docs: notes")
+        self.r.kit("archive-notes")
+        self.r.git("add", "-A")  # a staged move shows as a rename unless renames are off
+        rc, out = self.r.kit("records-pr", "--no-push")
+        self.assertEqual(rc, 0, out)
+        branch = self.r.git("branch", "--list", "docs/agents-records-*").strip(" *")
+        tree = self.r.git("ls-tree", "-r", "--name-only", branch).split()
+        self.assertIn(".agents/archive/handoff-2026-11-20.md", tree)
+        self.assertNotIn(".agents/handoff-2026-11-20.md", tree)
+        self.assertIn(".agents/handoff-2026-11-21.md", tree)
+
+    def test_records_pr_commits_a_deleted_record_on_its_own(self):
+        self.r.write(".agents/handoff-2026-11-20.md", "old handoff\n")
+        self.r.commit("docs: note")
+        (self.r.dir / ".agents/handoff-2026-11-20.md").unlink()
+        rc, out = self.r.kit("records-pr", "--no-push")
+        self.assertIn("committed on docs/agents-records", out)
+        branch = self.r.git("branch", "--list", "docs/agents-records-*").strip(" *")
+        self.assertNotIn(".agents/handoff-2026-11-20.md", self.r.git("ls-tree", "-r", "--name-only", branch).split())
+
+    def test_codemap_takes_no_output_path_from_the_command_line(self):
+        self.r.write("README.md", "keep me\n")
+        for arg in ("README.md", str(self.r.dir / "README.md"), "fnd"):
+            rc, out = self.r.kit("codemap", arg)
+            self.assertNotEqual(rc, 0, out)
+            self.assertIn("nothing was written", out)
+        self.assertEqual((self.r.dir / "README.md").read_text(), "keep me\n")
+        self.assertFalse((self.r.dir / "fnd").exists())
+
+    def test_section_refuses_non_markdown_and_files_outside_the_repo(self):
+        outside = pathlib.Path(tempfile.mkdtemp(prefix="kit-outside-"))
+        self.addCleanup(shutil.rmtree, outside, True)
+        (outside / "notes.md").write_text("# Head\nHIDDEN-VALUE\n")
+        self.r.write("settings.conf", "# Head\nHIDDEN-VALUE\n")
+        os.symlink(self.r.dir / "settings.conf", self.r.dir / "link.md")
+        os.symlink(outside / "notes.md", self.r.dir / "out.md")
+        up = os.path.relpath(outside / "notes.md", self.r.dir)
+        for path in ("settings.conf", str(outside / "notes.md"), up, "link.md", "out.md"):
+            for words in ((), ("head",)):
+                rc, out = self.r.kit("section", path, *words)
+                self.assertNotEqual(rc, 0, out)
+                self.assertIn("section refused", out)
+                self.assertNotIn("HIDDEN-VALUE", out)
+                self.assertNotIn("(line ", out)
+
+    def test_codemap_in_flight_compares_every_changed_source_path(self):
+        self.codemap_stack(16)
+        self.r.write("src/old.rs", "pub fn moved() {}\n")
+        self.r.commit("chore: codemap settings")
+        # more than 15 source files, only the first 15 have landed on the base
+        many = {f"src/f{i:02}.rs": f"pub fn f{i}() {{}}\n" for i in range(17)}
+        self.r.branch("feat/F1-part", many)
+        for k in sorted(many)[:15]:
+            self.r.write(k, many[k])
+        self.r.commit("feat: part of it")
+        # a rename whose new path landed while the old path is still on the base
+        self.r.git("switch", "-q", "-c", "feat/F1-move", "develop")
+        self.r.git("mv", "src/old.rs", "src/renamed.rs")
+        self.r.commit("refactor: move")
+        self.r.git("switch", "-q", "develop")
+        self.r.write("src/renamed.rs", "pub fn moved() {}\n")
+        self.r.commit("feat: copy only")
+        self.r.kit("codemap")
+        cm = (self.r.dir / ".agents/codemap.md").read_text()
+        self.assertIn("feat/F1-part", cm)
+        self.assertIn("feat/F1-move", cm)
+
+    def test_a_rename_out_of_a_record_folder_is_reviewed(self):
+        self.r.write(".agents/archive/a.md", "".join(f"line {i}\n" for i in range(20)))
+        self.r.commit("docs: archived note")
+        self.r.git("switch", "-q", "-c", "feat/F1-move", "develop")
+        (self.r.dir / ".github/workflows").mkdir(parents=True)
+        self.r.git("mv", ".agents/archive/a.md", ".github/workflows/a.yml")
+        self.r.commit("feat: move")
+        self.r.git("switch", "-q", "develop")
+        rc, out = self.r.kit("review-plan", "--branch", "feat/F1-move", "--feature", "F1")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("code, security", out)
+        self.assertNotIn("light", out)
+        self.assertNotIn("=>", out)
+
+    def test_a_rename_between_record_paths_stays_a_records_change(self):
+        self.r.write(".agents/handoff-2026-11-20.md", "".join(f"line {i}\n" for i in range(20)))
+        self.r.commit("docs: note")
+        self.r.git("switch", "-q", "-c", "docs/move", "develop")
+        (self.r.dir / ".agents/archive").mkdir()
+        self.r.git("mv", ".agents/handoff-2026-11-20.md", ".agents/archive/handoff-2026-11-20.md")
+        self.r.commit("docs: archive")
+        self.r.git("switch", "-q", "develop")
+        rc, out = self.r.kit("review-plan", "--branch", "docs/move", "--feature", "F1")
+        self.assertIn("light", out)
+        self.assertIn("manager records only", out)
+
+    def justfile_repo(self):
+        shutil.copy2(REPO / "justfile", self.r.dir / "justfile")
+
+    def just(self, *args):
+        return subprocess.run(["just", *args], cwd=self.r.dir, capture_output=True, text=True,
+                              env=dict(os.environ, KIT_ROOT=str(self.r.dir)))
+
+    def test_recipes_with_free_text_arguments_never_paste_them_into_the_shell(self):
+        text = (REPO / "justfile").read_text()
+        for name in ("codemap", "section", "new-branch", "promote", "feature"):
+            m = re.search(rf"(?m)^{name}(?: [^:\n]*)?:.*\n((?:[ \t]+.*\n)+)", text)
+            self.assertTrue(m, f"no recipe {name}")
+            self.assertNotIn("{{", m.group(1), name)
+            self.assertIn('"$@"', m.group(1), name)
+
+    @unittest.skipUnless(shutil.which("just"), "just is not installed")
+    def test_just_passes_headings_and_search_words_as_plain_text(self):
+        self.justfile_repo()
+        self.r.write("PLAN.md", "# Plan\n## Slice 1 (money; it's `a` & b)\nbody-one\n")
+        r = self.just("section", "PLAN.md", "Slice 1 (money; it's `a` & b)")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("body-one", r.stdout)
+        for args in (("section", "PLAN.md", "x; touch pwned"), ("section", "PLAN.md", "$(touch pwned)"),
+                     ("codemap", "find", "x; touch pwned"), ("codemap", "find", "`touch pwned`"),
+                     ("feature", "$(touch pwned)")):
+            self.just(*args)
+            self.assertFalse((self.r.dir / "pwned").exists(), args)
+
     def test_owner_rules_skip_agents_that_do_not_decide_app_behaviour(self):
         self.r.write(".agents/owner-rules.md", "- Paper mode is the default.\n")
         start = lambda agent: self.hook("agent-context.sh", {"hook_event_name": "SubagentStart", "agent_type": agent}).stdout

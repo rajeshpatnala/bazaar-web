@@ -41,13 +41,14 @@ db-check:
 # regenerate .agents/codemap.md (also runs automatically at session start and after merges/pulls)
 # `just codemap find <word>`: only the codemap lines that mention it (cheaper than reading the map)
 codemap *args:
-    @python3 .claude/kit/kit.py codemap {{args}}
+    @python3 .claude/kit/kit.py codemap "$@"
 
 # one section of a long markdown file (roadmap, plan, report); no heading = list the sections and their sizes
 section file *heading:
-    @python3 .claude/kit/kit.py section {{file}} {{heading}}
+    @python3 .claude/kit/kit.py section "$@"
 
-# move all but the newest handoff and the dated recommendations files to .agents/archive/
+# keeps the newest handoff and recommendations.md; moves older handoffs and all dated recommendations to .agents/archive/
+# (without a recommendations.md the newest dated one stays)
 archive-notes:
     @python3 .claude/kit/kit.py archive-notes
 
@@ -65,7 +66,7 @@ base:
 
 # create a work branch from the latest integration branch, e.g. just new-branch feat/F12-orders
 new-branch name:
-    @python3 .claude/kit/kit.py new-branch {{name}}
+    @python3 .claude/kit/kit.py new-branch "$@"
 
 # may this PR merge? target branch, Conventional title, CI checks, reviewer verdicts (the only source for "it's green")
 merge-check pr *args:
@@ -198,7 +199,7 @@ merge pr *args:
 
 # promotion/release PR into the release branch - Claude Code asks the user every time
 promote pr:
-    @python3 .claude/kit/kit.py promote {{pr}}
+    @python3 .claude/kit/kit.py promote "$@"
 
 # create the integration branch locally and on the remote if missing (asks the user)
 setup-branches:
@@ -217,7 +218,7 @@ features:
     @python3 .claude/kit/kit.py features
 
 feature id:
-    @python3 .claude/kit/kit.py feature {{id}}
+    @python3 .claude/kit/kit.py feature "$@"
 
 # bugs: draft one (just bug-new "Cart total wrong" --feature F7 --severity high) or list open ones (--all for every one)
 bug-new title *args:
