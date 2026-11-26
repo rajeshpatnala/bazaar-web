@@ -1,4 +1,5 @@
 import { NavLink, Outlet } from "react-router";
+import { SafetyBar } from "../features/safety/SafetyBar";
 import { Disclaimer } from "../shared/ui/Disclaimer";
 import { ModeBadge } from "./ModeBadge";
 import { SessionGate } from "./SessionGate";
@@ -19,6 +20,7 @@ export function AppShell() {
       </header>
       <main className="shell-main">
         <SessionGate>
+          <SafetyBar />
           <Outlet />
         </SessionGate>
       </main>

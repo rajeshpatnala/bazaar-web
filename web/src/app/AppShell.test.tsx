@@ -50,7 +50,7 @@ describe("AppShell", () => {
     expect(await screen.findByText("19 Nov, 10:00 IST")).toBeVisible();
     expect(screen.queryByRole("switch")).toBeNull();
     expect(screen.queryByRole("checkbox")).toBeNull();
-    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.queryByRole("button", { name: /live|mode|paper/i })).toBeNull();
   });
 
   it("states live is on when the server says so", async () => {
