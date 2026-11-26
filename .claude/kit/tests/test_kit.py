@@ -5,6 +5,7 @@
 
 Each test builds a throwaway git repo with the kit's scripts, a small stack.json and team.md, then runs kit.py the
 way agents do (`--branch` mode, which needs no PR). Run after any change to .claude/kit/*.py."""
+import ast
 import json
 import os
 import pathlib
@@ -1443,6 +1444,61 @@ class DevBriefTests(Base):
         self.assertTrue(self.k.in_scope("crates/core/x.rs", p))
         self.assertFalse(self.k.in_scope("crates/core2/x.rs", p))
         self.assertFalse(self.k.in_scope("crates/cor", p))
+
+
+@unittest.skipUnless((REPO / "scripts" / "ci-scope.py").exists(), "project has no scripts/ci-scope.py")
+class CiScopeWebReadTests(unittest.TestCase):
+    """CI must run the Rust tests that read a web/ file when only that file changes (cargo metadata only, no build)."""
+
+    def scope(self, *files, path_first: str = "", script="scripts/ci-scope.py") -> dict:
+        env = {k: v for k, v in os.environ.items() if k != "CI_SCOPE_CRASH"}
+        env["CI_SCOPE_FILES"] = " ".join(files)
+        if path_first:
+            env["PATH"] = f"{path_first}{os.pathsep}{env['PATH']}"
+        p = subprocess.run([sys.executable, str(script), "origin/develop"], cwd=REPO, env=env,
+                           capture_output=True, text=True, check=True)
+        return dict(line.split("=", 1) for line in p.stdout.splitlines())
+
+    def scoped(self, rust: str, packages: str) -> dict:
+        return {"full": "no", "rust": rust, "web": "yes", "packages": packages}
+
+    def test_each_web_file_read_by_rust_runs_the_reading_crate(self):
+        for f, pkg in (("web/package.json", "cli"), ("web/src/shared/disclaimer.ts", "cli"),
+                       ("web/src/api/schema.d.ts", "server")):
+            self.assertEqual(self.scope(f), self.scoped("yes", f"-p bazaar-{pkg}"), f)
+
+    def test_a_mixed_change_runs_both_the_crate_and_the_reader(self):
+        self.assertEqual(self.scope("web/src/api/schema.d.ts", "crates/cli/tests/workspace.rs"),
+                         self.scoped("yes", "-p bazaar-cli -p bazaar-server"))
+
+    def test_an_unrelated_web_file_runs_no_rust_job(self):
+        self.assertEqual(self.scope("web/src/App.tsx"), self.scoped("no", ""))
+
+    def test_a_cargo_metadata_failure_on_a_web_read_means_a_full_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            fake = pathlib.Path(d) / "cargo"
+            fake.write_text("#!/bin/sh\nexit 1\n")
+            fake.chmod(0o755)
+            got = self.scope("web/package.json", path_first=d)
+        self.assertEqual(got, {"full": "yes", "rust": "yes", "web": "yes", "packages": ""})
+
+    def test_a_listed_reader_crate_that_no_longer_exists_means_a_full_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            moved = pathlib.Path(d) / "ci-scope.py"
+            moved.write_text((REPO / "scripts" / "ci-scope.py").read_text().replace('"server"}', '"gone"}'))
+            got = self.scope("web/src/api/schema.d.ts", script=moved)
+        self.assertEqual(got, {"full": "yes", "rust": "yes", "web": "yes", "packages": ""})
+
+    def test_the_scope_list_matches_the_web_files_rust_sources_name(self):
+        # string literals only: a path built from pieces (.join("web").join(..)) is not seen
+        named = set()
+        for f in (REPO / "crates").rglob("*.rs"):
+            for path in re.findall(r'"(?:\.\./)*(web/[^"\s{}]*)"', f.read_text()):
+                if path != "web/dist":  # build output the server serves at run time, not read by a test
+                    named.add((path, f.relative_to(REPO / "crates").parts[0]))
+        text = (REPO / "scripts" / "ci-scope.py").read_text()
+        listed = ast.literal_eval(text.split("WEB_READ_BY_RUST = ", 1)[1].split("}", 1)[0] + "}")
+        self.assertEqual(named, set(listed.items()), "update WEB_READ_BY_RUST in scripts/ci-scope.py")
 
 
 if __name__ == "__main__":
