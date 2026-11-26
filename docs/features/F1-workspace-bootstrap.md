@@ -65,6 +65,10 @@ Owner area: Cargo.toml, crates/{core,server,cli,...stubs}, config/, fixtures/con
 - TS-25-1: test CSRF header injection in `client.ts` `onRequest` (non-GET gets `X-CSRF-Token`; no token throws) with a temporary msw POST handler, at the latest in the first mutating slice.
 - TS-25-2 (optional): assert PAPER vs non-paper differ by class or data attribute, not only text and `data-mode`.
 - RISK-29-3 / QUAN-29-1: the broker feature restricts `broker -> data` to `data::kite::session` (cargo-deny `wrappers` or a module-level check) and keeps order endpoints out of `data`. Re-adding crate edges in F2 needs an `allowed()` update (QUAN-29-2).
+- DEPS-0926 (Dependabot PRs 187-192, decided 2026-11-26):
+  - Board `CI-HARDEN`: SEC-192-2 (no release cooldown for cargo in `.github/dependabot.yml`); SEC-189-1 (`taiki-e/install-action` pin comments say `# v2`, name the exact release); SEC-188-1 (`persist-credentials: false` on all checkouts); SEC-190-2 (job-level permissions in `release.yml`; `publish-image` needs only `contents: read` and `packages: write`); CR-191-2 (`pnpm/action-setup` README points to a successor, `pnpm/setup`).
+  - Board `IMAGE-FIRST-RELEASE`: SEC-190-1 (`docker/login-action` 4.8.0 is not exercised by PR CI; check the login and logout logs on the first release that has a Dockerfile).
+  - PR 187 merge gate: CR-191-1, same condition as CR-187-1 (`actions/setup-node` 7.1.0 and `pnpm/action-setup` 6.1.1 not yet run together). PR 191 goes first; PR 187 then needs a rebase, a green `web` job with both, and reviews of the new commit before it merges.
 
 ## History
 - 2026-11-18: slice 0 scaffold.
