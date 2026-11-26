@@ -58,7 +58,12 @@ sha2 = "0.11"
 # no "parquet" feature: in this crate it forces "bundled"; the system library has Parquet built in; ~ pin: patch bumps only)
 duckdb = { version = "~1.20001.0" }
 
+# Kite HTTP client (F3 BZ-405a; reqwest and wiremock owner-approved 2026-11-21). rustls only, never native-tls.
+# No default features: no system proxy, no HTTP/2, no cookies, no decompression.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+
 # dev only
+wiremock = "0.6"
 tempfile = "3.27"
 proptest = "1.12"
 insta = { version = "1.49", features = ["json", "redactions"] }

@@ -2,3 +2,4 @@
 
 pub mod bars;
 pub mod instruments;
+pub mod kite;
