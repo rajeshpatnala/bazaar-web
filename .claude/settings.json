@@ -46,6 +46,12 @@
       "Bash(pnpm:*)"
     ],
     "deny": [
+      "Bash(*bazaar-cli*history-checkpoint accept-current*)",
+      "Bash(just cli-fixture history-checkpoint accept-current*)",
+      "Bash(*bazaar-cli*paper-session new*)",
+      "Bash(just cli-fixture paper-session new*)",
+      "Bash(*bazaar-cli*paper-session resume*)",
+      "Bash(just cli-fixture paper-session resume*)",
       "Read(./.env)",
       "Read(./.env.local)",
       "Read(./.env.development)",

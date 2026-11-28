@@ -46,7 +46,7 @@ rounds and the next step in your area: keep what you know instead of re-reading 
      `just cargo nextest run -p bazaar-<crate> <test>` or one `just cli-fixture <subcommand>`) and state the value you saw vs
      the reference. UI: one screenshot of the changed screen with `just ui-shot <route>` (mocked API; it starts and stops its own
      dev server - never `ui-dev`), and if Playwright browsers are missing, a render test of that screen instead; API: one in-process router test (`oneshot`) for the changed route. Never call the live broker
-     API and never run the HUMAN-ONLY recipes (`run`, `ui-dev`, `set-secret`, `refresh-instruments`, `import-bhavcopy`, `backtest`).
+     API and never run the HUMAN-ONLY recipes (`run`, `ui-dev`, `set-secret`, `refresh-instruments`, `import-bhavcopy`, `backtest`, `bazaar-cli history-checkpoint accept-current`, `bazaar-cli paper-session new`, `bazaar-cli paper-session resume`).
    Commit each time T0 passes (`checkpoint_commits`), so any step can be reverted on its own.
 6b. Self-review the diff against those checklists and the failure modes; fill the handoff's failure-mode table; any gap
    is fixed or named.

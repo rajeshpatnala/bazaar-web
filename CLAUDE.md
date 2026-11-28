@@ -25,7 +25,7 @@ who launches agents. Your own agent file says your job; read only what your task
 - Legal data only (official APIs and exchange archives); never scrape.
 - No panics in library code; every outbound call has a timeout.
 - The disclaimer stays visible; never imply certainty or SEBI registration.
-- Agents never run the HUMAN-ONLY recipes (`run`, `ui-dev`, `set-secret`, `refresh-instruments`, `import-bhavcopy`, `backtest`) or touch the live broker or the owner's `data/`; use fixtures, in-process router tests and temp dirs.
+- Agents never run the HUMAN-ONLY recipes (`run`, `ui-dev`, `set-secret`, `refresh-instruments`, `import-bhavcopy`, `backtest`, `bazaar-cli history-checkpoint accept-current`, `bazaar-cli paper-session new`, `bazaar-cli paper-session resume`) or touch the live broker or the owner's `data/`; use fixtures, in-process router tests and temp dirs.
 
 ## Where to look
 
