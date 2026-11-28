@@ -10,3 +10,4 @@
 - [T2 only when complete](feedback_t2_only_when_complete.md) — never offer/launch T2 while slices remain; check plan + record first (owner, 2026-11-25)
 - [Limit parallel builds](feedback_limit_parallel_builds.md) — owner's Mac ran out of memory with 3 Rust devs; run one building developer at a time (2026-11-26)
 - [Single roadmap](feedback_single_roadmap.md) — only .agents/plans/ROADMAP.md; manager keeps it current (2026-11-26)
+- [No recommendation notes](feedback_no_recommendation_notes.md) — don't load .agents recommendation notes into memory/context (2026-11-27)

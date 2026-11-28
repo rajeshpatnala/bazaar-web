@@ -3,7 +3,7 @@
 (From `bz-repo-structure` SKILL.md; open when the task touches this area.)
 
 
-Headless composition root, `clap` derive. Subcommands (contract): `check-connections`, `refresh-instruments`, `import-bhavcopy --date`, `import-actions <csv>`, `import-csv <file>`, `backtest --strategy --from --to`, `readiness`, `live-opt-in --mode` (human-only), `set-secret <name>` (human-only; prompts without echo and writes to the Keychain through `SecretStore`). All accept `--config-dir` and `--data-dir`; T1 runs use `--config-dir fixtures/config --data-dir <tmp>`. The bin entrypoint loads `.env` with `dotenvy` as the secrets fallback (the program loads it; agents never open it), builds config, then calls library crates. No business logic here. Backtest output is deterministic text/JSON for golden tests. There is no password, TOTP or hash command: the web app has no password (launch-token session, `bz-web-api`).
+Headless composition root, `clap` derive. Subcommands (contract): `check-connections`, `refresh-instruments`, `import-bhavcopy --date`, `import-actions <csv>`, `import-csv <file>`, `backtest --strategy --from --to`, `readiness`, `live-opt-in --mode` (human-only), `history-checkpoint verify`, `history-checkpoint accept-current` (human-only), `paper-session list`, `paper-session new` / `resume` (human-only; not built yet), `set-secret <name>` (human-only; prompts without echo and writes to the Keychain through `SecretStore`). All accept `--config-dir` and `--data-dir`; T1 runs use `--config-dir fixtures/config --data-dir <tmp>`. The bin entrypoint loads `.env` with `dotenvy` as the secrets fallback (the program loads it; agents never open it), builds config, then calls library crates. No business logic here. Backtest output is deterministic text/JSON for golden tests. There is no password, TOTP or hash command: the web app has no password (launch-token session, `bz-web-api`).
 
 The `bazaar-server` binary has one extra subcommand, `openapi`, which prints the OpenAPI document to stdout (no network, no secrets, no data dir) for `just openapi` and the CI drift check. With no subcommand it starts the server (flag `--port`; no bind-address flag).
 
@@ -19,7 +19,7 @@ pub trait Check { fn name(&self) -> &'static str; fn run(&self) -> Result<(), Ca
 pub fn run_checks(checks: &[Box<dyn Check>], out: &mut impl std::io::Write) -> bool { /* prints lines, returns all_ok */ }
 ```
 
-**Human-only commands:** the single list is CONTRACTS section 5 (`run`, `ui-dev`, `set-secret`, `refresh-instruments`, `import-bhavcopy`, `backtest` on `data/`, `bazaar-cli live-opt-in`). Agents use fixtures and temp dirs (`just cli-fixture`), test the server with in-process `tower::ServiceExt::oneshot` tests, preview the UI with `just app-dev`, and `just db-check` is the only connection check.
+**Human-only commands:** the single list is CONTRACTS section 5 (`run`, `ui-dev`, `set-secret`, `refresh-instruments`, `import-bhavcopy`, `backtest` on `data/`, `bazaar-cli live-opt-in`, `bazaar-cli history-checkpoint accept-current`, `bazaar-cli paper-session new` / `resume`). Agents use fixtures and temp dirs (`just cli-fixture`), test the server with in-process `tower::ServiceExt::oneshot` tests, preview the UI with `just app-dev`, and `just db-check` is the only connection check.
 
 Wiring: `bazaar-cli` and `bazaar-server` are the only crates that construct adapters (`Store`, `MarketData`, `Executor`, the Keychain `SecretStore`) and inject them. If duplicated wiring exceeds ~50 lines, propose a `bootstrap` crate by ADR.
 
