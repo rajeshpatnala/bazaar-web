@@ -9,7 +9,13 @@
   kit.py cargo <args>         one cargo command under the build slot and job cap (team.md heavy_builds_at_once, build_jobs)
   kit.py db-check             connection status of configured data stores (never prints secrets)
   kit.py test-check [base]    fail if production code changed without new tests (developer gate)
-  kit.py codemap [out]        write .agents/codemap.md (modules, items, routes, migrations, config keys, in-flight)
+  kit.py codemap              write .agents/codemap.md (modules, items, routes, migrations, config keys, in-flight);
+                              a big module list is split into one file per area under .agents/codemap/
+  kit.py codemap find <words> print only the codemap lines that mention every word (what agents use)
+  kit.py section <file> [heading]   one section of a long markdown file inside the repo (no heading: list sections
+                              and sizes)
+  kit.py archive-notes        keeps the newest handoff and recommendations.md; moves older handoffs and all dated
+                              recommendations to .agents/archive/ (without recommendations.md the newest dated one stays)
   kit.py base                 print the integration branch feature PRs target (team.md -> Branches)
   kit.py new-branch <name>    create a work branch from the latest integration branch
   kit.py merge-check <pr> [--feature ID] | --branch <b> --feature ID
@@ -509,10 +515,53 @@ def test_check(base: str = None) -> int:
 
 # ---------------------------------------------------------------- codemap
 
-def codemap(out: str = None) -> int:
+CODEMAP_DIR = ".agents/codemap"
+
+
+def codemap_files() -> list:
+    """The codemap index plus its area files (written when the module list is split)."""
+    idx = ROOT / ".agents" / "codemap.md"
+    return ([idx] if idx.exists() else []) + sorted((ROOT / CODEMAP_DIR).glob("*.md"))
+
+
+def codemap_find(words: list) -> int:
+    """Codemap lines that mention every word (case-insensitive), with the area they are in. Cheaper than reading the
+    codemap: agents look up the file, route or type they need."""
+    words = [w.lower() for w in words if w.strip()]
+    if not words:
+        sys.exit("usage: kit.py codemap find <word> [word...]   e.g. codemap find DecisionGate")
+    files = codemap_files()
+    if not files:
+        sys.exit("kit: no codemap yet - run `just codemap`")
+    hits = []
+    for f in files:
+        area = ""
+        for l in f.read_text(errors="replace").splitlines():
+            if l.startswith("#"):
+                area = l.lstrip("# ").strip()
+                if all(w in l.lower() for w in words):
+                    hits.append(f"[{f.relative_to(ROOT).as_posix()}] {l}")
+                continue
+            if l.strip() and all(w in l.lower() for w in words):
+                hits.append(f"[{area or f.stem}] {l[:300]}")
+    if not hits:
+        print(f"codemap: nothing mentions {' '.join(words)}. Try one word, or `just codemap find <part of a path>`.")
+        return 1
+    limit = 40
+    print("\n".join(hits[:limit]))
+    if len(hits) > limit:
+        print(f"... {len(hits) - limit} more: add a word to narrow it")
+    return 0
+
+
+def _slug(title: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "-", title).strip("-").lower() or "root"
+
+
+def codemap() -> int:
     s = stack()
     cm = s.get("codemap", {})
-    out_path = ROOT / (out or ".agents/codemap.md")
+    out_path = ROOT / ".agents" / "codemap.md"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     doc_re = re.compile(cm["doc_regex"], re.M) if cm.get("doc_regex") else None
     item_re = re.compile(cm["item_regex"], re.M) if cm.get("item_regex") else None
@@ -547,7 +596,30 @@ def codemap(out: str = None) -> int:
             item_txt = ", ".join(items)[:400]
             body.append(f"- `{f.relative_to(ROOT).as_posix()}`" + (f" - {doc}" if doc else "") + (f" | {item_txt}" if item_txt else ""))
         body.append("")
-    if body:
+    split_kb = float(cm.get("split_kb", 16))
+    area_dir = ROOT / CODEMAP_DIR
+    written = set()
+    if body and split_kb and len("\n".join(body)) > split_kb * 1024:
+        # One file per area: an agent reads its area (or `just codemap find`), never 100 KB of module lists.
+        area_dir.mkdir(parents=True, exist_ok=True)
+        index, cur = [], None
+        def flush(area):
+            if area:
+                title, rows = area
+                name = _slug(title.split(" - ")[0]) + ".md"
+                (area_dir / name).write_text("\n".join([f"# Code map: {title}", "", lines[2], ""] + rows).rstrip() + "\n")
+                written.add(name)
+                files_n = sum(1 for r in rows if r.startswith("- "))
+                index.append(f"- {title} ({files_n} files) -> `{CODEMAP_DIR}/{name}`")
+        for l in body:
+            if l.startswith("### "):
+                flush(cur)
+                cur = (l[4:], [])
+            elif cur is not None:
+                cur[1].append(l)
+        flush(cur)
+        lines += [f"## {cm.get('modules_title', 'Modules')} (one file per area; `just codemap find <word>` searches all)", ""] + index + [""]
+    elif body:
         lines += [f"## {cm.get('modules_title', 'Modules')}", ""] + body
     else:
         lines += ["No source files yet.", ""]
@@ -598,9 +670,15 @@ def codemap(out: str = None) -> int:
             if b in (integ, rel) or subprocess.run(["git", "merge-base", "--is-ancestor", b, base], cwd=ROOT).returncode == 0:
                 continue
             changed = [l.split("\t") for l in git("diff", "--name-status", f"{base}...{b}").splitlines() if l]
-            changed = [(c[0][0], c[-1]) for c in changed if matches(c[-1], src_globs)][:15]
+            changed = [c for c in changed if any(matches(p, src_globs) for p in c[1:])]
             if not changed:
                 continue
+            # A squash-merged branch kept around is not in flight: every source path it changed (both sides of a
+            # rename) already matches the base.
+            paths = [p for c in changed for p in c[1:]]
+            if subprocess.run(["git", "diff", "--quiet", base, b, "--", *paths], cwd=ROOT).returncode == 0:
+                continue
+            changed = [(c[0][0], c[-1]) for c in changed][:15]
             verbs = {"A": "added", "M": "changed", "D": "deleted", "R": "renamed"}
             inflight.append(f"### {b} (last commit {git('log', '-1', '--format=%cr', b).strip()})")
             inflight += [f"- {verbs.get(st, st)} {p}" for st, p in changed]
@@ -616,7 +694,103 @@ def codemap(out: str = None) -> int:
     tmp = out_path.with_suffix(".tmp")
     tmp.write_text("\n".join(lines).rstrip() + "\n")
     tmp.replace(out_path)
-    print(f"codemap: {len(lines)} lines -> {out_path.relative_to(ROOT)}")
+    if area_dir.is_dir():
+        for old in area_dir.glob("*.md"):
+            if old.name not in written:
+                old.unlink()  # an area that no longer exists, or the map is no longer split
+    print(f"codemap: {len(lines)} lines -> {out_path.relative_to(ROOT)}"
+          + (f" + {len(written)} area files in {CODEMAP_DIR}/" if written else ""))
+    return 0
+
+
+# ---------------------------------------------------------------- reading long notes narrowly
+
+def _md_heads(lines: list) -> list:
+    """(index, level, title) for every markdown heading outside code fences."""
+    out, fence = [], False
+    for i, l in enumerate(lines):
+        if l.lstrip().startswith("```"):
+            fence = not fence
+        elif not fence:
+            m = re.match(r"^(#{1,6})\s+(.*)", l)
+            if m:
+                out.append((i, len(m.group(1)), m.group(2).strip()))
+    return out
+
+
+def section_path(name: str) -> tuple:
+    """(resolved file, path to show) for `section`, or exit. Only a .md file inside this checkout or the main one
+    (where agent worktrees live), and nothing under a secrets folder. Links are resolved first, so a .md link can't
+    point elsewhere. Refused before the file is opened."""
+    f = pathlib.Path(name)
+    f = (f if f.is_absolute() else ROOT / f).resolve()
+    if f.suffix.lower() == ".md":
+        for base in (ROOT.resolve(), main_root().resolve()):
+            if f.is_relative_to(base):
+                rel = f.relative_to(base)
+                if "secrets" in (part.lower() for part in rel.parts[:-1]):
+                    break
+                return f, rel
+    sys.exit(f"kit: section refused: {name} is not a .md file inside the repo, outside any secrets folder")
+
+
+def section_cmd(argv: list) -> int:
+    """One section of a long markdown file (a roadmap, a plan, a report), so nobody reads 80 KB to find one part."""
+    if not argv:
+        sys.exit('usage: kit.py section <file> ["<heading words>"]   (no heading: list the sections with sizes)')
+    f, rel = section_path(argv[0])
+    if not f.is_file():
+        sys.exit(f"kit: no file {argv[0]}")
+    lines = f.read_text(errors="replace").splitlines()
+    heads = _md_heads(lines)
+    def end_of(k):
+        i, lvl, _ = heads[k]
+        return next((j for j, l2, _ in heads[k + 1:] if l2 <= lvl), len(lines))
+    words = " ".join(argv[1:]).lower().split()
+    if not words:
+        for k, (i, lvl, title) in enumerate(heads):
+            if lvl <= 3:
+                size = len("\n".join(lines[i:end_of(k)]))
+                print(f"{'  ' * (lvl - 1)}{title}  (line {i + 1}, ~{size // 4} tok)")
+        return 0
+    found = [k for k, (_, _, title) in enumerate(heads) if all(w in title.lower() for w in words)]
+    if not found:
+        print(f"section: no heading in {argv[0]} mentions {' '.join(words)}. `just section {argv[0]}` lists them.")
+        return 1
+    k = found[0]
+    i, j = heads[k][0], end_of(k)
+    limit = int(team_setting("docs_max_lines", "120")) * 2
+    print(f"{rel}:{i + 1}  ({j - i} lines)" + ("; also: " + "; ".join(heads[x][2] for x in found[1:4]) if len(found) > 1 else ""))
+    print("\n".join(lines[i:min(j, i + limit)]))
+    if j - i > limit:
+        print(f"\n... {j - i - limit} more lines: Read {rel} offset {i + limit + 1} limit {j - i - limit}")
+    return 0
+
+
+def _note_age(f: pathlib.Path) -> tuple:
+    """Sort key, oldest first: the date in the name; mtime (arbitrary after a clone or checkout) only breaks ties."""
+    m = re.search(r"\d{4}-\d{2}-\d{2}", f.name)
+    return (m.group(0) if m else "", f.stat().st_mtime, f.name)
+
+
+def archive_notes() -> int:
+    """Keeps the newest handoff and recommendations.md; older handoffs and all dated recommendations move to
+    .agents/archive/ (without a recommendations.md the newest dated one stays). An archived note is never replaced."""
+    a = ROOT / ".agents"
+    moved = []
+    for pat in ("handoff*.md", "recommendations-*.md"):
+        files = sorted(a.glob(pat), key=_note_age)
+        if pat.startswith("handoff") or not (a / "recommendations.md").exists():
+            files = files[:-1]  # the newest one is current
+        for f in files:
+            (a / "archive").mkdir(exist_ok=True)
+            dest, n = a / "archive" / f.name, 1
+            while dest.exists():
+                n += 1
+                dest = a / "archive" / f"{f.stem}-{n}{f.suffix}"
+            f.replace(dest)
+            moved.append(f.name if dest.name == f.name else f"{f.name} (as {dest.name})")
+    print(f"archive-notes: moved {len(moved)} file(s) to .agents/archive/" + (": " + ", ".join(moved) if moved else ""))
     return 0
 
 
@@ -638,7 +812,7 @@ LIGHT_GLOBS = ["docs/**", "**/*.md", "*.md", "**/*.rst", "**/*.txt", "LICENSE*",
 # The manager's own notes: they change all the time and only describe the work, so they merge through a records PR
 # (`just records-pr`) without reviewers. Settings (team.md, stack.json), owner rules, templates and scripts are not here.
 RECORD_GLOBS = [".agents/board.md", ".agents/decisions.md", ".agents/recommendations*.md", ".agents/reports/**",
-                ".agents/project.md", ".agents/codemap.md", "docs/owner-input/**", ".agents/owner-input/**",
+                ".agents/project.md", ".agents/codemap.md", ".agents/codemap/**", ".agents/archive/*.md", "docs/owner-input/**", ".agents/owner-input/**",
                 ".agents/handoff*.md"]
 
 
@@ -660,11 +834,23 @@ def pr_refs(info: dict) -> tuple:
 
 
 def diff_stats(base: str, head: str) -> list:
-    out = []
-    for line in git("diff", "--numstat", f"{base}...{head}").splitlines():
-        a, d, path = (line.split("\t") + ["", "", ""])[:3]
-        out.append((int(a) if a.isdigit() else 0, int(d) if d.isdigit() else 0, path))
-    return out
+    """(added, deleted, path) per changed path. The paths come from `--name-only --no-renames`, so the records, docs
+    and sensitive checks see both sides of a move and never `old => new` (a `**` record or docs glob would match that
+    whole string). numstat gives the size only, with rename detection: the new path of a move carries the lines of the
+    edit, the old path 0/0."""
+    rng = f"{base}...{head}"
+    sizes = {}
+    fields = iter(git("diff", "--numstat", "-z", "--find-renames", rng).split("\0"))
+    for line in fields:
+        if not line:
+            continue
+        a, d, path = line.split("\t", 2)
+        if not path:  # rename: "a<TAB>d<TAB>" NUL old NUL new
+            next(fields)
+            path = next(fields)
+        sizes[path] = (int(a) if a.isdigit() else 0, int(d) if d.isdigit() else 0)
+    names = git("diff", "--name-only", "-z", "--no-renames", rng).split("\0")
+    return [(*sizes.get(p, (0, 0)), p) for p in names if p]
 
 
 # Files that count as changed but are not reviewed line by line: lockfiles, snapshots, generated code, build output.
@@ -1542,7 +1728,7 @@ def _call_kind(name: str, inp: dict) -> tuple:
     if name in ("Read", "NotebookRead"):
         if "/.claude/skills/" in path or path.startswith(".claude/skills/"):
             return "handbook (whole file)", path.split(".claude/")[-1]
-        if re.search(r"\.agents/(codemap|project)\.md$", path):
+        if re.search(r"\.agents/(codemap(/[^/]+)?|project)\.md$", path):
             return "codemap / profile", path.split("/")[-1]
         if "/.agents/plans/" in path or path.startswith(".agents/plans/"):
             return "plan", path.split("/")[-1]
@@ -2407,7 +2593,7 @@ SETTING_CHOICES = {"work_mode": ["worktrees", "in-place"], "preload_mode": ["car
                    "review_rounds": ["full", "fixes-only"], "defer_minor_after_round": ["off", "1", "2"],
                    "budget_measure": ["tokens", "cost-eq"], "nit_policy": ["defer", "fix"],
                    "rustc_wrapper": list(RUSTC_WRAPPERS)}
-FREE_TEXT = {"build_jobs", "envelope_command", "reuse_roles", "integration_branch", "release_branch", "usd_per_million_tokens",
+FREE_TEXT = {"build_jobs", "owner_rules_skip", "envelope_command", "reuse_roles", "integration_branch", "release_branch", "usd_per_million_tokens",
              "subagent_model", "security_block_severities", "records_extra_globs"}
 
 
@@ -2489,10 +2675,14 @@ def records_pr(argv: list) -> int:
     subprocess.run(["git", "fetch", "-q", "origin"], cwd=ROOT, capture_output=True)
     base = f"origin/{integ}" if ref_exists(f"origin/{integ}") else integ
     # --untracked-files=all lists files inside new folders one by one (plain status shows only the folder)
-    changed = [l[3:].strip().strip('"') for l in git("status", "--porcelain", "--untracked-files=all").splitlines() if l[3:].strip()]
-    files = [f for f in changed if matches(f, record_globs()) and (ROOT / f).is_file()]
-    other = [f for f in changed if f not in files and not f.startswith(".claude/worktrees")]
-    if not files:
+    # -z gives paths unquoted; --no-renames lists a moved file as a deletion plus a new file
+    raw = git("status", "--porcelain", "-z", "--no-renames", "--untracked-files=all")
+    status = [(x[:2], x[3:]) for x in raw.split("\0") if x]
+    in_records = [(st, f) for st, f in status if matches(f, record_globs())]
+    files = [f for _, f in in_records if (ROOT / f).is_file()]
+    deleted = [f for st, f in in_records if "D" in st and not (ROOT / f).exists()]
+    other = [f for _, f in status if f not in files + deleted and not f.startswith(".claude/worktrees")]
+    if not files and not deleted:
         print("records-pr: no changed records (board, decisions, reports, project, codemap, owner inputs, handoffs; "
               "more paths: team.md -> records_extra_globs)")
         return 0
@@ -2505,11 +2695,15 @@ def records_pr(argv: list) -> int:
         for f in files:
             (wt / f).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / f, wt / f)
-        subprocess.run(["git", "add", "--", *files], cwd=wt, check=True, capture_output=True)
+        if files:
+            subprocess.run(["git", "add", "--", *files], cwd=wt, check=True, capture_output=True)
+        if deleted:
+            subprocess.run(["git", "--literal-pathspecs", "rm", "-q", "--ignore-unmatch", "--", *deleted], cwd=wt,
+                           check=True, capture_output=True)
         if not git_in(str(wt), "diff", "--cached", "--name-only").strip():
             print("records-pr: the records already match the integration branch")
             return 0
-        subprocess.run(["git", "commit", "-q", "-m", f"docs(agents): update records ({len(files)} files)"], cwd=wt, check=True,
+        subprocess.run(["git", "commit", "-q", "-m", f"docs(agents): update records ({len(files + deleted)} files)"], cwd=wt, check=True,
                        capture_output=True)
         if "--no-push" in argv or not git("remote").strip():
             print(f"records-pr: committed on {branch} (not pushed)")
@@ -2518,9 +2712,10 @@ def records_pr(argv: list) -> int:
         pr = subprocess.run(["gh", "pr", "create", "--base", integ, "--head", branch, "--title",
                              f"docs(agents): update records {stamp}", "--body",
                              "Manager records only (board, decisions, reports). No code; no reviewer needed.\n\n"
-                             + "\n".join(f"- {f}" for f in files)], cwd=wt, capture_output=True, text=True)
+                             + "\n".join([f"- {f}" for f in files] + [f"- {f} (removed)" for f in deleted])],
+                            cwd=wt, capture_output=True, text=True)
         url = pr.stdout.strip() or pr.stderr.strip()[:200]
-        print(f"records-pr: {len(files)} file(s) -> {url}\nShip it with `just ship <pr>`; afterwards `just sync-base`.")
+        print(f"records-pr: {len(files + deleted)} file(s) -> {url}\nShip it with `just ship <pr>`; afterwards `just sync-base`.")
     except subprocess.CalledProcessError as e:
         sys.exit(f"records-pr: {e.cmd[:3]} failed: {(e.stderr or b'').decode(errors='replace')[:200]}")
     finally:
@@ -4577,10 +4772,9 @@ def review_pack(argv: list) -> int:
             elif not l.startswith("-"):
                 line_no += 1
         print("\n## Red-flag hits (added lines; justify each or file a finding)\n" + ("\n".join(hits[:40]) if hits else "none"))
-    cm = ROOT / ".agents" / "codemap.md"
-    if cm.exists():
+    if codemap_files():
         touched = {p for _, _, p in stats}
-        lines = [l for l in cm.read_text().splitlines() if any(f"`{p}`" in l for p in touched)]
+        lines = [l for f in codemap_files() for l in f.read_text().splitlines() if any(f"`{p}`" in l for p in touched)]
         if lines:
             print("\n## Codemap entries for touched files\n" + "\n".join(lines[:30]))
     dl = diff.splitlines()
@@ -4862,6 +5056,8 @@ EXPORT_FILES = ["CLAUDE.md", "AGENTS.md", "AGENT-GUIDE.md", "AGENT-KIT.md", "AGE
 # file of the same name) and reported when missing. The installer leaves a copy of itself in .claude/kit/installer/
 # (a project has no install.py of its own); that copy goes to the zip root, ahead of an older hand-copied one.
 EXPORT_REQUIRED = ["install.py", "install.sh", ".claude/kit/kit.py"]
+# The project roadmap travels with the kit when there is one (the manager keeps it; the next kit upgrade plans from it).
+EXPORT_ROADMAP = [".agents/plans/ROADMAP.md", "ROADMAP.md", "docs/ROADMAP.md", ".agents/ROADMAP.md"]
 INSTALLER_COPY = ".claude/kit/installer"
 EXPORT_SKIP = [".claude/worktrees/**", ".claude/settings.local.json", ".claude/**/__pycache__/**", "**/*.pyc",
                ".agents/backup-*/**", ".agents/.reuse-nudged", "**/.env", "**/.env.*", "**/node_modules/**",
@@ -4873,7 +5069,7 @@ EXPORT_SKIP = [".claude/worktrees/**", ".claude/settings.local.json", ".claude/*
 
 def export_kit(argv: list) -> int:
     """Zip only the kit: agents, skills, hooks, engine, settings, .agents notes and records, CI and the kit docs.
-    Never code, data, build output, worktrees, backups or secrets."""
+    Never code, data, build output, worktrees, backups or secrets. ROADMAP.md is included when the project has one."""
     import zipfile
     # outside the repo by default: a zip inside it makes the checkout "dirty" and blocks `just new-branch`
     downloads = pathlib.Path.home() / "Downloads"
@@ -4886,7 +5082,7 @@ def export_kit(argv: list) -> int:
         base = ROOT / d
         if base.is_dir():
             files += [p for p in base.rglob("*") if p.is_file()]
-    files += [ROOT / f for f in EXPORT_FILES if (ROOT / f).is_file()]
+    files += [ROOT / f for f in EXPORT_FILES + EXPORT_ROADMAP if (ROOT / f).is_file()]
     picked, skipped = [], 0
     kept = {n: ROOT / INSTALLER_COPY / n for n in ("install.py", "install.sh") if (ROOT / INSTALLER_COPY / n).is_file()}
     for p in sorted(set(files)):
@@ -5014,7 +5210,15 @@ def main(argv: list) -> int:
     if cmd == "test-check":
         return test_check(rest[0] if rest else None)
     if cmd == "codemap":
-        return codemap(rest[0] if rest else None)
+        if rest and rest[0] == "find":
+            return codemap_find(rest[1:])
+        if rest:  # no output path from the command line: it could overwrite any file
+            sys.exit("usage: kit.py codemap | kit.py codemap find <word> [word...]; nothing was written")
+        return codemap()
+    if cmd == "section":
+        return section_cmd(rest)
+    if cmd == "archive-notes":
+        return archive_notes()
     if cmd == "base":
         print(branches()[0])
         return 0

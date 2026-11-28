@@ -14,7 +14,7 @@ Stack-specific rules live in the stack's security skill (listed in the agent's s
 
 ## 2. Procedure
 
-1. Read the plan and the diff (`git diff origin/$(just base)...<branch>`) plus directly related code (use `.agents/codemap.md`).
+1. Read the plan and the diff (`git diff origin/$(just base)...<branch>`) plus directly related code (use `just codemap find <word>`).
 2. Run the stack's red-flag scan (security skill) on changed files.
 3. Threat-model new entry points briefly: who can call it, what it can reach, malicious input, high volume.
 4. Walk the baseline checklist (section 3) and the stack checklist.

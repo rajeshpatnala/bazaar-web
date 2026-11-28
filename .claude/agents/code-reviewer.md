@@ -32,9 +32,9 @@ You start without CLAUDE.md and without a memory notebook (it keeps your start s
 
 <!-- kit:handbooks bz-core -->
 ## Handbooks: look up the part you need
-Run `just docs "<topic>"` (or `"<handbook>: <topic>"`) to get one section; don't read whole handbooks.
+Run `just docs "<topic>"` (or `"<handbook>: <topic>"`) to get one section; don't read whole handbooks. `just docs --list <handbook>` shows every section.
 Before writing or judging code in an area, read that handbook's golden rules (`just docs "<handbook>: golden rules"`); a rule file may already have shown them when you opened a file there.
-- **bz-core**: Default stack · Golden rules · Idioms · Error model · Configuration · Secrets · Observability · Async and concurrency · Performance · TypeScript side · Security red flags · Tests · Done checklist; deeper: Money and price newtypes · IST and sessions · Config file shape
+- **bz-core**: Default stack · Golden rules · Idioms · Error model · Configuration · Secrets · Observability · Async and concurrency · Performance · TypeScript side · Security red flags · Tests · Done checklist
 
 Never break (project rules):
 - Rupee amounts are `rust_decimal::Decimal`, never `f64` (f64 only inside indicator/options math, converted at one boundary).

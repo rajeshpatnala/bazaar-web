@@ -20,7 +20,7 @@
 | `.agents/team.md` | user/manager | every setting; look one value up with grep, open the file only to change it |
 | `.agents/board.md` | manager | every task: id, size, agent, branch/PR, status, blocker |
 | `.agents/budget.csv` | hooks | measured usage per agent run (tokens, cold start, processed) |
-| `.agents/codemap.md` | generated | modules, routes, config keys, features, open bugs, in-flight branches |
+| `.agents/codemap.md` (area index), `just codemap find <word>` | generated | modules, routes, config keys, features, open bugs, in-flight branches |
 | `.agents/plans/<id>.md` | tech lead | ONE plan file per feature (M or L), in the main checkout. Agents in worktrees read it with `just plan <id> [--slice n]` (a slice brief: goal, acceptance, that slice's row) - nothing to commit or copy |
 | `.agents/reviews/<id>/<pr-N or branch>/*.md` | reviewers | findings per PR at the paths `review-pack` prints; T2 report at `.agents/reviews/<id>/tests-t2.md` |
 | `.agents/reports/<date>-<id>.md` | manager | report and retrospective |

@@ -1,5 +1,4 @@
 <!-- agent-kit:start -->
-<!-- agent-kit:start -->
 # Agent team: index
 
 You are one agent of an AI delivery team for Bazaar Rust web trading app. The manager (main session) coordinates and is the only one
@@ -12,7 +11,7 @@ who launches agents. Your own agent file says your job; read only what your task
 3. **Git:** your own branch from `just base`, Conventional Commit titles; merges only through `just ship` once a PR is approved (the manager runs it; developers never merge); the release branch moves only via `just promote` (the user approves); never delete, force-move or reset the integration or release branch.
 4. **Quality:** developers write unit tests with every change; each step is verified T0 (gate) + T1 (one quick look), the full matrix once per feature; reviewers never change source.
 5. **Scope and questions:** do your task only; ask instead of guessing on contracts, data meaning or security; replies <= 15 lines, details in files.
-6. **Read narrowly:** codemap before searching, diffs before whole files, `just docs "<topic>"` before whole handbooks. Every tool call re-sends your context.
+6. **Read narrowly:** `just codemap find <word>` before searching, diffs before whole files, `just docs "<topic>"` before whole handbooks, `just section <file> "<heading>"` before whole long notes (a hook blocks whole reads of big markdown files). Every tool call re-sends your context.
 7. **Records and the kit:** feature and bug records travel with the code; if a kit step fails, stop and report (`just preflight`) - never work around it.
 
 ## Never break (Bazaar Rust web trading app)
@@ -33,7 +32,7 @@ who launches agents. Your own agent file says your job; read only what your task
 | Need | Where |
 |---|---|
 | what the project is, stores, integrations | `.agents/project.md` |
-| code layout, routes, config keys, features, open bugs, in-flight branches | `.agents/codemap.md` |
+| code layout, routes, config keys, features, open bugs, in-flight branches | `.agents/codemap.md` (area index), `just codemap find <word>` |
 | a rule or how-to | `just docs "<topic>"` (one section of a handbook) |
 | team, files, all commands, hard rules in detail | `just docs "team-handbook: <topic>"` |
 | the owner's standing rules | given to you at start (`.agents/owner-rules.md`) |
@@ -45,5 +44,4 @@ who launches agents. Your own agent file says your job; read only what your task
 Agents in worktrees get absolute paths to `.agents/` files in their prompt.
 
 Domain agents: consult `market-strategist` when planning strategy/recommendation/risk/options/long-term work; `quant-reviewer` (quant, backtest, data, charges) and `risk-guardian` (risk, execution, paper, broker, scanner, risk.toml, order/approval/kill-switch endpoints and UI) are added automatically by `just review-plan` when a PR touches those paths, and merge-check requires their APPROVE.
-<!-- agent-kit:end -->
 <!-- agent-kit:end -->

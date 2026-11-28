@@ -139,6 +139,8 @@ If one of these seems to have no effect, it may need to be set in your shell bef
 | `build_jobs` | `-` | Cap on cargo's parallel jobs and test threads for kit-run builds (`-` = one per CPU). Lower = less memory per build |
 | `build_wait_minutes` | 30 | How long a gate waits for a build slot before it stops |
 | `rustc_wrapper` | `auto` | `auto`: use sccache when it is installed; `sccache`: always; `none`: never. Any other wrapper comes only from your own `RUSTC_WRAPPER` environment variable |
+| `read_whole_kb` | 24 | A markdown file bigger than this (KB) can't be read whole: agents use `just codemap find`, `just plan --slice`, `just section` or Read with offset/limit (`0` = off) |
+| `owner_rules_skip` | `build-runner, cicd` | Agents that don't get the owner rules at start, because they never decide how the app behaves (`-` = everyone gets them) |
 | `preview_first` | `yes` | Look-and-feel work gets a cheap preview you pick from before anything is built (frontend kits: clickable demo pages) |
 
 ### Review policy

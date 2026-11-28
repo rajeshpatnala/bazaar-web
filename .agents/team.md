@@ -122,6 +122,8 @@ then there is no fixed cap on developers - the budget is the governor.
 | build_jobs | - |
 | build_wait_minutes | 30 |
 | rustc_wrapper | auto |
+| read_whole_kb | 24 |
+| owner_rules_skip | build-runner |
 - `heavy_builds_at_once`: compiling commands (cargo build/clippy/test, or a step marked `"heavy"`) that may run at the
   same time across the checkout and every worktree; the rest wait for a free slot. `1` keeps parallel agents from
   running the machine out of memory; `0` = no limit.

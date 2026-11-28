@@ -102,7 +102,7 @@ No GitHub? `just changelog` (git-cliff) plus an annotated tag after your approva
 
 ## Keeping track: the code map
 
-`.agents/codemap.md` lists modules, files with their doc line and public items, HTTP routes, migrations, config key names, and an **In-flight** section with every unmerged branch (changed files, new routes). It regenerates automatically at session start and after every merge, pull, push, rebase or branch change, so new work is on the map before and after it merges. `just codemap` forces a refresh.
+`.agents/codemap.md` lists modules (split into one file per area under `.agents/codemap/` when the list is long; `just codemap find <word>` searches them all), files with their doc line and public items, HTTP routes, migrations, config key names, and an **In-flight** section with every unmerged branch (changed files, new routes). It regenerates automatically at session start and after every merge, pull, push, rebase or branch change, so new work is on the map before and after it merges. `just codemap` forces a refresh.
 
 ## Keeping track: features and bugs
 
@@ -211,7 +211,7 @@ Run the new kit's installer against your repo (once per repo that uses this kit)
 notes and records, CI, kit docs) into your Downloads folder (or the folder above the repo; `--out <path>` to choose) and prints its size and contents - never your code, `data/`, build output, worktrees,
 backups or `.env` files. The installer (`install.py`, `install.sh`, from the copy the installer keeps in
 `.claude/kit/installer/`) and the engine (`.claude/kit/kit.py`) are always included, so the zip can be upgraded and
-reinstalled as it is; a missing one is named. `just export-kit --list` shows the file list without zipping.
+reinstalled as it is; a missing one is named. The project roadmap (`.agents/plans/ROADMAP.md`, `ROADMAP.md`, `docs/ROADMAP.md` or `.agents/ROADMAP.md`) goes in too when there is one. `just export-kit --list` shows the file list without zipping.
 
 After upgrading:
 1. Restart Claude Code in the repo.

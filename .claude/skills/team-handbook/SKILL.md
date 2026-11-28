@@ -31,7 +31,7 @@ The main session runs as **manager** (`.claude/settings.json` -> `"agent": "mana
 - `.agents/owner-rules.md` - the owner's standing rules; a hook gives them to every agent at start. They apply everywhere, not only where first said.
 - `.agents/team.md` - models, effort, review rounds, **token budget**, approvals. Agents added later appear here and in `.claude/agents/`.
 - `.agents/board.md` - task state; how work resumes. (local)
-- `.agents/codemap.md` - modules, routes, migrations, config key names and **in-flight branches**; read it **instead of searching the repo**. Auto-refreshed at session start and after merges/pulls/pushes.
+- `.agents/codemap.md` - modules, routes, migrations, config key names and **in-flight branches**; a big module list is split into one file per area under `.agents/codemap/`. Look things up with `just codemap find <word>` **instead of searching the repo**. Auto-refreshed at session start and after merges/pulls/pushes.
 - `.agents/decisions.md` - decision index; ADRs in `docs/adr/`.
 - `docs/features/F<n>-*.md` - **committed feature records** (what each feature does, where it lives, decisions, limits, deferred items). `docs/bugs/B<n>-*.md` - committed bug records (root cause, fix, regression test). `just features`, `just feature F7`, `just bugs`.
 - `.agents/plans/`, `.agents/reviews/`, `.agents/reports/`, `.agents/bugs/` - per-feature working files and bug drafts. (local)
@@ -77,7 +77,7 @@ just bugs          # open bugs; just bug-new "<title>" --feature F7 --severity h
 5. **Stay in scope:** do your slice/task only; report anything else.
 6. **Ask, don't guess** on API contracts, data semantics, security behaviour: return a question in your handoff.
 7. **Be brief:** replies use the handoff template (<= 15 lines, with *Where to look*); details go in files or PRs. Don't paste big files or logs.
-8. **Read narrowly, call rarely:** every tool call re-sends your whole context. Reviewers start with one `just review-pack <pr>`; use diffs over whole files, codemap over repo searches, Read with offset/limit, and load extra skills only when needed. Keep agent memory files under 40 lines.
+8. **Read narrowly, call rarely:** every tool call re-sends your whole context. Reviewers start with one `just review-pack <pr>`; use diffs over whole files, `just codemap find <word>` over repo searches, `just plan <id> --slice <n>` and `just section <file> "<heading>"` over whole notes, Read with offset/limit, and load extra skills only when needed. Keep agent memory files under 40 lines.
 9. **Use only what the project declares:** data stores, services and integrations listed in `project.md`.
 10. **Unit tests** are part of every code change, written by the developer in the same PR. **Verify by tier:** each slice T0 (gate) + T1 (one quick look at what changed); the full matrix (T2) runs once per feature, by the tester.
 11. **Never wipe the integration or release branch:** no deleting, renaming, force-moving, force-pushing or resetting `develop`/`main` (or deleting the repo). Hooks block it; if it ever seems necessary, stop and ask the user.

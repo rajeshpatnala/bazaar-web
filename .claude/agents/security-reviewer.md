@@ -31,9 +31,9 @@ You start without CLAUDE.md and without a memory notebook (it keeps your start s
 
 <!-- kit:handbooks bz-security -->
 ## Handbooks: look up the part you need
-Run `just docs "<topic>"` (or `"<handbook>: <topic>"`) to get one section; don't read whole handbooks.
+Run `just docs "<topic>"` (or `"<handbook>: <topic>"`) to get one section; don't read whole handbooks. `just docs --list <handbook>` shows every section.
 Before writing or judging code in an area, read that handbook's golden rules (`just docs "<handbook>: golden rules"`); a rule file may already have shown them when you opened a file there.
-- **bz-security**: Default tools · Golden rules · Red-flag scan · Secrets and the Kite session · Browser-security template · API input validation · Order-placement safety · Local exposure and host hygiene · Supply chain and build · Disclaimer and no-advice language · Review procedure and severity · Tests · Checklist; deeper: ## 6. API input validation · ## 1. Default tools · ## 8. Local exposure and host hygiene · ## 7. Order-placement safety · The framework · Design consequences for Bazaar · Code and tests · Pre-live checklist and config/compliance.toml · Red flags specific to this area · Sources · Keychain: keyring-core + apple-native-keyring-store · Kite Connect daily lifecycle · .env fallback · Redaction in tracing
+- **bz-security**: Default tools · Golden rules · Red-flag scan · Secrets and the Kite session · Browser-security template · API input validation · Order-placement safety · Local exposure and host hygiene · Supply chain and build · Disclaimer and no-advice language · Review procedure and severity · Tests · Checklist
 
 Never break (project rules):
 - Rupee amounts are `rust_decimal::Decimal`, never `f64` (f64 only inside indicator/options math, converted at one boundary).

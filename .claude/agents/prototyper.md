@@ -21,7 +21,7 @@ at one. Nothing you make is merged.
 ## Steps
 
 1. Read the request, `.agents/owner-rules.md` (also in your start-up context) and only the files that show the current
-   look or output (from `.agents/codemap.md`). Don't read the whole repo.
+   look or output (from `just codemap find <word>`). Don't read the whole repo.
 2. Pick at most 3 directions that differ in kind, not in detail. If the owner named something they like, one of them
    follows it.
 3. Make each preview under `previews/<task-id>/` with an index listing them, one line each. What a preview is here:
