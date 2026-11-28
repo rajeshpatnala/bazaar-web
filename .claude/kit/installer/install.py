@@ -110,19 +110,23 @@ def strip_markers(text: str) -> str:
 
 def kit_block_span(text: str, start: str, end: str):
     """(from, to) of the kit section: the first start marker to the end marker that closes it. Markers stacked by
-    earlier upgrades (nested pairs, spare end markers right after) belong to it. None when there is no section."""
-    first = text.find(start)
-    close = text.find(end, first + len(start)) if first >= 0 else -1
-    if close < 0:
+    earlier upgrades (nested pairs, spare end markers right after) belong to it. Only a marker alone on its line
+    counts: one quoted inside a line is the owner's text. None when there is no section."""
+    alone = lambda mark: rf"^[ \t]*{re.escape(mark)}[ \t]*$"
+    marks = list(re.finditer(f"(?m){alone(start)}|{alone(end)}", text))
+    while marks and marks[0].group(0).strip() != start:
+        marks.pop(0)
+    ends = [m for m in marks if m.group(0).strip() == end]
+    if not ends:
         return None
-    depth = 0
-    for m in re.finditer(f"{re.escape(start)}|{re.escape(end)}", text[first:]):
-        depth += 1 if m.group(0) == start else -1
+    close, depth = ends[0], 0  # more starts than ends: the first end closes the section
+    for m in marks:
+        depth += 1 if m.group(0).strip() == start else -1
         if depth == 0:
-            close = first + m.start()
+            close = m
             break
-    to = close + len(end)
-    return first, to + re.match(rf"(?:\s*{re.escape(end)})*", text[to:]).end()
+    spare = re.compile(rf"(?m)(?:\s*\n[ \t]*{re.escape(end)}[ \t]*$)*")
+    return marks[0].start(), spare.match(text, close.end()).end()
 
 
 def merge_claude_md(dst: pathlib.Path, src: pathlib.Path, backup: pathlib.Path = None) -> None:

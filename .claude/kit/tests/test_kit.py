@@ -1307,6 +1307,20 @@ class ExportAndInstallSecretTests(Base):
             self.assertEqual((once.count(start), once.count(end)), (1, 1), label)
             self.assertEqual(once, f"my intro\n\n{start}\n# Guide\n\nnew rules\n{end}\nmy own notes\n", label)
 
+    def test_installer_keeps_notes_that_quote_a_marker_inside_a_line(self):
+        mod = load_module("kit_installer_q", self.installer())
+        start, end = "<!-- agent-kit:start -->", "<!-- agent-kit:end -->"
+        dst, src = self.r.dir / "CLAUDE.md", self.r.dir / "kit-claude.md"
+        src.write_text("# Guide\nnew rules\n")
+        intro = f"intro: the section opens with `{start}`\n\n"
+        notes = f"KEEP-NOTES\nit closes with `{end}` on its own line\n{end} <- like this\nKEEP-TOO\n"
+        for label, block in {"spare start marker": f"{start}\n{start}\nold rules\n{end}\n",
+                             "one pair": f"{start}\nold rules\n{end}\n",
+                             "spare end marker": f"{start}\nold rules\n{end}\n  {end}  \n"}.items():
+            dst.write_text(intro + block + notes)
+            mod.merge_claude_md(dst, src)
+            self.assertEqual(dst.read_text(), f"{intro}{start}\n# Guide\nnew rules\n{end}\n{notes}", label)
+
     def test_installer_wraps_a_new_claude_md_in_one_pair_of_markers(self):
         src = pathlib.Path(tempfile.mkdtemp(prefix="kit-src-"))
         self.addCleanup(shutil.rmtree, src, True)
