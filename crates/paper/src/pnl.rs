@@ -134,6 +134,12 @@ impl SessionWindow {
         Ok(())
     }
 
+    /// Adds the open loss of one pool held now.
+    fn holding(&mut self, loss: Decimal) -> Result<(), PnlError> {
+        self.open_loss = sum(self.open_loss, loss)?;
+        Ok(())
+    }
+
     /// Counts one sale: in the window it is P&L; before it, its cost has left the pool.
     fn sale(
         &mut self,
@@ -206,14 +212,17 @@ pub fn session_figures(
         f.day.sale(result, cost_out, s.date, today)?;
         f.week.sale(result, cost_out, s.date, monday)?;
     }
-    for (key, pool) in replayed.pools.iter().filter(|(_, p)| p.qty() > 0) {
+    let mut held: Vec<_> = replayed.pools.iter().filter(|(_, p)| p.qty() > 0).collect();
+    // A fixed order, so one ledger with several bad pools always gives the same error.
+    held.sort_by_key(|(k, _)| (k.session, k.symbol.as_str(), k.product.as_str()));
+    for (key, pool) in held {
         if key.session != active {
             return Err(PnlError::OpenOutsideActive(key.session));
         }
         let loss = pool.open_loss(mark(&key.symbol).ok_or(PnlError::MissingMark)?)?;
         let f = by_session.entry(key.session).or_default();
-        f.day.open_loss = sum(f.day.open_loss, loss)?;
-        f.week.open_loss = sum(f.week.open_loss, loss)?;
+        f.day.holding(loss)?;
+        f.week.holding(loss)?;
     }
     Ok(Sessions { active, by_session })
 }

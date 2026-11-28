@@ -80,6 +80,24 @@ fn window(pnl: &str, base: &str) -> WindowPnl {
     }
 }
 
+fn shared(day: WindowPnl, week: WindowPnl) -> SharedFigures {
+    SharedFigures { day, week }
+}
+
+/// A window with lines in it.
+fn traded(realised: &str, open_loss: &str, equity: &str) -> SessionWindow {
+    SessionWindow {
+        realised: d(realised),
+        open_loss: d(open_loss),
+        equity: d(equity),
+        has_lines: true,
+    }
+}
+
+fn both_windows(w: SessionWindow) -> SessionFigures {
+    SessionFigures { day: w, week: w }
+}
+
 #[test]
 fn a_day_two_lower_sale_is_a_loss_not_its_proceeds() {
     let lines = [
@@ -116,12 +134,48 @@ fn owner_worked_case_and_a_gain_offsets_no_sale_or_other_pool() {
         pair(1, TUE, "sell", "INFY", 10, "900", "-6"),
     ]
     .concat();
-    let day_pnl = |l: &[ReplayLine<'_>], mark| figures(l, 24, 1, mark).expect("figures").day.pnl;
-    assert_eq!(day_pnl(&lines, "90"), d("-26"));
-    assert_eq!(day_pnl(&lines, "100"), d("-16"));
+    let both = |pnl| Ok(shared(window(pnl, "100000"), window(pnl, "100000")));
+    assert_eq!(figures(&lines, 24, 1, "90"), both("-26"));
+    assert_eq!(figures(&lines, 24, 1, "100"), both("-16"));
     // A winning TCS pool changes neither the realised -16 nor INFY's open -10.
     let with_winner = [lines, pair(1, TUE, "buy", "TCS", 1, "-100", "-1")].concat();
-    assert_eq!(day_pnl(&with_winner, "90"), d("-26"));
+    assert_eq!(figures(&with_winner, 24, 1, "90"), both("-26"));
+}
+
+#[test]
+fn the_open_losses_of_all_held_pools_add_up() {
+    let mut mis = pair(1, TUE, "buy", "INFY", 5, "-500", "-5");
+    mis[1].product = Some("mis");
+    let lines = [
+        opening(1, TUE, "100000"),
+        pair(1, TUE, "buy", "INFY", 10, "-1000", "-10"),
+        mis,
+        pair(1, TUE, "buy", "TCS", 1, "-1500", "-1"),
+    ]
+    .concat();
+    // -110 (INFY CNC), -55 (INFY MIS), -501 (TCS at 1000).
+    let s = session_figures(&lines, day(24), id(1), marks("90")).expect("figures");
+    let held = traded("0", "-666", "100000");
+    assert_eq!(s.get(id(1)), Some(&both_windows(held)));
+    assert_eq!(
+        shared_figures(&s, d("100000")),
+        Ok(shared(window("-666", "100000"), window("-666", "100000")))
+    );
+}
+
+/// SEC-202-3: with two bad pools, the first in (session, symbol, product) order is reported.
+#[test]
+fn several_bad_pools_always_give_the_same_error() {
+    let lines = [
+        opening(1, TUE, "100000"),
+        pair(1, TUE, "buy", "INFY", 1, "-100", "-1"),
+        pair(1, TUE, "buy", "ACC", 1, "-100", "-1"),
+    ]
+    .concat();
+    // ACC has no mark, INFY a bad one. Repeated because a map's order differs per replay.
+    for _ in 0..64 {
+        assert_eq!(figures(&lines, 24, 1, "0"), Err(PnlError::MissingMark));
+    }
 }
 
 #[test]
@@ -154,6 +208,47 @@ fn the_week_starts_on_the_ist_monday() {
     assert_eq!(f.day, window("-57", "99887"));
 }
 
+#[test]
+fn the_week_boundary_is_ist_midnight_into_monday() {
+    let lines = [
+        opening(1, LAST_FRI, "100000"),
+        pair(1, LAST_FRI, "buy", "INFY", 10, "-1000", "-10"),
+        // Sunday's last second and Monday's first.
+        pair(
+            1,
+            "2026-11-22T23:59:59+05:30",
+            "sell",
+            "INFY",
+            5,
+            "400",
+            "-3",
+        ),
+        pair(
+            1,
+            "2026-11-23T00:00:00+05:30",
+            "sell",
+            "INFY",
+            5,
+            "450",
+            "-2",
+        ),
+    ]
+    .concat();
+    let on = |today| figures(&lines, today, 1, "1").expect("figures");
+    // Today is Monday: the week is the day, and Sunday's sale is outside both.
+    assert_eq!(
+        on(23),
+        shared(window("-57", "99887"), window("-57", "99887"))
+    );
+    // Tuesday, and the following Sunday: the week still starts on Monday the 23rd.
+    for today in [24, 29] {
+        assert_eq!(
+            on(today),
+            shared(window("0", "99835"), window("-57", "99887"))
+        );
+    }
+}
+
 /// P#1 loses 5016 on `ts`; P#2 is then opened on Tuesday with the full starting cash.
 fn loss_then_new_session(ts: &'static str) -> Vec<ReplayLine<'static>> {
     [
@@ -166,17 +261,29 @@ fn loss_then_new_session(ts: &'static str) -> Vec<ReplayLine<'static>> {
 }
 
 #[test]
-fn a_loss_follows_into_a_new_session_and_does_not_raise_the_base() {
-    let f = figures(&loss_then_new_session(TUE), 24, 2, "1").expect("figures");
-    assert_eq!(f.day, window("-5016", "100000"));
-    // Loss on Monday: the week still counts it.
-    let f = figures(&loss_then_new_session(MON), 24, 2, "1").expect("figures");
-    assert_eq!(f.week, window("-5016", "100000"));
-    // P1 formula: P#1 (94984 at Tuesday's start) has no line today, so only while it is active
-    // does it set the day base.
-    assert_eq!(f.day, window("0", "100000"));
-    let f = figures(&loss_then_new_session(MON), 24, 1, "1").expect("figures");
-    assert_eq!(f.day, window("0", "94984"));
+fn a_loss_today_follows_into_a_new_session() {
+    assert_eq!(
+        figures(&loss_then_new_session(TUE), 24, 2, "1"),
+        Ok(shared(window("-5016", "100000"), window("-5016", "100000")))
+    );
+}
+
+/// NOT a safety property: this pins P1 as written, under which the day base RISES from 94,984
+/// to 100,000 on switching. Hard condition on slice 4 (RISK-202-1, owner decision; see the F10
+/// record, Deferred). If the formula changes, the first assertion changes with it.
+#[test]
+fn p1_literal_base_drops_an_idle_session_after_an_earlier_day_loss() {
+    let lines = loss_then_new_session(MON);
+    let week = window("-5016", "100000");
+    assert_eq!(
+        figures(&lines, 24, 2, "1"),
+        Ok(shared(window("0", "100000"), week))
+    );
+    // While P#1 is active its own equity is the day base.
+    assert_eq!(
+        figures(&lines, 24, 1, "1"),
+        Ok(shared(window("0", "94984"), week))
+    );
 }
 
 #[test]
@@ -196,19 +303,29 @@ fn the_base_is_the_smallest_equity_of_active_and_traded_sessions() {
     // The starting cash caps a session that grew past it.
     let rich = opening(1, LAST_FRI, "250000");
     let f = figures(&rich, 24, 1, "1").expect("figures");
-    assert_eq!(f.day, window("0", "100000"));
+    assert_eq!(f, shared(window("0", "100000"), window("0", "100000")));
 }
 
 #[test]
 fn session_figures_are_kept_apart() {
-    let lines = loss_then_new_session(TUE);
-    let s = session_figures(&lines, day(24), id(2), marks("1")).expect("figures");
-    let one = s.get(id(1)).expect("P#1").day;
-    assert_eq!(
-        (one.realised, one.equity, one.has_lines),
-        (d("-5016"), d("100000"), true)
-    );
-    assert_eq!(s.get(id(2)).expect("P#2").day.realised, Decimal::ZERO);
+    // P#1 lost on Monday; P#2 sells half of today's buy and holds the rest.
+    let lines = [
+        loss_then_new_session(MON),
+        pair(2, TUE, "buy", "INFY", 10, "-1000", "-10"),
+        pair(2, TUE, "sell", "INFY", 5, "400", "-3"),
+    ]
+    .concat();
+    let s = session_figures(&lines, day(24), id(2), marks("90")).expect("figures");
+    let one = SessionFigures {
+        day: SessionWindow {
+            equity: d("94984"),
+            ..SessionWindow::default()
+        },
+        week: traded("-5016", "0", "100000"),
+    };
+    assert_eq!(s.get(id(1)), Some(&one));
+    let two = traded("-108", "-55", "100000");
+    assert_eq!(s.get(id(2)), Some(&both_windows(two)));
     assert_eq!(s.get(id(3)), None);
 }
 
@@ -261,6 +378,17 @@ fn a_line_backdated_within_its_session_is_refused() {
     assert_eq!(
         figures(&lines, 24, 1, "100"),
         Err(PnlError::DateOrder { line: 1 })
+    );
+    // Backdated against the latest line, not only against the opening.
+    let later = [
+        opening(1, LAST_FRI, "100000"),
+        pair(1, TUE, "buy", "INFY", 1, "-100", "-1"),
+        pair(1, MON, "buy", "INFY", 1, "-100", "-1"),
+    ]
+    .concat();
+    assert_eq!(
+        figures(&later, 24, 1, "100"),
+        Err(PnlError::DateOrder { line: 3 })
     );
 }
 
@@ -370,7 +498,7 @@ fn every_place_that_adds_up_enforces_the_bound() {
     let big = |session, n| round_trips(TUE, session, n, MAX_LINE_AMOUNT, Decimal::ONE);
     // Realised: 10,001 losses of about 1e11 in one session pass 1e15.
     assert_eq!(
-        figures(&big(1, 10_001), 24, 1, "1"),
+        session_figures(&big(1, 10_001), day(24), id(1), marks("1")),
         Err(PnlError::SumTooLarge)
     );
     // Two sessions, each inside the bound, pass it only when added together.
@@ -380,4 +508,62 @@ fn every_place_that_adds_up_enforces_the_bound() {
     // Cash at the window start: 10,001 gains of about 1e11 from before this week.
     let gains = round_trips(LAST_FRI, 1, 10_001, Decimal::ONE, MAX_LINE_AMOUNT);
     assert_eq!(figures(&gains, 24, 1, "1"), Err(PnlError::SumTooLarge));
+}
+
+/// One assertion per addition, so no later check can answer for an earlier one.
+#[test]
+fn each_addition_checks_the_bound_itself() {
+    let too_large = Err(PnlError::SumTooLarge);
+    let (one, today) = (Decimal::ONE, day(24));
+    let full = SessionWindow {
+        realised: MAX_SUM,
+        open_loss: -MAX_SUM,
+        equity: MAX_SUM,
+        has_lines: false,
+    };
+    // Window cash.
+    let mut w = full;
+    assert_eq!(w.line(LedgerKind::Opening, one, today, today), too_large);
+    // A buy's cost added back. Cash alone lands on the bound, so only the add-back can fail
+    // (from a start already past it).
+    let mut w = SessionWindow {
+        equity: MAX_SUM + one,
+        ..full
+    };
+    assert_eq!(w.line(LedgerKind::Buy, -one, day(23), today), too_large);
+    // Cost leaving a pool before the window.
+    let mut w = SessionWindow {
+        equity: -MAX_SUM,
+        ..full
+    };
+    assert_eq!(w.sale(one, one, day(23), today), too_large);
+    // Realised.
+    let mut w = full;
+    assert_eq!(w.sale(one, one, today, today), too_large);
+    // Open loss.
+    let mut w = full;
+    assert_eq!(w.holding(-one), too_large);
+    // Across sessions: realised, then open loss. In the first case the second session's open
+    // loss brings the total back inside the bound, so only the realised addition can fail.
+    for (realised, open_loss, then) in [
+        (MAX_SUM, Decimal::ZERO, (one, -one)),
+        (Decimal::ZERO, -MAX_SUM, (Decimal::ZERO, -one)),
+    ] {
+        let first = SessionWindow {
+            realised,
+            open_loss,
+            equity: one,
+            has_lines: true,
+        };
+        let second = SessionWindow {
+            realised: then.0,
+            open_loss: then.1,
+            ..first
+        };
+        let sessions = Sessions {
+            active: id(1),
+            by_session: [(id(1), both_windows(first)), (id(2), both_windows(second))].into(),
+        };
+        assert_eq!(shared_figures(&sessions, one), Err(PnlError::SumTooLarge));
+    }
 }
