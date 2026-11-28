@@ -452,6 +452,16 @@ fn a_pool_above_its_bounds_is_refused() {
     }
 }
 
+#[test]
+fn a_quantity_that_overflows_or_breaks_the_bound_is_a_typed_error() {
+    let huge = pair("buy", u32::MAX, "-1", "-1", 1);
+    refused(&huge, 1, LineFault::PoolTooLarge);
+
+    let mut lines = pair("buy", MAX_POOL_QTY, "-1", "-1", 1).to_vec();
+    lines.extend(pair("buy", u32::MAX - MAX_POOL_QTY + 1, "-1", "-1", 2));
+    refused(&lines, 3, LineFault::Pool(PoolError::Overflow));
+}
+
 /// One generated trade: pool picked by `slot`, a buy or a sale of part of what is held.
 #[derive(Debug, Clone, Copy)]
 struct Op {

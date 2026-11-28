@@ -195,10 +195,7 @@ fn parse(line: &ReplayLine<'_>, today: NaiveDate) -> Result<Parsed, LineFault> {
                 .ok_or(LineFault::MissingSymbol)?;
             let qty = line.qty.filter(|q| *q > 0).ok_or(LineFault::MissingQty)?;
             let label = line.product.ok_or(LineFault::MissingProduct)?;
-            let product = [Product::Cnc, Product::Mis, Product::Nrml]
-                .into_iter()
-                .find(|p| p.as_str() == label)
-                .ok_or(LineFault::UnknownProduct)?;
+            let product = Product::parse(label).ok_or(LineFault::UnknownProduct)?;
             Parsed::Trade(Trade {
                 is_buy: kind == LedgerKind::Buy,
                 key: PoolKey {
