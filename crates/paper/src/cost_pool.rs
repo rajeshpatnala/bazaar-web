@@ -5,7 +5,8 @@
 //! without charges, and the buy charges of the shares not yet sold. No average is stored or fed
 //! back. A sale's result is the money received after its charge, less the sold shares' cost and
 //! their share of the buy charges. These are weighted-average figures, not tax figures.
-//! Every failure is a [`PoolError`]; none is ever turned into a zero figure.
+//! Every failure is a [`PoolError`]; none is ever turned into a zero figure. [`replay`] builds the
+//! pools from ledger lines and bounds the amounts so that the arithmetic here stays exact.
 
 use std::fmt;
 use std::num::NonZeroU32;
@@ -193,6 +194,8 @@ impl Pool {
         })
     }
 }
+
+pub mod replay;
 
 #[cfg(test)]
 mod tests;
