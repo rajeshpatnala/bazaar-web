@@ -38,7 +38,7 @@ Plans follow the size the manager gave (`delivery-process` §2a). **One plan fil
   (roughly > 150 production lines each); smaller ones go in order to one developer, continued.
 - For each slice, fill failure modes, checklists and 3-5 `reject if` lines (1-2 under ~100 lines) from known-pitfalls, the
   checklists and `just plan`'s earlier findings.
-- **Plan review before you return it:** go through `just docs "plan checklist"` and write each case that applies as an
+- **Plan review before you return it:** go through the three plan-checklist sections (`just docs "delivery-process: Failure paths"`, `just docs "delivery-process: Controls that must be disabled"`, `just docs "delivery-process: Safety rules"`) and write each case that applies as an
   acceptance criterion (Given/When/Then) of the feature or the slice it belongs to (a "controls that must be disabled"
   case always does: approve, release, confirm). Don't hand the developer a checklist for it: the criteria are the
   requirements, and the final reviewers check against them.

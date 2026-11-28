@@ -29,6 +29,7 @@ Every PR that touches any of the following:
 ## Steps
 
 1. Run `just review-pack <pr>` once (diff, files, acceptance criteria, output path), then `config/risk.toml`, and look up exactly what you check against: `just docs "risk-guardian PR checklist"` and `just docs "DecisionGate rule catalogue"` (add `just docs "<topic>"` for any other rule the diff touches).
+   Must-read when the diff touches it: paper fills `just docs "bz-execution: What must NOT happen"`; broker, mode or live-trading code `just docs "bz-execution: Runtime lock beyond the feature flag"` and `just docs "bz-execution: Reconciliation"`; any gate refusal or override path `just docs "bz-backtest-risk: Overrides"`.
 2. Check every item on the `bz-trading-discipline` review checklist. In particular, confirm:
    - **The DecisionGate is unweakened.**
      - It still runs on every path to an `Executor`, including paper, and it re-runs at approval time with fresh prices.

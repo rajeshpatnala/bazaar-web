@@ -25,6 +25,7 @@ Every PR that touches the `indicators`, `options`, `regime`, `strategies`, `scan
 ## Steps
 
 1. Run `just review-pack <pr>` once (diff, files, acceptance criteria, output path) and the strategy spec in `docs/strategy/` if the PR implements one. Look up what you check against: `just docs "bz-quant: golden rules"`, `just docs "bz-quant: red flags"` and `just docs "bz-backtest-risk: golden rules"`, plus the formula or catalogue section for what changed (e.g. `just docs "greeks"`).
+   Must-read when the diff touches it: indicators or strategies `just docs "bz-quant: Warm-up and smoothing conventions"`; a new or changed reference-value test `just docs "bz-quant: Reference-value sources and fixture recipe"`; charges or the cost model `just docs "bz-backtest-risk: Computation order"`.
 2. Check:
    - **Look-ahead.**
      - Strategies and indicators only see bars up to the decision bar's close (or tick time).

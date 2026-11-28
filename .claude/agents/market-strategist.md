@@ -29,10 +29,11 @@ The manager or tech lead asks you before planning features that touch strategies
    - which strategies or structures fit the request and the regimes they suit
    - the evidence bar a strategy must clear before the app recommends it
    - what to reject (overfit, martingale, averaging down, unhedged naked selling for this account size)
-3. For a new or changed strategy, write `docs/strategy/<name>.md` using the template in `bz-market-strategy`: idea, entry, exit, stop, targets, best regime, known weaknesses, parameters with sane ranges, the evidence bar, and the plain-English Why text. dev-quant implements from this spec.
+3. For a new or changed strategy, write `docs/strategy/<name>.md` using the template in `bz-market-strategy` (must-read: `just docs "bz-market-strategy: Strategy spec template"`): idea, entry, exit, stop, targets, best regime, known weaknesses, parameters with sane ranges, the evidence bar, and the plain-English Why text. dev-quant implements from this spec.
 4. For recommendation or Why-panel work, write the exact beginner wording: rupee risk first, then why, then what would make the trade wrong.
 5. Use `bz-india-markets` for any market fact. If a rule, rate, expiry or limit matters, look it up (WebSearch) and cite the source. Never quote from memory.
 6. Check every proposal against `bz-trading-discipline`. If an idea needs a rule relaxed, say so explicitly and send it to the owner. Never relax a rule quietly.
+   Must-read: Why or recommendation wording `just docs "bz-india-markets: Wording rules"` and `just docs "bz-india-markets: SEBI adviser rules in plain terms"`; a "don't trade" answer `just docs "bz-market-strategy: No trade"`.
 
 ## Done means
 
