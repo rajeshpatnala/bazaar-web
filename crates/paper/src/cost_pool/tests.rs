@@ -170,7 +170,6 @@ fn overflow_is_a_typed_error_and_leaves_the_pool_unchanged() {
     }
     assert_eq!(full.open_loss(Decimal::ONE), Err(PoolError::Overflow));
     let two = Pool { qty: 3, ..full };
-    assert_eq!(two.open_loss(Decimal::MAX), Err(PoolError::Overflow));
     let mut p = Pool { qty: 3, ..full };
     assert_eq!(p.sell(2, d("1"), d("1")), Err(PoolError::Overflow));
     assert_eq!(p, two);
@@ -188,6 +187,19 @@ fn a_mark_that_is_not_positive_is_refused_never_zero() {
             Err(PoolError::BadMark)
         );
     }
+}
+
+#[test]
+fn a_mark_past_its_scale_or_amount_bound_is_refused() {
+    let p = pool(replay::MAX_POOL_QTY, "1000", "10");
+    // At both bounds (trailing zeros do not count) the mark is used.
+    for mark in ["100000000000", "0.0001", "0.00010000"] {
+        assert!(p.open_loss(d(mark)).is_ok(), "{mark}");
+    }
+    for mark in ["100000000000.0001", "0.00001"] {
+        assert_eq!(p.open_loss(d(mark)), Err(PoolError::MarkOutOfBounds));
+    }
+    assert_eq!(p.open_loss(Decimal::MAX), Err(PoolError::MarkOutOfBounds));
 }
 
 #[test]

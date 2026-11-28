@@ -14,6 +14,7 @@ pub mod account;
 pub mod cost_pool;
 pub mod executor;
 pub mod fill;
+pub mod pnl;
 pub mod reset_guard;
 pub mod squareoff;
 pub mod watch;

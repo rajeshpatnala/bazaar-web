@@ -147,7 +147,7 @@ struct Trade {
     amount: Decimal,
 }
 
-fn date_of(ts: &str, today: NaiveDate) -> Result<NaiveDate, LineFault> {
+pub(crate) fn date_of(ts: &str, today: NaiveDate) -> Result<NaiveDate, LineFault> {
     let date = DateTime::parse_from_rfc3339(ts)
         .ok()
         .filter(|_| ts.ends_with("+05:30"))

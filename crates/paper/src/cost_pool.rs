@@ -53,6 +53,8 @@ pub enum PoolError {
     Overflow,
     #[error("mark price is not positive")]
     BadMark,
+    #[error("mark price has too many fraction digits or is above its bound")]
+    MarkOutOfBounds,
 }
 
 /// The shares held in one pool.
@@ -131,10 +133,15 @@ impl Pool {
     /// nothing outside this pool.
     ///
     /// # Errors
-    /// `BadMark` for a mark that is not positive; `Overflow`.
+    /// `BadMark` for a mark that is not positive; `MarkOutOfBounds` past
+    /// [`replay::MAX_SCALE`] or [`replay::MAX_LINE_AMOUNT`] (past them the value may be rounded);
+    /// `Overflow`.
     pub fn open_loss(&self, mark: Decimal) -> Result<Decimal, PoolError> {
         if mark <= Decimal::ZERO {
             return Err(PoolError::BadMark);
+        }
+        if mark.normalize().scale() > replay::MAX_SCALE || mark > replay::MAX_LINE_AMOUNT {
+            return Err(PoolError::MarkOutOfBounds);
         }
         let value = mark
             .checked_mul(Decimal::from(self.qty))
