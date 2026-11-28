@@ -1285,6 +1285,48 @@ class ExportAndInstallSecretTests(Base):
         for f in self.DUMMIES:
             self.assertFalse((self.r.dir / f).exists(), f)
 
+    def test_installer_leaves_exactly_one_pair_of_claude_md_markers_however_often_it_runs(self):
+        mod = load_module("kit_installer_c", self.installer())
+        start, end = "<!-- agent-kit:start -->", "<!-- agent-kit:end -->"
+        old_start = "<!-- rust-agent-kit:start -->"
+        kit_guide = f"{start}\n{start}\n# Guide\n\nnew rules\n{end}\n{end}\n{end}\n"
+        stacked = {
+            "nested": f"{start}\n{start}\n# Guide\nold rules\n{end}\n{end}\n",
+            "spare end markers": f"{start}\n{start}\n{start}\n# Guide\nold rules\n{end}\n{end}\n\n{end}\n{end}\n",
+            "spare start marker": f"{start}\n{start}\n# Guide\nold rules\n{end}\n",
+            "legacy name": f"{old_start}\n# Guide\nold rules\n<!-- rust-agent-kit:end -->\n",
+        }
+        dst, src = self.r.dir / "CLAUDE.md", self.r.dir / "kit-claude.md"
+        src.write_text(kit_guide)
+        for label, block in stacked.items():
+            dst.write_text(f"my intro\n\n{block}\nmy own notes\n")
+            mod.merge_claude_md(dst, src)
+            once = dst.read_text()
+            mod.merge_claude_md(dst, src)
+            self.assertEqual(dst.read_text(), once, label)
+            self.assertEqual((once.count(start), once.count(end)), (1, 1), label)
+            self.assertEqual(once, f"my intro\n\n{start}\n# Guide\n\nnew rules\n{end}\nmy own notes\n", label)
+
+    def test_installer_wraps_a_new_claude_md_in_one_pair_of_markers(self):
+        src = pathlib.Path(tempfile.mkdtemp(prefix="kit-src-"))
+        self.addCleanup(shutil.rmtree, src, True)
+        shutil.copy2(self.installer(), src / "install.py")
+        (src / ".claude" / "kit").mkdir(parents=True)
+        (src / ".claude" / "kit" / "doctor.py").write_text("")
+        (src / "CLAUDE.md").write_text("<!-- agent-kit:start -->\n# Guide\n<!-- agent-kit:end -->\n")
+        res = subprocess.run([sys.executable, str(src / "install.py"), str(self.r.dir), "--force"],
+                             capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual((self.r.dir / "CLAUDE.md").read_text(),
+                         "<!-- agent-kit:start -->\n# Guide\n<!-- agent-kit:end -->\n")
+
+    def test_the_projects_claude_md_has_one_pair_of_markers(self):
+        f = REPO / "CLAUDE.md"
+        if not f.exists():
+            self.skipTest("no CLAUDE.md here")
+        lines = f.read_text().splitlines()
+        self.assertEqual([lines.count("<!-- agent-kit:start -->"), lines.count("<!-- agent-kit:end -->")], [1, 1])
+
     def test_installer_backs_up_settings_and_lists_what_it_adds(self):
         mod = load_module("kit_installer_m", self.installer())
         mine = {"env": {"A": "old"}, "permissions": {"allow": ["Bash(ls:*)"]}}
@@ -1709,7 +1751,7 @@ class ContextTests(Base):
 
     def test_recipes_with_free_text_arguments_never_paste_them_into_the_shell(self):
         text = (REPO / "justfile").read_text()
-        for name in ("codemap", "section", "new-branch", "promote", "feature"):
+        for name in ("codemap", "section", "new-branch", "promote", "feature", "cli-fixture"):
             m = re.search(rf"(?m)^{name}(?: [^:\n]*)?:.*\n((?:[ \t]+.*\n)+)", text)
             self.assertTrue(m, f"no recipe {name}")
             self.assertNotIn("{{", m.group(1), name)
@@ -1727,6 +1769,59 @@ class ContextTests(Base):
                      ("feature", "$(touch pwned)")):
             self.just(*args)
             self.assertFalse((self.r.dir / "pwned").exists(), args)
+
+    @unittest.skipUnless(shutil.which("just"), "just is not installed")
+    def test_cli_fixture_passes_each_argument_through_as_plain_text(self):
+        self.justfile_repo()
+        fake = pathlib.Path(tempfile.mkdtemp(prefix="kit-fake-cargo-"))
+        self.addCleanup(shutil.rmtree, fake, True)
+        (fake / "cargo").write_text('#!/bin/sh\nfor a in "$@"; do printf "[%s]\\n" "$a"; done\n')
+        (fake / "cargo").chmod(0o755)
+        sent = ["backtest", "--note", "two words; touch pwned", "$(touch pwned)", "`touch pwned`"]
+        r = subprocess.run(["just", "cli-fixture", *sent], cwd=self.r.dir, capture_output=True, text=True,
+                           env=dict(os.environ, PATH=f"{fake}{os.pathsep}{os.environ['PATH']}"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        got = r.stdout.splitlines()
+        self.assertEqual(got[-len(sent):], [f"[{a}]" for a in sent])
+        self.assertIn("[fixtures/config]", got)
+        self.assertFalse((self.r.dir / "pwned").exists())
+
+    def test_section_refuses_a_markdown_file_in_a_secrets_folder(self):
+        self.r.write("secrets/notes.md", "# Head\nHIDDEN-VALUE\n")
+        self.r.write("docs/Secrets/deep/notes.md", "# Head\nHIDDEN-VALUE\n")
+        os.symlink(self.r.dir / "secrets" / "notes.md", self.r.dir / "link.md")
+        paths = ("secrets/notes.md", str(self.r.dir / "docs/Secrets/deep/notes.md"), "link.md")
+        for path in paths:
+            for words in ((), ("head",)):
+                rc, out = self.r.kit("section", path, *words)
+                self.assertNotEqual(rc, 0, out)
+                self.assertIn("section refused", out)
+                self.assertNotIn("HIDDEN-VALUE", out)
+                self.assertNotIn("(line ", out)
+        self.r.write("docs/secrets.md", "# Head\nplain-body\n")  # only a folder of that name is refused
+        rc, out = self.r.kit("section", "docs/secrets.md", "head")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("plain-body", out)
+
+    def test_review_paths_name_both_sides_of_a_move_and_count_only_the_edit(self):
+        kit = load_module("kit_stats", KIT / "kit.py")
+        self.r.write("src/old.rs", "".join(f"line {i}\n" for i in range(20)))
+        self.r.commit("chore: file")
+        self.r.git("switch", "-q", "-c", "feat/F1-move", "develop")
+        self.r.git("mv", "src/old.rs", "src/new.rs")
+        with (self.r.dir / "src/new.rs").open("a") as f:
+            f.write("added\n")
+        self.r.commit("refactor: move")
+        kit.ROOT = self.r.dir
+        self.assertEqual(sorted(kit.diff_stats("develop", "feat/F1-move"), key=lambda r: r[2]),
+                         [(1, 0, "src/new.rs"), (0, 0, "src/old.rs")])
+
+    def test_only_markdown_in_the_note_archive_counts_as_a_record(self):
+        self.r.branch("docs/archive-script", {".agents/archive/run.sh": "echo hi\n"})
+        rc, out = self.r.kit("review-plan", "--branch", "docs/archive-script", "--feature", "F1")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("manager records only", out)
+        self.assertIn("code", out)
 
     def test_owner_rules_skip_agents_that_do_not_decide_app_behaviour(self):
         self.r.write(".agents/owner-rules.md", "- Paper mode is the default.\n")

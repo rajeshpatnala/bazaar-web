@@ -96,7 +96,7 @@ You are the **manager** of an AI delivery team building Bazaar Rust web trading 
 ## Board
 
 Update `.agents/board.md` after every state change (task, size, agent, branch/PR, status, blocker). Next-step text
-<= 200 characters; details go in the feature record. Over ~30 finished rows, `just board-archive`. When you write a new handoff or recommendations file, `just archive-notes` moves the older ones to `.agents/archive/`.
+<= 200 characters; details go in the feature record. Over ~30 finished rows, `just board-archive`. When you write a new handoff or recommendations file, `just archive-notes` keeps the newest handoff and `recommendations.md` and moves older handoffs to `.agents/archive/`; all dated recommendations are archived when `recommendations.md` exists, otherwise the newest one stays.
 **Owner actions:** anything only the user can do (a repository setting, an approval, a secret in `.env`) goes in the
 board's "Owner actions" list as `- [ ] <what> (<where>) - since <date>`; mention it once, tick it when done.
 `just status` lists the open ones each session, so they are never rediscovered. On a fresh session with unfinished items, summarise them (with budget used) and ask whether

@@ -720,15 +720,18 @@ def _md_heads(lines: list) -> list:
 
 def section_path(name: str) -> tuple:
     """(resolved file, path to show) for `section`, or exit. Only a .md file inside this checkout or the main one
-    (where agent worktrees live). Links are resolved first, so a .md link can't point elsewhere. Refused before the
-    file is opened."""
+    (where agent worktrees live), and nothing under a secrets folder. Links are resolved first, so a .md link can't
+    point elsewhere. Refused before the file is opened."""
     f = pathlib.Path(name)
     f = (f if f.is_absolute() else ROOT / f).resolve()
     if f.suffix.lower() == ".md":
         for base in (ROOT.resolve(), main_root().resolve()):
             if f.is_relative_to(base):
-                return f, f.relative_to(base)
-    sys.exit(f"kit: section refused: {name} is not a .md file inside the repo")
+                rel = f.relative_to(base)
+                if "secrets" in (part.lower() for part in rel.parts[:-1]):
+                    break
+                return f, rel
+    sys.exit(f"kit: section refused: {name} is not a .md file inside the repo, outside any secrets folder")
 
 
 def section_cmd(argv: list) -> int:
@@ -809,7 +812,7 @@ LIGHT_GLOBS = ["docs/**", "**/*.md", "*.md", "**/*.rst", "**/*.txt", "LICENSE*",
 # The manager's own notes: they change all the time and only describe the work, so they merge through a records PR
 # (`just records-pr`) without reviewers. Settings (team.md, stack.json), owner rules, templates and scripts are not here.
 RECORD_GLOBS = [".agents/board.md", ".agents/decisions.md", ".agents/recommendations*.md", ".agents/reports/**",
-                ".agents/project.md", ".agents/codemap.md", ".agents/codemap/**", ".agents/archive/**", "docs/owner-input/**", ".agents/owner-input/**",
+                ".agents/project.md", ".agents/codemap.md", ".agents/codemap/**", ".agents/archive/*.md", "docs/owner-input/**", ".agents/owner-input/**",
                 ".agents/handoff*.md"]
 
 
@@ -831,22 +834,23 @@ def pr_refs(info: dict) -> tuple:
 
 
 def diff_stats(base: str, head: str) -> list:
-    """(added, deleted, path) per changed path. A rename gives two rows with real paths, so review rules see both
-    sides: the new path carries the line counts (size is that of the edit), the old path 0/0. Never `old => new`:
-    a `**` record or docs glob would match that whole string."""
-    out = []
-    fields = iter(git("diff", "--numstat", "-z", "--find-renames", f"{base}...{head}").split("\0"))
+    """(added, deleted, path) per changed path. The paths come from `--name-only --no-renames`, so the records, docs
+    and sensitive checks see both sides of a move and never `old => new` (a `**` record or docs glob would match that
+    whole string). numstat gives the size only, with rename detection: the new path of a move carries the lines of the
+    edit, the old path 0/0."""
+    rng = f"{base}...{head}"
+    sizes = {}
+    fields = iter(git("diff", "--numstat", "-z", "--find-renames", rng).split("\0"))
     for line in fields:
         if not line:
             continue
         a, d, path = line.split("\t", 2)
-        old = ""
         if not path:  # rename: "a<TAB>d<TAB>" NUL old NUL new
-            old, path = next(fields), next(fields)
-        out.append((int(a) if a.isdigit() else 0, int(d) if d.isdigit() else 0, path))
-        if old:
-            out.append((0, 0, old))
-    return out
+            next(fields)
+            path = next(fields)
+        sizes[path] = (int(a) if a.isdigit() else 0, int(d) if d.isdigit() else 0)
+    names = git("diff", "--name-only", "-z", "--no-renames", rng).split("\0")
+    return [(*sizes.get(p, (0, 0)), p) for p in names if p]
 
 
 # Files that count as changed but are not reviewed line by line: lockfiles, snapshots, generated code, build output.

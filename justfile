@@ -352,7 +352,7 @@ cli-fixture *args:
     set -euo pipefail
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
-    cargo run -q -p bazaar-cli -- --config-dir fixtures/config --data-dir "$tmp" {{args}}
+    cargo run -q -p bazaar-cli -- --config-dir fixtures/config --data-dir "$tmp" "$@"
 
 # golden backtest regression against committed baselines
 golden:

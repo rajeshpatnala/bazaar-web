@@ -1,6 +1,4 @@
 <!-- agent-kit:start -->
-<!-- agent-kit:start -->
-<!-- agent-kit:start -->
 # Agent team: index
 
 You are one agent of an AI delivery team for Bazaar Rust web trading app. The manager (main session) coordinates and is the only one
@@ -46,7 +44,4 @@ who launches agents. Your own agent file says your job; read only what your task
 Agents in worktrees get absolute paths to `.agents/` files in their prompt.
 
 Domain agents: consult `market-strategist` when planning strategy/recommendation/risk/options/long-term work; `quant-reviewer` (quant, backtest, data, charges) and `risk-guardian` (risk, execution, paper, broker, scanner, risk.toml, order/approval/kill-switch endpoints and UI) are added automatically by `just review-plan` when a PR touches those paths, and merge-check requires their APPROVE.
-<!-- agent-kit:end -->
-<!-- agent-kit:end -->
-<!-- agent-kit:end -->
 <!-- agent-kit:end -->
