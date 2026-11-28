@@ -127,7 +127,7 @@ jobs:
           node -e "if(!require('./package.json').packageManager){console.log('::error::add packageManager (e.g. pnpm@10.x) to web/package.json; pnpm/action-setup needs it');process.exit(1)}"
           test -f .nvmrc || { echo '::error::add web/.nvmrc with the Node major (setup-node reads it)'; exit 1; }
       - if: hashFiles('web/package.json') != ''
-        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with: { package_json_file: web/package.json }
       - if: hashFiles('web/package.json') != ''
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
@@ -210,7 +210,7 @@ jobs:
       - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != '' && hashFiles('web/src/api/schema.d.ts') != ''
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != '' && hashFiles('web/src/api/schema.d.ts') != ''
-        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with: { package_json_file: web/package.json }
       - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != '' && hashFiles('web/src/api/schema.d.ts') != ''
         name: regenerate UI types and fail on drift
