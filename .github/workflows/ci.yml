@@ -40,7 +40,7 @@ jobs:
       full: ${{ steps.scope.outputs.full }}
       packages: ${{ steps.scope.outputs.packages }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0 }
       - id: scope
         env:
@@ -62,7 +62,7 @@ jobs:
     if: needs.changes.outputs.rust == 'yes'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - if: hashFiles('Cargo.toml') != ''
         name: install pinned system DuckDB (version from Cargo.toml, sha256-checked)
         run: sh scripts/install-duckdb.sh linux-amd64
@@ -88,7 +88,7 @@ jobs:
     if: needs.changes.outputs.rust == 'yes'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - if: hashFiles('Cargo.toml') != ''
         name: install pinned system DuckDB (version from Cargo.toml, sha256-checked)
         run: sh scripts/install-duckdb.sh linux-amd64
@@ -120,7 +120,7 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - if: hashFiles('web/package.json') != ''
         name: pinned tool versions (packageManager, .nvmrc)
         run: |
@@ -160,7 +160,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: install pinned system DuckDB (version from Cargo.toml, sha256-checked)
         run: sh scripts/install-duckdb.sh osx-universal
       - if: hashFiles('Cargo.toml') != ''
@@ -179,7 +179,7 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0 }
       - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3
         env:
@@ -188,7 +188,7 @@ jobs:
   deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - if: hashFiles('Cargo.lock') != ''
         uses: EmbarkStudios/cargo-deny-action@17aeb3c839e42274e2b8adf721c8c65edfdc74dd # v2
 
@@ -201,7 +201,7 @@ jobs:
     if: needs.changes.outputs.rust == 'yes' || needs.changes.outputs.web == 'yes'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - if: hashFiles('crates/server/Cargo.toml') != '' && hashFiles('web/package.json') != '' && hashFiles('web/src/api/schema.d.ts') != ''
         name: install pinned system DuckDB (version from Cargo.toml, sha256-checked)
         run: sh scripts/install-duckdb.sh linux-amd64
